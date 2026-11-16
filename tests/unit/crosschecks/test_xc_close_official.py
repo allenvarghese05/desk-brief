@@ -168,7 +168,15 @@ def test_current_unfinished_date_is_excluded(store: LocalBackend, config: Config
 
 def test_every_instrument_with_both_feeds_gets_a_row(store: LocalBackend, config: Config) -> None:
     out = run(store, config)
-    assert set(out) == {
-        "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "USO", "BNO", "GLD", "SHY", "IEF", "TLT",
-    }  # fmt: skip
+    # restricted to crosschecks.iex_vs_sip.symbols: T14 fetches SIP bars only for those
+    assert set(out) == set(config.crosschecks.iex_vs_sip.symbols)
+    assert set(out) == {"SPY", "QQQ", "IWM", "GLD", "TLT"}
     assert {r.status for r in out.values()} == {DQStatus.SKIP}
+
+
+def test_instruments_outside_the_sip_symbol_list_are_not_compared(
+    store: LocalBackend, config: Config
+) -> None:
+    # AAPL has sip_bars_1m and stooq feeds, but T14 never fetches its SIP bars
+    put(store, config, [sip_bar("AAPL", LAST_BAR, 100.0), stooq_close("AAPL", 100.0)])
+    assert "AAPL" not in run(store, config)

@@ -443,7 +443,11 @@ def _crashed_check_result(ctx: RunContext, name: str, exc: Exception) -> XResult
         warn_bps=warn,
         fail_bps=fail,
         status=DQStatus.SKIP,
-        details={"reason": f"check raised {type(exc).__name__}: {exc}"},
+        details={
+            "reason": f"check raised {type(exc).__name__}: {exc}",
+            "error": True,  # tells a crashed check apart from a calendar/missing-side skip
+            "error_type": type(exc).__name__,
+        },
     )
 
 

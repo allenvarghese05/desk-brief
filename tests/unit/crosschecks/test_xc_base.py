@@ -5,6 +5,7 @@ SYNTHETIC FIXTURE: all data is made up.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -176,8 +177,6 @@ def test_runner_returns_valid_frames_and_mirrors_dq_rows(
     assert len(xdf) == len(ddf) == 4  # one row per configured pair, skips included
     assert set(ddf["check_type"]) == {CheckType.CONSISTENCY.value}
     # same ids link the mirrored rows to their cross-check rows, same status, same instrument
-    import json
-
     by_x = xdf.set_index("result_id")
     for _, d in ddf.iterrows():
         x = by_x.loc[json.loads(d["details_json"])["crosscheck_result_id"]]
@@ -235,6 +234,11 @@ def test_a_crashing_check_is_isolated_as_a_skip_row(
     assert len(boom) == 1
     assert boom.iloc[0]["status"] == "skip"
     assert "RuntimeError: synthetic failure" in boom.iloc[0]["details_json"]
+    details = json.loads(boom.iloc[0]["details_json"])
+    assert details["error"] is True  # distinguishable from a calendar / missing-side skip
+    assert details["error_type"] == "RuntimeError"
+    ok = xdf[xdf["check_name"] == "official_pair"].iloc[0]
+    assert "error" not in json.loads(ok["details_json"])
     assert (xdf["check_name"] == "official_pair").sum() == 4  # the other check still ran
     validate("crosscheck_results", xdf)
     validate("dq_results", ddf)

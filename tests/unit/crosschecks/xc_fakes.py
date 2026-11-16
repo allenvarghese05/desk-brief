@@ -138,7 +138,7 @@ def yahoo_tick(inst: str, symbol: str, at: datetime, value: float, **over: Any) 
 
 
 def td_bar(
-    inst: str, symbol: str, start: datetime, value: float, field: str = "mid", **over: Any
+    inst: str, symbol: str, start: datetime, value: float, field: str = "close", **over: Any
 ) -> dict[str, Any]:
     return obs(
         instrument_id=inst, source="twelvedata", dataset="fx_series_1m", symbol=symbol, tier=1,

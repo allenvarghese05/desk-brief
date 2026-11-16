@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from xc_fakes import (
     CLOSE_FRI,
+    EARLY_NOW,
     NOW,
     duck_for,
     make_ctx,
@@ -146,23 +147,58 @@ def test_every_equity_and_fx_member_gets_a_row_even_with_no_data(
     store: LocalBackend, config: Config
 ) -> None:
     out = run(store, config)
-    equities = {
-        "SPY",
-        "QQQ",
-        "IWM",
-        "AAPL",
-        "MSFT",
-        "NVDA",
-        "USO",
-        "BNO",
-        "GLD",
-        "SHY",
-        "IEF",
-        "TLT",
-    }
-    assert set(out) == equities | {"EURUSD", "GBPUSD", "USDJPY"}
+    # equities are restricted to crosschecks.iex_vs_sip.symbols (T14 fetches SIP bars only there)
+    assert config.crosschecks.iex_vs_sip.symbols == ("SPY", "QQQ", "IWM", "GLD", "TLT")
+    assert set(out) == {"SPY", "QQQ", "IWM", "GLD", "TLT", "EURUSD", "GBPUSD", "USDJPY"}
     assert {r.status for r in out.values()} == {DQStatus.SKIP}
     assert all("reason" in r.details for r in out.values())
+
+
+def test_equities_outside_the_sip_symbol_list_are_not_compared(
+    store: LocalBackend, config: Config
+) -> None:
+    # AAPL has both a yahoo and an alpaca sip_bars_1m feed but T14 never fetches its SIP bars
+    put(store, config, [yahoo_tick("AAPL", "AAPL", TICK, 100.0), sip_bar("AAPL", MIN, 100.0)])
+    assert "AAPL" not in run(store, config)
+
+
+def test_ticks_after_the_session_close_are_ignored(store: LocalBackend, config: Config) -> None:
+    after_hours = datetime(2026, 11, 13, 21, 5, tzinfo=UTC)  # 16:05 ET, closing prints
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", TICK, 100.0),
+            yahoo_tick("SPY", "SPY", after_hours, 150.0),
+            sip_bar("SPY", MIN, 100.0),
+            sip_bar("SPY", minutes(after_hours, 0), 150.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.left_value == pytest.approx(100.0)
+    assert r.status is DQStatus.PASS
+    assert r.details["session_close_utc"] == CLOSE_FRI.isoformat()
+
+
+def test_early_close_session_ignores_ticks_after_13_00_et(
+    store: LocalBackend, config: Config
+) -> None:
+    before = datetime(2026, 11, 27, 17, 59, 30, tzinfo=UTC)  # 12:59:30 ET
+    after = datetime(2026, 11, 27, 20, 59, 40, tzinfo=UTC)  # 15:59:40 ET, after the early close
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", before, 100.0),
+            yahoo_tick("SPY", "SPY", after, 200.0),
+            sip_bar("SPY", datetime(2026, 11, 27, 17, 59, tzinfo=UTC), 100.0),
+            sip_bar("SPY", datetime(2026, 11, 27, 20, 59, tzinfo=UTC), 200.0),
+        ],
+    )
+    r = run(store, config, target=EARLY_NOW.date(), now=EARLY_NOW)["SPY"]
+    assert r.left_value == pytest.approx(100.0)
+    assert r.status is DQStatus.PASS
+    assert r.details["ref_date"] == "2026-11-27"
 
 
 # -- FX vs Twelve Data ---------------------------------------------------------------------
@@ -202,18 +238,17 @@ def test_fx_warn_and_fail(store: LocalBackend, config: Config) -> None:
     assert out["GBPUSD"].status is DQStatus.FAIL
 
 
-def test_fx_prefers_mid_over_close(store: LocalBackend, config: Config) -> None:
+def test_fx_uses_twelve_data_close_field(store: LocalBackend, config: Config) -> None:
     put(
         store,
         config,
         [
             yahoo_tick("EURUSD", "EURUSD=X", TICK, 1.0800, unit="fx_rate"),
-            td_bar("EURUSD", "EUR/USD", MIN, 1.0800, field="mid"),
-            td_bar("EURUSD", "EUR/USD", MIN, 1.2000, field="close"),
+            td_bar("EURUSD", "EUR/USD", MIN, 1.0800),
         ],
     )
     r = run(store, config)["EURUSD"]
-    assert r.details["right"]["field"] == "mid"
+    assert r.details["right"]["field"] == "close"
     assert r.status is DQStatus.PASS
 
 
@@ -221,7 +256,68 @@ def test_fx_missing_twelve_data_is_skip(store: LocalBackend, config: Config) -> 
     put(store, config, [yahoo_tick("USDJPY", "JPY=X", TICK, 150.0, unit="fx_rate")])
     r = run(store, config)["USDJPY"]
     assert r.status is DQStatus.SKIP
-    assert "twelvedata" in r.details["reason"]
+    assert "no twelvedata/fx_series_1m bars" in r.details["reason"]
+
+
+# Realistic layout: Twelve Data bars only in the ECB-fix window (14:15 CET = 13:15Z in winter,
+# bars 13:05-13:25Z), Yahoo ticks spread through the day.
+FIX_BARS = [datetime(2026, 11, 13, 13, m, tzinfo=UTC) for m in range(5, 26)]
+
+
+def _spread_ticks(extra: list[datetime]) -> list[dict[str, object]]:
+    base = [datetime(2026, 11, 13, h, mi, 12, tzinfo=UTC) for h in range(6, 21) for mi in (0, 30)]
+    return [
+        yahoo_tick("EURUSD", "EURUSD=X", t, 1.0800 + i * 1e-5, unit="fx_rate")
+        for i, t in enumerate(sorted({*base, *extra}))
+    ]
+
+
+def test_fx_anchors_on_twelve_data_bars_matched(store: LocalBackend, config: Config) -> None:
+    near_fix = datetime(2026, 11, 13, 13, 15, 40, tzinfo=UTC)  # inside the bar window
+    put(
+        store,
+        config,
+        [
+            *_spread_ticks([near_fix]),
+            *[td_bar("EURUSD", "EUR/USD", b, 1.0800) for b in FIX_BARS],
+        ],
+    )
+    r = run(store, config)["EURUSD"]
+    assert r.status is not DQStatus.SKIP
+    assert r.at_time == near_fix
+    assert r.details["right"]["as_of"] == datetime(2026, 11, 13, 13, 15, tzinfo=UTC).isoformat()
+    assert r.details["minute_offset"] == 0
+    assert r.details["n_twelvedata_bars"] == len(FIX_BARS)
+    assert r.details["n_yahoo_ticks"] > 20  # the latest tick of the day is NOT what is compared
+
+
+def test_fx_anchors_on_twelve_data_bars_unmatched(store: LocalBackend, config: Config) -> None:
+    # ticks at hh:00:12 / hh:30:12 only: the nearest to the 13:05-13:25 bars is 13:00:12 (5 min off)
+    put(
+        store,
+        config,
+        [*_spread_ticks([]), *[td_bar("EURUSD", "EUR/USD", b, 1.0800) for b in FIX_BARS]],
+    )
+    r = run(store, config)["EURUSD"]
+    assert r.status is DQStatus.SKIP
+    assert r.details["reason"] == "no Yahoo tick within ±1m of the ECB-fix bars"
+    assert r.diff_bps is None
+    assert r.details["n_twelvedata_bars"] == len(FIX_BARS)
+
+
+def test_fx_adjacent_minute_tick_matches_with_offset(store: LocalBackend, config: Config) -> None:
+    tick = datetime(2026, 11, 13, 13, 4, 50, tzinfo=UTC)  # minute 13:04; first bar starts 13:05
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("EURUSD", "EURUSD=X", tick, 1.0800, unit="fx_rate"),
+            *[td_bar("EURUSD", "EUR/USD", b, 1.0800) for b in FIX_BARS],
+        ],
+    )
+    r = run(store, config)["EURUSD"]
+    assert r.status is DQStatus.PASS
+    assert r.details["minute_offset"] == 1
 
 
 def test_current_unfinished_date_is_excluded(store: LocalBackend, config: Config) -> None:

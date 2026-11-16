@@ -1,6 +1,8 @@
 """``close_vs_official``: Alpaca SIP last 1m bar before the close vs the Stooq daily close.
 
-For each instrument with both an ``alpaca/sip_bars_1m`` and a ``stooq/daily`` feed, on the last
+Members: instruments in ``crosschecks.iex_vs_sip.symbols`` that have both an
+``alpaca/sip_bars_1m`` and a ``stooq/daily`` feed (the Alpaca source, T14, fetches SIP bars only
+for those symbols, so the other equities would skip every day). Evaluated on the last
 completed XNYS session before today (P-009; reading ``obs_pit``):
 
 * left  = SIP ``close`` of the 1m bar *ending* at the session close, i.e. the bar starting one
@@ -54,12 +56,13 @@ class CloseVsOfficial:
             ctx, duck, source="stooq", dataset="daily", interval="1d",
             start=d_start, end=d_end, fields=("close",),
         )  # fmt: skip
+        wanted = set(cfg.crosschecks.iex_vs_sip.symbols)
         sip_ids = {i.id for i, _ in cfg.feeds_for("alpaca", "sip_bars_1m")}
         stooq_ids = {i.id for i, _ in cfg.feeds_for("stooq", "daily")}
         early = is_early_close(ref)
         out: list[XResult] = []
         for inst in cfg.instruments:
-            if inst.id not in sip_ids or inst.id not in stooq_ids:
+            if inst.id not in wanted or inst.id not in sip_ids or inst.id not in stooq_ids:
                 continue
             s_obs = pick_by_field((o for o in sip if o.instrument_id == inst.id), ("close",))
             o_obs = pick_by_field((o for o in stooq if o.instrument_id == inst.id), ("close",))
