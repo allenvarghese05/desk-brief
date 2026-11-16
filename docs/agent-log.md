@@ -18,3 +18,8 @@ How the project was built: one entry per card / review round. Real run incidents
 - Went wrong: nothing significant; `UnsupportedProtocol` is a `TransportError` in httpx, so it would have been retried pointlessly until it got its own branch. Ruff's PT018 flags `assert a and b`, so the test file opts out with a file-level noqa rather than editing pyproject (not owned).
 - Decisions: retry loop is hand-rolled instead of tenacity so sleep/clock injection and Retry-After stay explicit. Disabled sources are skipped by the registry (no `FetchStatus` fits "disabled"); the client also refuses to send for one. Each attempt, retries included, consumes one budget unit. Redirects are not followed so secret params cannot leak to another host. A Retry-After above 120 s stops retrying instead of waiting. Burst defaults to 1 token (strict spacing) for free-tier providers.
 - Review rounds: pending.
+
+## 2026-11-15 · T04 Market calendars · implementer (sonnet-5.5)
+- Did: `calendars.py` (is_business_day, prev/next_business_day, business_days, session_bounds_utc, is_early_close) for XNYS and SIFMA_US via pandas_market_calendars and TARGET via explicit rules (own Easter computation); per-(calendar, year) caches; 27 unit tests.
+- Went wrong: nothing significant; ruff PT018 on a compound assert.
+- Decisions: SIFMA_US exists in pandas_market_calendars 5.6.1 so it is used as-is; SIFMA recommended early closes count as business days. TARGET has no library equivalent, so explicit rules. `is_early_close(d, cal="XNYS")` takes an optional calendar. `datetime` args raise TypeError.
