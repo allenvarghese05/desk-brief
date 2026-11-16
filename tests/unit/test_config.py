@@ -136,3 +136,116 @@ def test_cli_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([str(_write(tmp_path, bad))]) == 1
     assert "INVALID" in capsys.readouterr().err
     assert main([str(tmp_path / "missing.yaml")]) == 1
+
+
+# --- review round 1 additions ------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        # official without tier-3 feed
+        (
+            lambda d: next(g for g in d["groups"] if g["id"] == "gold").update(official="GOLD_F"),
+            "tier-3",
+        ),
+        # inverse_duration needs a yield
+        (
+            lambda d: next(g for g in d["groups"] if g["id"] == "ust_10y").update(exact="SPY"),
+            "must be a yield",
+        ),
+        (lambda d: d["crosschecks"]["official_pair"]["pairs"].append(["DGS99", "10 Yr"]), "DGS99"),
+        (lambda d: d["crosschecks"]["official_pair"]["pairs"].append(["DGS10", "99 Yr"]), "99 Yr"),
+        (lambda d: d["datasets"].append(d["datasets"][0]), "duplicate datasets"),
+        (
+            lambda d: d["datasets"].append({**d["datasets"][0], "dataset": "nothing"}),
+            "no instrument feed",
+        ),
+        (lambda d: next(i for i in d["instruments"] if i["id"] == "USO").pop("label"), "label"),
+        (
+            lambda d: next(i for i in d["instruments"] if i["id"] == "EURUSD").update(unit="USD"),
+            "fx_rate",
+        ),
+        (
+            lambda d: next(i for i in d["instruments"] if i["id"] == "UST_2Y").update(unit="USD"),
+            "unit pct",
+        ),
+        (
+            lambda d: next(i for i in d["instruments"] if i["id"] == "SPY").update(unit="pct"),
+            "unit USD",
+        ),
+        (lambda d: d["checks"]["validity"].pop("fx_rate"), "no range"),
+        (lambda d: d["report"].update(headline_instruments=["VIX", "VIX"]), "duplicate"),
+        (lambda d: d["instruments"][0]["feeds"][0].update(tier=True), "integer"),
+        (lambda d: d["instruments"][0]["feeds"][0].update(tier=1.0), "integer"),
+        # same provider symbol used by two instruments
+        (
+            lambda d: next(i for i in d["instruments"] if i["id"] == "QQQ")["feeds"].append(
+                {"source": "alpaca", "dataset": "iex_latest", "symbol": "SPY", "tier": 1}
+            ),
+            "used by both",
+        ),
+        (lambda d: d["crosschecks"]["iex_vs_sip"].update(symbols=["AAPL"]), "iex_bars_1m"),
+        (
+            lambda d: next(i for i in d["instruments"] if i["id"] == "EURUSD").update(
+                feeds=[
+                    f
+                    for f in next(i for i in d["instruments"] if i["id"] == "EURUSD")["feeds"]
+                    if f["source"] != "ecb"
+                ]
+            ),
+            "no ecb feed",
+        ),
+    ],
+)
+def test_more_invalid_configs(tmp_path: Path, mutate: Any, message: str) -> None:
+    data = _raw()
+    mutate(data)
+    with pytest.raises(ValueError, match=message):
+        load_config(_write(tmp_path, data))
+
+
+def test_duplicate_yaml_keys_rejected(tmp_path: Path) -> None:
+    text = REAL.read_text() + "\ninstruments: []\n"
+    p = tmp_path / "dup.yaml"
+    p.write_text(text)
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_config(p)
+
+
+def test_env_override_storage_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert load_config(REAL).storage.backend == "local"
+    monkeypatch.setenv("DESKBRIEF_STORAGE_BACKEND", "r2")
+    assert load_config(REAL).storage.backend == "r2"
+    monkeypatch.setenv("DESKBRIEF_STORAGE_BACKEND", "s3")
+    with pytest.raises(ValueError, match="backend"):
+        load_config(REAL)
+
+
+def test_feed_index_reverse_lookup() -> None:
+    cfg = load_config(REAL)
+    idx = cfg.feed_index("ecb", "eurofxref")
+    assert set(idx) == {"EURUSD", "GBPUSD", "USDJPY"}
+    inst, feed = idx["GBPUSD"]
+    assert (inst.id, feed.tier) == ("GBPUSD", 3)
+    assert cfg.feed_index("treasury", "par_curve")["10 Yr"][0].id == "UST_10Y"
+
+
+def test_spec_universe_details() -> None:
+    cfg = load_config(REAL)
+    groups = {g.id: g for g in cfg.groups}
+    assert (groups["oil_wti"].proxy, groups["oil_wti"].exact) == ("USO", "WTI")
+    assert (groups["ust_2y"].proxy, groups["ust_2y"].official) == ("SHY", "UST_2Y")
+    assert (groups["ust_long"].proxy, groups["ust_long"].official) == ("TLT", "UST_20Y")
+    assert cfg.instrument("DFF").feeds[0].symbol == "DFF"
+    assert {i.id for i in cfg.instruments if i.is_proxy} == {
+        "SPY",
+        "USO",
+        "BNO",
+        "GLD",
+        "SHY",
+        "IEF",
+        "TLT",
+    }
+    # every iex_vs_sip symbol has both IEX and SIP minute bars
+    for sym in cfg.crosschecks.iex_vs_sip.symbols:
+        datasets = {f.dataset for f in cfg.instrument(sym).feeds}
+        assert {"iex_bars_1m", "sip_bars_1m"} <= datasets

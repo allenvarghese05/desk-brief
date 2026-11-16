@@ -4,6 +4,26 @@ CONTRACT FILE. Changing anything here needs a labeled ``contract:`` PR.
 
 Every object written by the pipeline goes through one of the key builders below, so the
 layout lives in exactly one place. Backends (local filesystem, Cloudflare R2) only move bytes.
+
+Partition-date rules (the ``date=`` segment), fixed here so every writer agrees:
+
+==================  ==========================================================
+raw                 UTC date of ``ingested_at`` (derived inside ``raw_key``)
+observations        ET date of ``as_of`` (``deskbrief.timeutil.et_date``)
+quarantine          ET date of ``detected_at``
+source_log          ET date of ``requested_at``
+dq_results          ``target_date`` of the run
+crosscheck_results  ``target_date`` of the run
+revisions           ET date of ``detected_at``
+alerts              ``target_date`` of the run
+runs                ``target_date`` of the run
+scorecard_daily     the ET date being scored
+==================  ==========================================================
+
+``as_of`` semantics (also documented in ``deskbrief.schemas``): ``tick`` = the trade/quote
+instant; ``1m`` = bar **start** instant; ``1d`` = 00:00 America/New_York on the reference
+date; ``1mo`` = 00:00 America/New_York on the first day of the reference month. So
+``et_date(as_of)`` is always the reference date.
 """
 
 from __future__ import annotations
@@ -62,7 +82,7 @@ SERVING_PREFIX = "serving"
 REPORTS_PREFIX = "reports"
 CLEAN_CURRENT_KEY = f"{CLEAN_PREFIX}/_CURRENT"
 
-_SEGMENT = re.compile(r"^[A-Za-z0-9_.\-]+$")
+_SEGMENT = re.compile(r"^(?!\.+$)[A-Za-z0-9_.\-]+$")  # no "." / ".." segments
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 #: Where each table lives. Clean tables are under the current clean version.
@@ -77,6 +97,9 @@ TABLE_LAYER: dict[str, str] = {
     "runs": DERIVED_PREFIX,
 }
 
+#: Tables written as one file per date (overwritten), not one file per run.
+DAILY_TABLES: dict[str, str] = {"scorecard_daily": DERIVED_PREFIX}
+
 
 def _seg(value: str, what: str) -> str:
     if not _SEGMENT.match(value):
@@ -84,24 +107,29 @@ def _seg(value: str, what: str) -> str:
     return value
 
 
-def raw_key(
-    *, source: str, dataset: str, part_date: date, ingested_at: datetime, sha256: str, ext: str
-) -> str:
-    """Key for an immutable raw provider response.
+def _date_only(d: date, what: str) -> date:
+    if isinstance(d, datetime):
+        raise TypeError(f"{what} must be a date, not a datetime")
+    return d
+
+
+def raw_key(*, source: str, dataset: str, ingested_at: datetime, sha256: str, ext: str) -> str:
+    """Key for an immutable raw provider response; partition = UTC date of ``ingested_at``.
 
     ``raw/source={src}/dataset={ds}/date={YYYY-MM-DD}/{ingested_at:%Y%m%dT%H%M%S%fZ}_{sha[:12]}.{ext}``
     """
     if not _SHA256.match(sha256):
         raise ValueError("sha256 must be 64 lowercase hex chars")
-    stamp = ensure_utc(ingested_at).strftime("%Y%m%dT%H%M%S%fZ")
+    utc = ensure_utc(ingested_at)
     return (
         f"{RAW_PREFIX}/source={_seg(source, 'source')}/dataset={_seg(dataset, 'dataset')}"
-        f"/date={part_date.isoformat()}/{stamp}_{sha256[:12]}.{_seg(ext, 'ext')}"
+        f"/date={utc.date().isoformat()}/{utc.strftime('%Y%m%dT%H%M%S%fZ')}_{sha256[:12]}"
+        f".{_seg(ext, 'ext')}"
     )
 
 
 def raw_meta_key(raw: str) -> str:
-    """Sidecar metadata key for a raw object key."""
+    """Sidecar metadata key: the raw key with ``.meta.json`` appended (``x.json.meta.json``)."""
     if not raw.startswith(f"{RAW_PREFIX}/"):
         raise ValueError(f"not a raw key: {raw!r}")
     return f"{raw}.meta.json"
@@ -116,6 +144,7 @@ def table_key(*, table: str, part_date: date, run_id: str, clean_version: str = 
     layer = TABLE_LAYER.get(table)
     if layer is None:
         raise ValueError(f"unknown table {table!r}; known: {sorted(TABLE_LAYER)}")
+    _date_only(part_date, "part_date")
     tail = f"{table}/date={part_date.isoformat()}/run={_seg(run_id, 'run_id')}.parquet"
     if layer == CLEAN_PREFIX:
         return f"{CLEAN_PREFIX}/{_seg(clean_version, 'clean_version')}/{tail}"
@@ -124,6 +153,8 @@ def table_key(*, table: str, part_date: date, run_id: str, clean_version: str = 
 
 def table_prefix(table: str, clean_version: str = "v1") -> str:
     """Prefix under which all partitions of ``table`` live (for globbing / listing)."""
+    if table in DAILY_TABLES:
+        return f"{DAILY_TABLES[table]}/{table}/"
     layer = TABLE_LAYER.get(table)
     if layer is None:
         raise ValueError(f"unknown table {table!r}")
@@ -133,10 +164,12 @@ def table_prefix(table: str, clean_version: str = "v1") -> str:
 
 
 def scorecard_key(part_date: date) -> str:
+    _date_only(part_date, "part_date")
     return f"{DERIVED_PREFIX}/scorecard_daily/date={part_date.isoformat()}.parquet"
 
 
 def budget_key(source: str, part_date: date) -> str:
+    _date_only(part_date, "part_date")
     return f"{LOGS_PREFIX}/budget/{_seg(source, 'source')}/date={part_date.isoformat()}.json"
 
 
@@ -146,6 +179,7 @@ def serving_key(name: str) -> str:
 
 
 def report_key(report_date: date, version: int, filename: str) -> str:
+    _date_only(report_date, "report_date")
     if version < 1:
         raise ValueError("report version starts at 1")
     return f"{REPORTS_PREFIX}/date={report_date.isoformat()}/v{version}/{_seg(filename, 'file')}"

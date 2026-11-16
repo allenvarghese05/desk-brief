@@ -74,17 +74,7 @@ def test_raw_response_ok_and_latency() -> None:
     assert not not_2xx.ok
 
 
-def test_raw_response_rejects_bad_times_and_attempts() -> None:
-    with pytest.raises(ValueError, match="before"):
-        RawResponse(
-            request=_req(),
-            fetch_id="f",
-            requested_at=T0,
-            responded_at=T0 - timedelta(seconds=1),
-            http_status=200,
-            content_type="",
-            body=b"",
-        )
+def test_raw_response_rejects_bad_attempts() -> None:
     with pytest.raises(ValueError, match="attempts"):
         RawResponse(
             request=_req(),
@@ -154,3 +144,83 @@ def test_enums_are_strings() -> None:
     assert JobKind("eod") is JobKind.EOD
     assert str(DQStatus.FAIL) == "fail"
     assert {c.value for c in CheckType} >= {"freshness", "consistency", "reconciliation"}
+
+
+# --- review round 1 additions ------------------------------------------------------------
+from deskbrief.models import FetchStatus  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["apikey", "api_key", "token", "APCA-API-SECRET-KEY", "auth"])
+def test_fetch_request_rejects_secret_params(name: str) -> None:
+    with pytest.raises(ValueError, match="secret"):
+        FetchRequest(source="x", dataset="y", params={name: "v"})
+
+
+def test_fetch_request_target_date_must_be_date() -> None:
+    with pytest.raises(TypeError, match="date"):
+        FetchRequest(source="x", dataset="y", target_date=T0)  # type: ignore[arg-type]
+
+
+def _resp(**kw: object) -> RawResponse:
+    base: dict[str, object] = {
+        "request": _req(),
+        "fetch_id": "f",
+        "requested_at": T0,
+        "responded_at": T0,
+        "http_status": 200,
+        "content_type": "text/csv",
+        "body": b"x",
+    }
+    base.update(kw)
+    return RawResponse(**base)  # type: ignore[arg-type]
+
+
+def test_fetch_status_derivation() -> None:
+    assert _resp().fetch_status is FetchStatus.OK
+    assert _resp(body=b"").fetch_status is FetchStatus.EMPTY
+    assert _resp(http_status=429).fetch_status is FetchStatus.RATE_LIMITED
+    assert _resp(http_status=500).fetch_status is FetchStatus.ERROR
+    assert _resp(http_status=None, error="timeout").fetch_status is FetchStatus.ERROR
+    skipped = _resp(http_status=None, body=b"", status=FetchStatus.BUDGET_EXHAUSTED)
+    assert skipped.fetch_status is FetchStatus.BUDGET_EXHAUSTED
+    assert not skipped.ok
+    provider_err = _resp(status=FetchStatus.ERROR, error="status=error in 200 body")
+    assert not provider_err.ok
+
+
+def test_clock_skew_is_clamped_not_raised() -> None:
+    r = _resp(responded_at=T0 - timedelta(seconds=2))
+    assert r.latency_ms == 0
+
+
+def test_result_ids_generated_and_details_json() -> None:
+    a = DQResult(
+        run_id="r",
+        check_name="c",
+        check_type=CheckType.VALIDITY,
+        target_date=date(2026, 11, 16),
+        evaluated_at=T0,
+        status=DQStatus.FAIL,
+        details={"b": 1, "a": T0},
+    )
+    b = DQResult(
+        run_id="r",
+        check_name="c",
+        check_type=CheckType.VALIDITY,
+        target_date=date(2026, 11, 16),
+        evaluated_at=T0,
+        status=DQStatus.FAIL,
+    )
+    assert a.result_id
+    assert b.result_id
+    assert a.result_id != b.result_id
+    assert a.details_json().startswith('{"a":"2026-11-16')
+    with pytest.raises(TypeError, match="date"):
+        DQResult(
+            run_id="r",
+            check_name="c",
+            check_type=CheckType.VALIDITY,
+            target_date=T0,
+            evaluated_at=T0,
+            status=DQStatus.FAIL,  # type: ignore[arg-type]
+        )

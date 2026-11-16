@@ -62,7 +62,7 @@ def test_redact_helpers() -> None:
     assert redact_text("api_key: XYZ987", []) == f"api_key: {MASK}"
     assert redact_text("token=abc&x=1") == f"token={MASK}&x=1"
     assert redact_value(["key_id=zzz", 5]) == [f"key_id={MASK}", 5]
-    assert redact_value(("a",)) == ("a",)
+    assert redact_value(("a",)) == ["a"]
     assert redact_value({"password": ""}, key=None) == {"password": ""}
     assert redact_value(None, key="token") is None
 
@@ -74,3 +74,67 @@ def test_level_filtering() -> None:
     get_logger().warning("shown")
     assert "hidden" not in buf.getvalue()
     assert "shown" in buf.getvalue()
+
+
+# --- review round 1: redaction bypasses found by probing ---------------------------------
+import logging as stdlib_logging  # noqa: E402
+from urllib.parse import quote_plus  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("text", "leak"),
+    [
+        ("Authorization: Bearer abcDEF123456", "abcDEF123456"),
+        ("bearer abcDEF123456", "abcDEF123456"),
+        ("Cookie: session=abcdef; other=1", "session=abcdef"),
+        ("https://user:hunter2pass@example.com/x", "hunter2pass"),
+        ('{"apikey": "JSONSECRET1"}', "JSONSECRET1"),
+        ("https://x?api%5Fkey=ENCODED123", "ENCODED123"),
+        ("https://x?q=apikey%3DENCODED456", "ENCODED456"),
+    ],
+)
+def test_redaction_bypasses_closed(text: str, leak: str) -> None:
+    assert leak not in redact_text(text)
+
+
+def test_url_encoded_env_secret_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "s3cr3t/with+chars="  # gitleaks:allow (fake test value)
+    monkeypatch.setenv("TWELVEDATA_API_KEY", secret)
+    line = _log_line(note=f"x?k={quote_plus(secret)}")
+    assert quote_plus(secret) not in json.dumps(line)
+    assert secret not in json.dumps(line)
+
+
+def test_non_string_values_redacted() -> None:
+    exc = RuntimeError("GET https://api.twelvedata.com/q?apikey=EXCSECRET9 failed")
+    line = _log_line(err=exc, raw=b"token=BYTESECRET9", s={"apikey=SETSECRET9"})
+    dumped = json.dumps(line)
+    for leak in ("EXCSECRET9", "BYTESECRET9", "SETSECRET9"):
+        assert leak not in dumped
+
+
+def test_dataclass_values_redacted() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class Thing:
+        url: str
+
+    line = _log_line(obj=Thing(url="https://x?token=DCSECRET99"))
+    assert "DCSECRET99" not in json.dumps(line)
+
+
+def test_stdlib_and_httpx_logs_redacted_and_capped() -> None:
+    buf = io.StringIO()
+    configure_logging(stream=buf)
+    stdlib_logging.getLogger("thirdparty").warning("calling https://x?apikey=STDSECRET1")
+    stdlib_logging.getLogger("httpx").info("HTTP Request: GET https://x?apikey=HTTPXSECRET")
+    out = buf.getvalue()
+    assert "STDSECRET1" not in out
+    assert f"apikey={MASK}" in out
+    assert "HTTPXSECRET" not in out  # httpx INFO is suppressed entirely
+    configure_logging(stream=buf)  # idempotent: no duplicate handlers
+    handlers = [
+        h for h in stdlib_logging.getLogger().handlers if type(h).__name__ == "_RedactedHandler"
+    ]
+    assert len(handlers) == 1

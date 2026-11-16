@@ -5,6 +5,7 @@ Status: v1, 2026-11-15. Source of truth for task order. Spec: `docs/specs/2026-1
 Rules that apply to every card:
 - One card → one branch (`t{id}-{slug}`) → one PR. Target ≤ ~400 changed lines excluding fixtures/lockfile.
 - A card may only touch files in its **Owns** list (+ its own tests and fixtures). Anything else → stop, ask the planner.
+- `config.yaml` *values* are not contracts: a source card may add or adjust feeds/datasets **for its own source** (disclose in the PR). Other config edits go through the planner.
 - **Contracts** (frozen after Phase 0): `models.py`, `schemas.py`, `sources/base.py`, `store/backend.py` public API, `config.py` models, storage key layout (§6), table schemas (§7.2), Excel table names (§9.2). Changing one needs a planner-approved `contract:` PR merged first.
 - TDD: failing test first. No network in unit tests. Synthetic data only under `tests/`, labeled.
 - Definition of done for every card: acceptance criteria met, `make ci` green locally and in CI, reviewer APPROVE, `docs/agent-log.md` entry appended.
@@ -148,7 +149,7 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Owns:** `sources/stooq.py`, `sources/cboe.py` + tests. Day-1 probe decides: if Stooq is blocked/needs key, implement with `enabled: false` in config and document; Yahoo daily close becomes T3 fallback with `is_fallback=true` (implemented in T16; T13 only sets config `enabled: false` — no code dependency on T16). Cboe VIX history CSV → `VIX` close.
 
 #### T14 — Alpaca source
-- **Owns:** `sources/alpaca.py` + tests (synthetic fixtures). Datasets: `iex_latest` (latest trade + quote, multi-symbol), `iex_bars_1m`, `sip_bars_1m` (window must end ≥16 min before now — enforce and test), `daily_bars`. Pagination via `next_page_token`. Acceptance: SIP window guard; pagination; headers never logged.
+- **Owns:** `sources/alpaca.py` + tests (synthetic fixtures). Datasets: `iex_latest` (latest trade + quote, multi-symbol), `iex_bars_1m`, `sip_bars_1m` (window must end ≥16 min before now — enforce and test). (`daily_bars` dropped in T01 review: daily closes come from Stooq/Yahoo.) Pagination via `next_page_token`. Acceptance: SIP window guard; pagination; headers never logged.
 
 #### T15 — Twelve Data source
 - **Owns:** `sources/twelvedata.py` + tests (synthetic fixtures). `fx_quote` batch for 3 pairs; `fx_series_1m` for a window (ECB fix ±10 min). Budget enforced via T03 tracker. Error payloads with HTTP 200 (`{"status":"error"}`) map to `status=error`.

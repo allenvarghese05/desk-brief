@@ -63,3 +63,17 @@ def test_new_id_is_unique_and_sortable_length() -> None:
     ids = {new_id() for _ in range(100)}
     assert len(ids) == 100
     assert all(len(i) == 26 for i in ids)
+
+
+def test_dst_gap_and_overlap_are_deterministic() -> None:
+    # 2026-03-08 02:30 ET does not exist; 2026-11-01 01:30 ET happens twice.
+    gap = et_to_utc(date(2026, 3, 8), "02:30")
+    overlap = et_to_utc(date(2026, 11, 1), "01:30")
+    assert gap.tzinfo == UTC
+    assert overlap.tzinfo == UTC
+    assert overlap == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)  # first occurrence (EDT)
+
+
+def test_parse_hhmm_rejects_non_ascii_digits() -> None:
+    with pytest.raises(ValueError, match="HH:MM"):
+        parse_hhmm("\u0660\u0667:\u0660\u0660")

@@ -26,7 +26,7 @@ T = datetime(2026, 11, 16, 11, 15, 3, 123456, tzinfo=UTC)
 
 
 def test_raw_key_layout() -> None:
-    k = raw_key(source="fred", dataset="series", part_date=D, ingested_at=T, sha256=SHA, ext="json")
+    k = raw_key(source="fred", dataset="series", ingested_at=T, sha256=SHA, ext="json")
     assert (
         k
         == "raw/source=fred/dataset=series/date=2026-11-16/20261116T111503123456Z_aaaaaaaaaaaa.json"
@@ -36,14 +36,13 @@ def test_raw_key_layout() -> None:
 
 def test_raw_key_rejects_bad_input() -> None:
     with pytest.raises(ValueError, match="sha256"):
-        raw_key(source="fred", dataset="s", part_date=D, ingested_at=T, sha256="xyz", ext="json")
+        raw_key(source="fred", dataset="s", ingested_at=T, sha256="xyz", ext="json")
     with pytest.raises(ValueError, match="source"):
-        raw_key(source="../etc", dataset="s", part_date=D, ingested_at=T, sha256=SHA, ext="json")
+        raw_key(source="../etc", dataset="s", ingested_at=T, sha256=SHA, ext="json")
     with pytest.raises(ValueError, match="naive"):
         raw_key(
             source="fred",
             dataset="s",
-            part_date=D,
             ingested_at=T.replace(tzinfo=None),
             sha256=SHA,
             ext="json",
@@ -126,3 +125,33 @@ def test_protocol_is_runtime_checkable() -> None:
     assert mem.get_bytes("raw/a") == b"1"
     with pytest.raises(KeyNotFoundError):
         mem.get_bytes("raw/b")
+
+
+def test_raw_partition_is_utc_date_of_ingest() -> None:
+    late = datetime(2026, 11, 17, 2, 0, tzinfo=UTC)  # still Nov 16 in New York
+    k = raw_key(source="ecb", dataset="eurofxref", ingested_at=late, sha256=SHA, ext="csv")
+    assert "/date=2026-11-17/" in k
+
+
+@pytest.mark.parametrize("bad", [".", "..", "...", "a/b", ""])
+def test_traversal_segments_rejected(bad: str) -> None:
+    with pytest.raises(ValueError, match="segment"):
+        serving_key(bad)
+    with pytest.raises(ValueError, match="segment"):
+        report_key(D, 1, bad)
+
+
+def test_datetime_is_not_a_partition_date() -> None:
+    with pytest.raises(TypeError, match="date"):
+        table_key(table="runs", part_date=T, run_id="R")
+    with pytest.raises(TypeError):
+        scorecard_key(T)
+    with pytest.raises(TypeError):
+        budget_key("x", T)
+    with pytest.raises(TypeError):
+        report_key(T, 1, "brief.html")
+
+
+def test_scorecard_prefix() -> None:
+    assert table_prefix("scorecard_daily") == "derived/scorecard_daily/"
+    assert scorecard_key(D).startswith(table_prefix("scorecard_daily"))

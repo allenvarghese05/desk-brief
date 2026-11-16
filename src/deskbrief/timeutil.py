@@ -7,12 +7,14 @@ edges, through the helpers below.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 CET = ZoneInfo("Europe/Berlin")  # ECB publishes in Frankfurt local time
+_HHMM = re.compile(r"[0-9]{2}:[0-9]{2}")  # ASCII digits only
 
 Clock = Callable[[], datetime]
 """A zero-arg callable returning aware UTC now. Inject a fake in tests."""
@@ -42,10 +44,9 @@ def et_date(dt: datetime) -> date:
 
 def parse_hhmm(value: str) -> time:
     """Parse ``"HH:MM"`` (24h) into a ``time``. Raises ``ValueError`` on bad input."""
-    parts = value.split(":")
-    if len(parts) != 2 or not all(p.isdigit() and len(p) == 2 for p in parts):
+    if not _HHMM.fullmatch(value):
         raise ValueError(f"expected HH:MM, got {value!r}")
-    hh, mm = int(parts[0]), int(parts[1])
+    hh, mm = int(value[:2]), int(value[3:])
     return time(hh, mm)  # time() validates ranges
 
 

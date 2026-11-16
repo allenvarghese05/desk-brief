@@ -10,19 +10,40 @@ Every source implements three steps:
   (except the lineage columns, which the runner fills in: see ``RUNNER_FILLED_COLUMNS``)
 
 Because ``parse`` is pure, any raw file can be replayed through a fixed parser.
+
+Rules every source follows:
+
+* Construction: ``SourceClass(config)``. The registry (card T03) builds sources this way, so
+  ``plan`` and ``parse`` resolve symbols to instruments via
+  ``config.feed_index(source, dataset)`` -> ``{symbol: (Instrument, Feed)}``; ``tier``,
+  ``unit`` and ``scale`` come from there, never hard-coded.
+* ``parse`` returns rows only for configured instruments (extra provider rows, e.g. raw ECB
+  EUR/GBP used to derive GBPUSD, stay in the raw file). Derived values set ``is_derived``.
+* A legitimately empty response (holiday, no new data) -> ``empty_frame("parsed_observations")``.
+* A malformed/unexpected payload -> raise :class:`ParseError`; the runner quarantines the fetch
+  and records a DQ failure. Never return partial garbage.
+* Apply ``Feed.scale`` before returning values.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Protocol, runtime_checkable
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import pandas as pd
 
 from deskbrief.models import FetchRequest, JobKind, RawResponse, RunContext
 
+if TYPE_CHECKING:
+    from deskbrief.config import Config
+
 #: Columns the runner adds after parse (lineage); parsers must not set them.
+#: ``ingested_at`` = ``RawResponse.responded_at``.
 RUNNER_FILLED_COLUMNS: tuple[str, ...] = ("fetch_id", "run_id", "ingested_at", "parser_version")
+
+
+class ParseError(Exception):
+    """Raised by ``Source.parse`` when a payload is malformed or not what was expected."""
 
 
 @runtime_checkable
@@ -56,3 +77,7 @@ class Source(Protocol):
     def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse: ...
 
     def parse(self, raw: RawResponse) -> pd.DataFrame: ...
+
+
+#: How the registry constructs a source.
+SourceFactory = Callable[["Config"], Source]

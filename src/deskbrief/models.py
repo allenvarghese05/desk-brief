@@ -6,6 +6,8 @@ All datetimes are timezone-aware UTC; constructors reject naive values.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -13,6 +15,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
+from deskbrief.ids import new_id
 from deskbrief.timeutil import ensure_utc
 
 if TYPE_CHECKING:
@@ -70,8 +73,17 @@ class CheckType(StrEnum):
     RECONCILIATION = "reconciliation"
 
 
+_SECRET_PARAM = re.compile(
+    r"(api[_-]?key|apikey|token|secret|password|passwd|auth|key[_-]?id|access[_-]?key)", re.I
+)
+
+
 def _frozen_map(m: Mapping[str, str]) -> Mapping[str, str]:
     return MappingProxyType(dict(m))
+
+
+def _json(details: Mapping[str, Any]) -> str:
+    return json.dumps(dict(details), sort_keys=True, default=str, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -86,6 +98,14 @@ class FetchRequest:
     window: tuple[datetime, datetime] | None = None  # UTC, [start, end)
 
     def __post_init__(self) -> None:
+        bad = [k for k in self.params if _SECRET_PARAM.search(k)]
+        if bad:
+            raise ValueError(
+                f"FetchRequest.params must not carry secrets ({bad}); "
+                "pass them to HttpClient.get(secret_params=...)"
+            )
+        if isinstance(self.target_date, datetime):
+            raise TypeError("target_date must be a date, not a datetime")
         object.__setattr__(self, "params", _frozen_map(self.params))
         if self.window is not None:
             start, end = (ensure_utc(self.window[0]), ensure_utc(self.window[1]))
@@ -96,7 +116,13 @@ class FetchRequest:
 
 @dataclass(frozen=True)
 class RawResponse:
-    """Exactly what came back (or why nothing did). ``body`` is stored byte-for-byte in raw/."""
+    """Exactly what came back (or why nothing did). ``body`` is stored byte-for-byte in raw/.
+
+    ``status`` is set explicitly only when no request was made or the outcome isn't visible in
+    the HTTP status (``budget_exhausted``, ``skipped_calendar``, provider error inside a 200);
+    otherwise :attr:`fetch_status` derives it. ``responded_at`` becomes the ``ingested_at`` of
+    every observation parsed from this response.
+    """
 
     request: FetchRequest
     fetch_id: str
@@ -108,18 +134,36 @@ class RawResponse:
     error: str | None = None
     attempts: int = 1
     url_redacted: str | None = None
+    status: FetchStatus | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "requested_at", ensure_utc(self.requested_at))
-        object.__setattr__(self, "responded_at", ensure_utc(self.responded_at))
-        if self.responded_at < self.requested_at:
-            raise ValueError("responded_at before requested_at")
+        req_at = ensure_utc(self.requested_at)
+        resp_at = ensure_utc(self.responded_at)
+        object.__setattr__(self, "requested_at", req_at)
+        # clock skew must not crash a fetch; clamp so latency is never negative
+        object.__setattr__(self, "responded_at", max(resp_at, req_at))
         if self.attempts < 1:
             raise ValueError("attempts must be >= 1")
 
     @property
     def ok(self) -> bool:
-        return self.error is None and self.http_status is not None and 200 <= self.http_status < 300
+        return (
+            self.status in (None, FetchStatus.OK, FetchStatus.EMPTY)
+            and self.error is None
+            and self.http_status is not None
+            and 200 <= self.http_status < 300
+        )
+
+    @property
+    def fetch_status(self) -> FetchStatus:
+        """Status recorded in ``source_log``."""
+        if self.status is not None:
+            return self.status
+        if self.http_status == 429:
+            return FetchStatus.RATE_LIMITED
+        if not self.ok:
+            return FetchStatus.ERROR
+        return FetchStatus.EMPTY if not self.body else FetchStatus.OK
 
     @property
     def latency_ms(self) -> int:
@@ -162,10 +206,15 @@ class DQResult:
     observed: float | None = None
     threshold: float | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
-    result_id: str = ""
+    result_id: str = field(default_factory=new_id)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evaluated_at", ensure_utc(self.evaluated_at))
+        if isinstance(self.target_date, datetime):
+            raise TypeError("target_date must be a date, not a datetime")
+
+    def details_json(self) -> str:
+        return _json(self.details)
 
 
 @dataclass(frozen=True)
@@ -190,9 +239,14 @@ class XResult:
     fail_bps: float
     status: DQStatus
     details: Mapping[str, Any] = field(default_factory=dict)
-    result_id: str = ""
+    result_id: str = field(default_factory=new_id)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "at_time", ensure_utc(self.at_time))
         if self.fail_bps < self.warn_bps:
             raise ValueError("fail_bps must be >= warn_bps")
+        if isinstance(self.target_date, datetime):
+            raise TypeError("target_date must be a date, not a datetime")
+
+    def details_json(self) -> str:
+        return _json(self.details)

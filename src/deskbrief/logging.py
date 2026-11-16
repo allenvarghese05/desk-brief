@@ -22,6 +22,7 @@ import re
 import sys
 from collections.abc import Iterable, Mapping, MutableMapping
 from typing import Any, TextIO
+from urllib.parse import quote, quote_plus, unquote_plus
 
 import structlog
 
@@ -42,14 +43,21 @@ SECRET_ENV_VARS: tuple[str, ...] = (
 )
 
 _SECRET_KEY_RE = re.compile(
-    r"(api[_-]?key|apikey|token|secret|password|passwd|authorization|key[_-]?id|access[_-]?key)",
+    r"(api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie|key[_-]?id"
+    r"|access[_-]?key)",
     re.IGNORECASE,
+)
+_NAMES = (
+    r"api[_-]?key|apikey|token|secret|password|passwd|key[_-]?id|access[_-]?key"
+    r"|APCA-API-KEY-ID|APCA-API-SECRET-KEY"
 )
 _INLINE_RE = re.compile(
-    r"(?P<name>api[_-]?key|apikey|token|secret|password|key[_-]?id|access[_-]?key"
-    r"|APCA-API-KEY-ID|APCA-API-SECRET-KEY)(?P<sep>\s*[=:]\s*)(?P<val>[^&\s,;\"']+)",
+    rf"(?P<name>{_NAMES})(?P<q1>[\"']?)(?P<sep>\s*[=:]\s*)(?P<q2>[\"']?)(?P<val>[^&\s,;\"'}}]+)",
     re.IGNORECASE,
 )
+_BEARER_RE = re.compile(r"\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE)
+_HEADER_LINE_RE = re.compile(r"\b(authorization|cookie|set-cookie)(\s*:\s*)[^\r\n]+", re.I)
+_USERINFO_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)
 
 
 def _env_secrets(names: Iterable[str]) -> list[str]:
@@ -59,25 +67,56 @@ def _env_secrets(names: Iterable[str]) -> list[str]:
 
 
 def redact_text(text: str, env_secrets: Iterable[str] = ()) -> str:
-    """Mask inline ``name=value`` secrets and any literal secret values in ``text``."""
-    out = _INLINE_RE.sub(lambda m: f"{m.group('name')}{m.group('sep')}{MASK}", text)
-    for secret in env_secrets:
-        out = out.replace(secret, MASK)
+    """Mask secrets in free text.
+
+    Covers ``name=value`` / ``"name": "value"`` pairs (also URL-encoded), ``Bearer``/``Basic``
+    tokens, ``Authorization``/``Cookie`` header lines, ``user:pass@`` in URLs, and the literal
+    (or URL-encoded) values of known secret env vars. If anything inside a URL-encoded form was
+    masked, the decoded, masked form is returned (safety over fidelity).
+    """
+    secrets = list(env_secrets)
+
+    def _mask(t: str) -> str:
+        t = _USERINFO_RE.sub(lambda m: f"{m.group(1)}{MASK}@", t)
+        t = _HEADER_LINE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", t)
+        t = _BEARER_RE.sub(lambda m: f"{m.group(1)} {MASK}", t)
+        t = _INLINE_RE.sub(
+            lambda m: f"{m.group('name')}{m.group('q1')}{m.group('sep')}{m.group('q2')}{MASK}", t
+        )
+        for secret in secrets:
+            for form in (secret, quote(secret, safe=""), quote_plus(secret)):
+                t = t.replace(form, MASK)
+        return t
+
+    out = _mask(text)
+    if "%" in out:
+        decoded = unquote_plus(out)
+        masked_decoded = _mask(decoded)
+        if masked_decoded != decoded:
+            return masked_decoded
     return out
 
 
 def redact_value(value: Any, env_secrets: Iterable[str] = (), key: str | None = None) -> Any:
-    """Recursively redact a log value. Secret-looking keys have their whole value masked."""
+    """Recursively redact a log value. Secret-looking keys have their whole value masked.
+
+    Non-JSON-native values (exceptions, bytes, sets, dataclasses, ...) are converted to text
+    and redacted, so the JSON renderer never falls back to an unredacted ``repr()``.
+    """
     secrets = list(env_secrets)
     if key is not None and _SECRET_KEY_RE.search(key) and value not in (None, ""):
         return MASK
+    if value is None or isinstance(value, bool | int | float):
+        return value
     if isinstance(value, str):
         return redact_text(value, secrets)
+    if isinstance(value, bytes | bytearray):
+        return redact_text(bytes(value).decode("utf-8", errors="replace"), secrets)
     if isinstance(value, Mapping):
-        return {k: redact_value(v, secrets, key=str(k)) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return type(value)(redact_value(v, secrets) for v in value)
-    return value
+        return {str(k): redact_value(v, secrets, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [redact_value(v, secrets) for v in value]
+    return redact_text(repr(value) if not isinstance(value, BaseException) else str(value), secrets)
 
 
 def redact_processor(
@@ -88,6 +127,25 @@ def redact_processor(
     for k in list(event_dict):
         event_dict[k] = redact_value(event_dict[k], secrets, key=None if k == "event" else k)
     return event_dict
+
+
+class RedactingFilter(_stdlib_logging.Filter):
+    """stdlib logging filter: redacts the fully formatted message of third-party loggers."""
+
+    def filter(self, record: _stdlib_logging.LogRecord) -> bool:
+        msg = redact_text(record.getMessage(), _env_secrets(SECRET_ENV_VARS))
+        record.msg, record.args = msg, None
+        if record.exc_info:
+            record.exc_text = redact_text(
+                _stdlib_logging.Formatter().formatException(record.exc_info),
+                _env_secrets(SECRET_ENV_VARS),
+            )
+            record.exc_info = None
+        return True
+
+
+#: Third-party loggers that print full request URLs at INFO/DEBUG.
+NOISY_LOGGERS: tuple[str, ...] = ("httpx", "httpcore", "urllib3", "botocore", "yfinance")
 
 
 def configure_logging(level: str = "INFO", stream: TextIO | None = None) -> None:
@@ -107,6 +165,22 @@ def configure_logging(level: str = "INFO", stream: TextIO | None = None) -> None
         logger_factory=structlog.PrintLoggerFactory(file=stream or sys.stderr),
         cache_logger_on_first_use=False,
     )
+    # stdlib/third-party logs: WARNING+ only for noisy libraries, and always redacted
+    root = _stdlib_logging.getLogger()
+    existing = [h for h in root.handlers if isinstance(h, _RedactedHandler)]
+    if existing:
+        existing[0].setStream(stream or sys.stderr)
+    else:
+        handler = _RedactedHandler(stream or sys.stderr)
+        handler.addFilter(RedactingFilter())
+        root.addHandler(handler)
+    root.setLevel(level.upper())
+    for name in NOISY_LOGGERS:
+        _stdlib_logging.getLogger(name).setLevel(_stdlib_logging.WARNING)
+
+
+class _RedactedHandler(_stdlib_logging.StreamHandler):  # type: ignore[type-arg]
+    """Root handler installed by ``configure_logging`` (marker class for idempotency)."""
 
 
 def get_logger(**bindings: Any) -> Any:

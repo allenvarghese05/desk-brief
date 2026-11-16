@@ -167,3 +167,96 @@ def test_all_tables_have_unique_columns_and_names() -> None:
     for name, schema in TABLE_SCHEMAS.items():
         assert schema.name == name
         assert len(columns(name)) == len(set(columns(name)))
+
+
+# --- helpers: empty_frame / to_frame (review round 1, finding 2) -------------------------
+from pathlib import Path  # noqa: E402
+
+from deskbrief.schemas import TABLES, empty_frame, to_frame  # noqa: E402
+
+
+@pytest.mark.parametrize("table", sorted(TABLES))
+def test_empty_frame_is_valid_for_every_table(table: str) -> None:
+    df = empty_frame(table)
+    assert len(df) == 0
+    validate(table, df)
+
+
+def test_to_frame_fills_missing_nullables_and_validates() -> None:
+    df = to_frame(
+        "dq_results",
+        [
+            {
+                "result_id": "X1",
+                "run_id": "R1",
+                "check_name": "freshness.fred",
+                "check_type": "freshness",
+                "target_date": date(2026, 11, 16),
+                "evaluated_at": datetime(2026, 11, 16, 7, 0, tzinfo=UTC),
+                "status": "skip",
+                "details_json": "{}",
+            }
+        ],
+    )
+    validate("dq_results", df)
+    assert df["observed"].isna().all()
+
+
+def test_failed_fetch_row_with_null_http_status_validates() -> None:
+    row = {
+        "fetch_id": "F",
+        "run_id": "R",
+        "source": "fred",
+        "dataset": "series",
+        "symbols": "DGS10",
+        "request_redacted": "GET x",
+        "requested_at": T,
+        "responded_at": T,
+        "latency_ms": 0,
+        "status": "error",
+        "error": "timeout",
+        "bytes": 0,
+        "rows_parsed": 0,
+        "rows_quarantined": 0,
+        "attempt": 3,
+    }
+    validate("source_log", to_frame("source_log", [row]))
+
+
+def test_parquet_round_trip_keeps_validity(tmp_path: Path) -> None:
+    df = to_frame(
+        "alerts",
+        [{"alert_id": "A", "run_id": "R", "kind": "stale", "severity": "warn", "message": "m"}],
+    )
+    path = tmp_path / "a.parquet"
+    df.to_parquet(path)
+    back = pd.read_parquet(path)
+    validate("alerts", back)
+
+
+def test_all_null_object_column_accepted_for_nullable() -> None:
+    df = to_frame(
+        "alerts",
+        [{"alert_id": "A", "run_id": "R", "kind": "stale", "severity": "warn", "message": "m"}],
+    )
+    df["as_of"] = pd.Series([None], dtype=object)  # what a parquet null column can look like
+    validate("alerts", df)
+
+
+def test_to_frame_rejects_naive_and_unknown() -> None:
+    with pytest.raises(ValueError, match="naive"):
+        to_frame("alerts", [{"alert_id": "A", "as_of": datetime(2026, 1, 1)}])
+    with pytest.raises(KeyError, match="unknown"):
+        to_frame("alerts", [{"nope": 1}])
+
+
+def test_inf_value_and_empty_ids_rejected() -> None:
+    with pytest.raises(pandera.errors.SchemaErrors):
+        validate("observations", _obs(value=float("inf")))
+    with pytest.raises(pandera.errors.SchemaErrors):
+        validate("observations", _obs(fetch_id=""))
+
+
+def test_bool_is_not_an_int_tier() -> None:
+    with pytest.raises(pandera.errors.SchemaErrors):
+        validate("observations", _obs(tier=True))
