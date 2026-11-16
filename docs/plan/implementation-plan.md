@@ -32,6 +32,8 @@ flowchart TD
   T21 --> T22[T22 IEX vs SIP, proxy vs exact, FX vs ECB]
   T20 & T21 --> T23[T23 Scorecard + serving snapshot + compaction]
   T14 & T15 & T19 --> T24B[T24B intraday, eod, sla, backfill, rebuild workflows]
+  T02 & T04 & T03 --> T05[T05 Hardening follow-ups]
+  T05 --> T24A
   T02 --> T30[T30 BriefModel]
   T30 --> T31[T31 HTML + email]
   T30 --> T32[T32 Excel xlsx]
@@ -51,11 +53,11 @@ flowchart TD
 | W0 Mon AM | T00 → T01 (sequential, single agent) | | | | | |
 | W1 Mon PM | T02 | T03 | T04 | | | |
 | W2 Tue | T19 | T10 → T13 | T11 → T12 | T14 | T15 | T16 |
-| W3 Tue PM/Wed | T24A (**ship asap**) | T20 | T21 → T22 | T30 | T34 | |
+| W3 Tue PM/Wed | T24A (**ship asap**) | T20 | T21 → T22 | T30 | T34 | T05 |
 | W4 Wed/Thu | T24B | T23 | T31 | T32 → T33 | T35 | T40 |
 | W5 Fri | T41 | T42 | fixes from run history | | | |
 
-Critical path: **T00 → T01 → T02/T03 → T19 + official sources → T24A** (scheduled runs start) → T20/T21 → T30 → T31 (email live). Everything else hangs off this.
+Critical path: **T00 → T01 → T02/T03 → T05 + T19 + official sources → T24A** (scheduled runs start) → T20/T21 → T30 → T31 (email live). Everything else hangs off this.
 
 ### Timeline
 
@@ -162,17 +164,18 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Owns:** `src/deskbrief/pipeline/{runner.py,jobs.py,clean.py,catchup.py,manifest.py}`, `src/deskbrief/cli.py`, `tests/unit/pipeline/*`, `tests/fault_injection/inj_runner_*.py`
 - **Spec:** §2.4, §5.4, §5.5
 - Deliverables: `deskbrief run {morning|intraday|eod|backfill|rebuild} [--date] [--dry-run] [--sources]`; runner loop per sequence diagram; failure isolation; quarantine; `runs` row with `schedule_delay_s` (from `GITHUB_EVENT_SCHEDULE` / scheduled time); catch-up for missed business days; exit code 0 for ok/degraded, 1 for failed (only when *no* source succeeded or storage unavailable); GHA step-summary markdown writer; `rebuild` writes `clean/v{N+1}` then flips `_CURRENT`.
-- Storage rule (P-008): buffer rows per run and flush once per (table, ET date); split observations by `et_date(as_of)`.
+- Storage rule (P-008, spec §2.4 item 5, §5.5): buffer rows per run and flush once per (table, ET date) in a `finally`, also when degraded; split observations by `et_date(as_of)`.
+- Acceptance: a source raising mid-run still leaves every other source's rows flushed (fault-injection test); a simulated crash before flush leaves raw/ intact and `rebuild` recovers the clean rows; a rerun uses a new `run_id` and causes no `KeyExistsError`.
 - Acceptance: fault-injection tests: one source raising, one returning corrupted body, one 429 storm → run `degraded`, other sources' data present, quarantine row + DQ fail written; rerun same date → no duplicate rows in `obs_latest`; catch-up picks up 2 missed days.
 
 #### T05 — Hardening follow-ups from T01/T02/T04 reviews
-- **Depends:** T02, T04 merged · **Parallel with:** Phase 1 sources (no shared files)
-- **Owns:** `src/deskbrief/logging.py`, `src/deskbrief/calendars.py`, `src/deskbrief/store/{local.py,r2.py,raw.py,datasets.py,duck.py}` and their tests
+- **Depends:** T02, T04 merged; **merge after T03** (T03 imports `redact`/`MASK` from `logging.py`; T05 rebases on it) · **Parallel with:** Phase 1 sources (no shared files) · **Blocks:** T24A (carries the R2 checksum config)
+- **Owns:** `src/deskbrief/logging.py`, `src/deskbrief/calendars.py`, `src/deskbrief/store/{local.py,r2.py,raw.py,datasets.py,duck.py}`, `pyproject.toml` + `uv.lock` (only the `pandas-market-calendars` floor), and their tests
 - Deliverables (each with a test):
-  - logging: add `secret[_-]?key`, `(session|private|auth)[_-]?(token|key)`, `x-auth-token`, `sessionid` to strong names (T01 confirmation review #1)
-  - calendars: `_check_date` rejects non-`date` types with `TypeError`; validate `cal` before empty-range shortcuts; make `cal` keyword-only in `is_early_close(d, *, cal="XNYS")`; add `add_business_days(cal, d, n)` (used by freshness `lag_bdays`); return read-only cached schedules; raise `pandas-market-calendars` floor to the locked major (T04 review)
+  - logging: add strong names `secret[_-]?key`, `(session|private|auth)[_-]?(token|key)`, and treat `x-auth-token` and `sessionid` both as header/key names and as inline `name=value` tokens (T01 confirmation review #1); structured-key masking covers `private_key`, `auth` (T01 confirmation #4); reduce strong-tier over-masking of placeholder values like `required`, `missing`, `None`, `ok` (T01 confirmation #3); weak-tier keeps `cache_key=SPY:1m:2026-11-14`-style diagnostics readable (T01 confirmation #2). Every probe from all rounds goes into the MUST_MASK / MUST_KEEP tables
+  - calendars: `_check_date` rejects non-`date` types with `TypeError`; validate `cal` before empty-range shortcuts; make `cal` keyword-only in `is_early_close(d, *, cal="XNYS")`; add `add_business_days(cal, d, n)` (used by freshness `lag_bdays`); return read-only cached schedules; raise `pandas-market-calendars` floor to the locked major (T04 review; verified by `uv lock --check` in CI, no unit test)
   - storage: backends refuse `overwrite=True` and `delete()` for `raw/` keys; `RawWriter.write` is idempotent on retry (if body exists with the same sha256, continue to sidecar); `Datasets.append` asserts rows belong to `part_date` (P-006); `overwrite` only for `DAILY_TABLES`; R2 boto config `request_checksum_calculation`/`response_checksum_validation` = `when_required`; cache `_CURRENT` per run; escape glob chars in local root (T02 review)
-- Acceptance: all of the above tested; no contract file changes.
+- Acceptance: all of the above tested (except the dependency floor, see above); no contract file changes. If `part` is adopted later (P-008), compaction must accept `run=*-p{n}.parquet`.
 
 ### Phase 2 — Scheduling, quality, cross-checks
 
@@ -180,16 +183,18 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Depends:** T19, T10, T11, T12, T13, T16 · **Parallel with:** T20–T22, T30, T34
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
 - Deliverables: cron `15 10,11 * * 1-5` (DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
-- Gate: the R2 integration test (`tests/integration/test_r2.py`) has been run once by the owner with real keys and passed.
+- **Depends also on T05** (R2 checksum config). Gate: the owner runs `tests/integration/test_r2.py` with real keys **on `main` at or after the T05 merge**, and the commit SHA plus the pass output are pasted into the T24A PR description.
 - Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
 #### T20 — DQ framework + single-source checks
+- P-009: checks needing reproducible daily values read `obs_pit`, never `daily_close`, and exclude the current unfinished ET date.
 - **Depends:** T02, T04 · **Parallel with:** T21, T30, T34
 - **Owns:** `src/deskbrief/checks/*`, `tests/unit/checks/*`, `tests/fault_injection/inj_checks_*.py`
 - Spec §8.1. Seven types: freshness, completeness, calendar, validity, uniqueness, anomaly, revision (consistency comes from T21). Each `Check.evaluate(ctx, duck) -> list[DQResult]`; registry; runner hook `run_checks(ctx)` writes `dq_results` and `revisions`.
 - Acceptance: table-driven tests per check incl. holiday → `skip`; injected stale price → freshness fail; injected ×10 unit flip → validity/anomaly fail; FRED revision → revisions row + warn.
 
 #### T21 — Cross-check framework + official_pair, yahoo_vs_primary, close_vs_official
+- P-009: daily comparisons read `obs_pit` and exclude the current unfinished ET date; result details carry each side's `field`/`unit`.
 - **Depends:** T02 · **Parallel with:** T20
 - **Owns:** `src/deskbrief/crosschecks/{base.py,official_pair.py,yahoo_primary.py,close_official.py}`, tests
 - Deliverables: `CrossCheck` protocol, bps math helpers (level diff for yields in bp; relative diff for prices), writes `crosscheck_results` + mirrored `consistency` dq rows.
@@ -211,14 +216,17 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 ### Phase 3 — Outputs
 
 #### T30 — BriefModel
+- P-009: the model labels each value by `field`/`unit` ("10Y yield", "ECB reference rate", "close"); "change since previous NYSE close" applies only to `field=close` instruments, others say "since previous official value"; values come from `obs_pit(report_time)`.
 - **Depends:** T02 (uses §7.2 schemas; can test on fixture store before T20/T21 merge) · **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py` (shared read API: `latest_snapshot`, `overnight_changes`, `health_summary`, `series`, `lineage`), tests
 - Acceptance: overnight change uses previous NYSE close (Monday → Friday); yields in bp, prices in %; known-limits list built from config labels + today's failures; model JSON-serializable; deterministic snapshot test.
 
 #### T31 — HTML report + email
+- P-009: labels rendered from the model's field/unit labels, never a hard-coded "close".
 - **Depends:** T30 · **Owns:** `report/html.py`, `report/notify.py`, `report/templates/*`, tests; edits `pipeline/jobs.py` morning step (allowed)
 - Acceptance: email-safe HTML (inline CSS, table layout, no JS); tier glyphs + proxy labels present; footer honesty line; `Notifier` protocol with `SmtpNotifier` and `NullNotifier` (dry-run); email failure → run `degraded` + alert, report still archived.
 
 #### T32 — Excel `.xlsx`
+- P-009: a `field`/`label` column in every data table; the About sheet explains close vs yield vs reference rate.
 - **Depends:** T30 · **Owns:** `report/excel.py`, `tests/contract/test_excel_tables.py`
 - Acceptance: sheet and table names/headers exactly as §9.2 (contract test — VBA depends on it); number formats; About sheet labels.
 
@@ -227,11 +235,13 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - Acceptance: `.bas` modules reference only §9.2 names; `.xlsm` produced when `vbaProject.bin` exists, skipped with warning otherwise; manifest check fails on drift; README macro-unblock note.
 
 #### T34 — Dashboard shell, query wiring, hosting
+- P-009: the value component shows the field label next to tier and as-of.
 - **Depends:** T02, T30 (`query.py`) — may start on `query.py` stub interface agreed in T30 PR · **Owns:** `app/Home.py`, `app/theme.py`, `app/components/*`, `.streamlit/config.toml`, `tests/unit/app/test_home.py`
 - Deliverables: display-mode flag; read-only R2 connection with `st.cache_data(ttl=60)`; top bar (as-of, health badge, mode); Overview per §10.3 using serving files; tier glyph component; provenance drawer component; deployment notes for H7.
 - Acceptance: AppTest smoke; hosted mode never renders tier-1 rows; every number rendered via the component that requires source/tier/as_of (no bare numbers).
 
 #### T35 — Dashboard pages
+- P-009: tooltips and drill-downs say "close", "yield" or "reference rate" per `field`.
 - **Depends:** T34, T23 · **Owns:** `app/pages/*`, tests
 - Acceptance: pages 1–6 per §10.3; AppTest smoke per page; follows `dataviz` + `minimalist-ui` skill guidance; screenshots attached to PR.
 
