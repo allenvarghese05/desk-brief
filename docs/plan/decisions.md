@@ -1,6 +1,6 @@
 # Planner decisions
 
-Rulings that change the spec or plan. Each has an id, a date, the decision, the reason and **who ratified it**. PRs that edit planner-owned docs must cite a ratified ruling here, except card-level edits covered by P-010 (once ratified). Agents may *propose* rulings; only the planner role, or the project owner when the planner role is held by the same agent as the implementer, may ratify them.
+Rulings that change the spec or plan. Each has an id, a date, the decision, the reason and **who ratified it**. PRs that edit planner-owned docs must cite a ratified ruling here, except card-level edits covered by P-010. Agents may *propose* rulings; only the planner role, or the project owner when the planner role is held by the same agent as the implementer, may ratify them.
 
 > **Ratification record:** P-001 to P-007 were proposed by the orchestrator agent while implementing T01 and escalated after T01 review round 3 (workflow §4). The project owner, Allen Varghese, chose "Ratify all six" (P-001…P-006) when asked in the Claude Code session on 2026-11-15, and then explicitly instructed the orchestrator to write this record on his behalf. P-007 documents the workflow-doc edit that goes with that decision.
 
@@ -48,4 +48,4 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 ## P-010 · 2026-11-15 · Which planner edits need a ruling
 - Decision: changes to the **spec, contract files, process docs, the plan's Contracts list, the "Rules that apply to every card", phase gates G0–G4, and approval/merge authority** always need a ratified ruling. **Card-level edits** (adding, splitting or refining a card's deliverables or acceptance criteria) do not, provided that (a) each change appends a line to that card's `Changelog` citing its source (spec section, ruling id, or a review comment URL), and (b) the edit does not widen a card's Owns to include a contract file or another card's files.
 - Why: found in PR #6 review rounds 1–2. Requiring a ruling for every acceptance-criteria tweak would block the plan, but the exemption must be bounded and traceable.
-- Status: **proposed by the planner role; pending owner ratification.** Until it is ratified, the card edits in PR #6 rely on review findings that are cited in the Changelog lines.
+- Status: **ratified by Allen Varghese (project owner)**: he answered "Ratify P-010" in the Claude Code session on 2026-11-15 (ET); the orchestrator wrote this record at his instruction.
