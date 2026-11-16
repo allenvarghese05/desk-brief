@@ -15,9 +15,9 @@ sources:
   fred:       {rate_per_min: 100, timeout_s: 15, retries: 3}
   treasury:   {rate_per_min: 30, timeout_s: 20, retries: 3}
   ecb:        {rate_per_min: 30, timeout_s: 15, retries: 3}
-  stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}   # VERIFY access policy (T13)
+  stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}   # T13: live probe PENDING; if Stooq blocks, set enabled: false (docs/sources/stooq.md)
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
-  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # VERIFY VIX_History.csv (T13)
+  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T13: live probe PENDING (docs/sources/cboe.md)
 
 instruments:
   # ---------------- Equities (ETFs and portfolio stocks) ----------------
