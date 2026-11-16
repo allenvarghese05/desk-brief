@@ -27,6 +27,7 @@ from deskbrief.sources.http import (
     InMemoryBudgetStore,
     TokenBucket,
     parse_retry_after,
+    secret_forms,
 )
 
 URL = "https://api.example.test/v1/series"
@@ -656,3 +657,92 @@ def test_token_bucket_is_thread_safe_and_ordered() -> None:
     for t in threads:
         t.join()
     assert sorted(waits) == [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]
+
+
+# -- review round 2 ---------------------------------------------------------------------------
+
+UNI = "sécrétValüe77"
+
+
+@respx.mock
+def test_non_ascii_header_secret_does_not_raise_or_burn_budget(clock: FakeClock) -> None:
+    stream = io.StringIO()
+    configure_logging(stream=stream)
+    route = respx.get(URL).respond(200, content=b"x")
+    s = settings(daily_budget=3)
+    store = InMemoryBudgetStore()
+    c = make(clock, s, budget=BudgetTracker.from_settings(store, {"src": s}))
+    raw = c.get(req(), URL, secret_headers={"X-Custom": UNI})
+    assert route.call_count == 0
+    assert raw.attempts == 1
+    assert raw.error is not None
+    assert "no request made" in raw.error
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert store.load("src", date(2026, 11, 16)) == 0  # nothing reserved
+    for text in (raw.error, repr(raw), stream.getvalue()):
+        assert UNI not in text
+        assert "crétV" not in text
+
+
+@respx.mock
+def test_non_ascii_param_secret_is_sent_and_masked(clock: FakeClock) -> None:
+    stream = io.StringIO()
+    configure_logging(stream=stream)
+    route = respx.get(URL).mock(
+        side_effect=[httpx.ConnectError(f"x {UNI} {quote(UNI)} {UNI!a}"), httpx.Response(200)]
+    )
+    raw = make(clock).get(req(), URL, secret_params={"X-P": UNI})
+    assert route.call_count == 2
+    assert route.calls[0].request.url.params["X-P"] == UNI
+    assert raw.ok
+    for frag in (UNI, quote(UNI), "cr\\xe9t"):
+        assert frag not in stream.getvalue()
+
+
+@respx.mock
+def test_unicode_error_from_transport_is_final_masked_and_counted(clock: FakeClock) -> None:
+    stream = io.StringIO()
+    configure_logging(stream=stream)
+    exc = UnicodeEncodeError("ascii", UNI, 1, 2, f"ordinal not in range for {UNI}")
+    route = respx.get(URL).mock(side_effect=exc)
+    s = settings(daily_budget=3)
+    store = InMemoryBudgetStore()
+    c = make(clock, s, budget=BudgetTracker.from_settings(store, {"src": s}))
+    raw = c.get(req(), URL, secret_params={"api_key": UNI})
+    assert route.call_count == 1
+    assert raw.attempts == 1
+    assert clock.sleeps == []
+    assert raw.error is not None
+    assert "UnicodeEncodeError" in raw.error
+    assert "é" not in raw.error
+    assert "é" not in stream.getvalue()
+    assert store.load("src", date(2026, 11, 16)) == 1  # the attempt was reserved, once
+
+
+@respx.mock
+def test_unexpected_exception_is_returned_not_raised_and_masked(clock: FakeClock) -> None:
+    route = respx.get(URL).mock(side_effect=RuntimeError(f"boom {ODD}"))
+    raw = make(clock).get(req(), URL, secret_headers={"X-Custom": ODD})
+    assert route.call_count == 1
+    assert raw.attempts == 1
+    assert raw.error is not None
+    assert raw.error.startswith("RuntimeError: boom ")
+    assert ODD not in raw.error
+
+
+@respx.mock
+def test_short_secrets_do_not_mangle_hostnames_or_status(clock: FakeClock) -> None:
+    respx.get(url__startswith="https://demo.example.test").respond(500)
+    demo = "https://demo.example.test/v1"
+    raw = make(clock, settings(retries=0)).get(
+        req(), demo, params={"a": "1"}, secret_params={"apikey": "demo", "n": "500"}
+    )
+    assert raw.url_redacted == f"{demo}?a=1"
+    assert raw.error == "HTTP 500"
+
+
+def test_secret_forms_floor_and_forms() -> None:
+    assert secret_forms("demo") == []
+    assert secret_forms("abcde") == []
+    assert "abcdef" in secret_forms("abcdef")
+    assert "s\\xe9cr" in "".join(secret_forms("sécrét-value"))

@@ -63,6 +63,9 @@ DEFAULT_USER_AGENT = "desk-brief/0.1 (+https://github.com/allenvarghese05/desk-b
 #: 429 plus the 5xx family. 401/403/404 and every other 4xx are final.
 RETRY_STATUSES = frozenset({429, *range(500, 600)})
 
+#: Transport errors that are deterministic: retrying cannot help.
+FINAL_TRANSPORT_ERRORS = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
+
 # ---------------------------------------------------------------------------------------------
 # Daily budget
 # ---------------------------------------------------------------------------------------------
@@ -198,7 +201,10 @@ def parse_retry_after(value: str | None, now: datetime) -> float | None:
     return seconds if 0 <= seconds < float("inf") else None
 
 
-MIN_SECRET_LEN = 3  # shorter values would mangle ordinary text; real keys are far longer
+#: Secret values shorter than this are NOT literal-masked (same floor as ``logging.py``): masking
+#: "demo" or "200" would corrupt hostnames and "HTTP 500". Such values are still never logged by
+#: name, only the literal-value safety net is skipped. Real provider keys are far longer.
+MIN_SECRET_LEN = 6
 
 
 def secret_forms(value: str) -> list[str]:
@@ -206,7 +212,9 @@ def secret_forms(value: str) -> list[str]:
 
     Raw, stripped (pasted secrets often carry a newline), ``repr()``-escaped (h11 prints
     ``b'abc\\n'``; the inner text has literal backslash-n), as bytes repr, URL-quoted and
-    quote_plus. Longest first so a long form is masked before its prefix.
+    quote_plus, ``ascii()``-escaped and unicode-escaped (non-ASCII values show up as ``\\xe9``).
+    Longest first so a long form is masked before its prefix. Values shorter than
+    ``MIN_SECRET_LEN`` yield no forms.
     """
     forms: set[str] = set()
     for v in {value, value.strip()}:
@@ -216,6 +224,9 @@ def secret_forms(value: str) -> list[str]:
             v,
             repr(v)[1:-1],
             repr(v.encode())[2:-1],
+            ascii(v)[1:-1],
+            v.encode("unicode_escape").decode("ascii"),
+            v.encode("utf-8", "backslashreplace").decode("latin-1"),
             quote(v, safe=""),
             quote(v),
             quote_plus(v),
@@ -375,6 +386,13 @@ class DefaultHttpClient:
                 FetchStatus.BUDGET_EXHAUSTED,
             )
 
+        for name, value in send_headers.items():
+            if not (name.isascii() and value.isascii()):
+                # httpx cannot encode it; fail before reserving budget. Never echo the value.
+                return finish(
+                    1, _Outcome(error="header names/values must be ASCII; no request made")
+                )
+
         attempt = 0
         out = _Outcome()
         if not reserve():
@@ -392,17 +410,19 @@ class DefaultHttpClient:
                     timeout=settings.timeout_s,
                     follow_redirects=False,  # also for an injected client: secrets must not follow
                 )
-            except (httpx.UnsupportedProtocol, httpx.LocalProtocolError) as exc:
-                # deterministic (bad scheme, illegal header value): retrying cannot help
-                out = _Outcome(error=error_text(exc))
-                log.warning("http.attempt", attempt=attempt, url=url_redacted, error=out.error)
-                return finish(attempt, out)
-            except httpx.TransportError as exc:  # timeouts, connect/read errors: retryable
-                out = _Outcome(error=error_text(exc))
-            except (httpx.HTTPError, httpx.InvalidURL) as exc:  # malformed request: final
-                out = _Outcome(error=error_text(exc))
-                log.warning("http.attempt", attempt=attempt, url=url_redacted, error=out.error)
-                return finish(attempt, out)
+            except Exception as exc:  # never raise out of get(): classify, mask, return
+                if isinstance(exc, UnicodeError):
+                    # The message quotes the offending character (part of a secret): drop it.
+                    text = f"{type(exc).__name__}: request not encodable (non-ASCII value?)"
+                    out = _Outcome(error=text)
+                else:
+                    out = _Outcome(error=error_text(exc))
+                retryable = isinstance(exc, httpx.TransportError) and not isinstance(
+                    exc, FINAL_TRANSPORT_ERRORS
+                )
+                if not retryable:  # bad scheme/URL, illegal header value, unexpected: final
+                    log.warning("http.attempt", attempt=attempt, url=url_redacted, error=out.error)
+                    return finish(attempt, out)
             else:
                 code = resp.status_code
                 out = _Outcome(
