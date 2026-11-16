@@ -269,7 +269,7 @@ class Source(Protocol):
 | Job | Alpaca | Twelve Data | Yahoo | Official |
 |---|---|---|---|---|
 | morning | ~5 | 3 | ~4 batch | ~12 |
-| intraday ×~30 | ~2 each = 60 | 3 each = 90 | 1–2 each | 0 |
+| intraday ×~30 | ~2 each = 60 | 3 each = 90 | 1–2 each, +1 batch at the ECB fix (P-012) | 0 |
 | eod | ~25 (bars for 10 syms × 2 feeds) | 3–6 (1-min series for fix window) | ~4 | ~6 |
 | dashboard local (8h @ 60s) | ~480 | **0 by default** (reads serving); live FX only if budget left | 0 | 0 |
 | **Total** | ≪ 200/min | **~100–200 / 750 budget** | low | low |
@@ -278,8 +278,8 @@ class Source(Protocol):
 
 | Job | Trigger (UTC) | Target | Steps |
 |---|---|---|---|
-| `morning` | cron `15 10,11 * * 1-5`; code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
-| `intraday` | cron `*/15 13-21 * * 1-5`; code exits early outside NYSE session | now | fetch Alpaca IEX latest, Twelve Data FX batch, Yahoo quotes (ES=F, CL=F, BZ=F, GC=F, ^TNX, ^VIX) → clean → freshness/validity/anomaly → serving |
+| `morning` | two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013); code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
+| `intraday` | cron `*/15 13-21 * * 1-5`; code exits early outside NYSE session. Plus cron `15 12 * * 1-5` (P-012). At the 14:15 Europe/Berlin ECB fix (12:15 UTC summer, 13:15 UTC winter) the run fetches Yahoo quotes even before the NYSE open; the 12:15 trigger is `skipped` in winter | now | fetch Alpaca IEX latest, Twelve Data FX batch, Yahoo quotes (ES=F, CL=F, BZ=F, GC=F, ^TNX, ^VIX) → clean → freshness/validity/anomaly → serving. At the ECB fix outside the session: Yahoo quotes only (`--sources yahoo`) |
 | `eod` | cron `30 22 * * 1-5` | today | Alpaca 1-min bars IEX+SIP for xcheck symbols, daily bars; Twelve Data 1-min around ECB fix; Treasury curve; ECB; Stooq; Cboe → clean → all checks + cross-checks → scorecard → compaction → serving → ping |
 | `sla` | cron `20 12 * * 1-5` | today | if no report for today's date: email "report missed SLA", fail job (red X = visible incident) |
 | `backfill` | `workflow_dispatch(start, end, sources)` | range | official + daily sources for range; `trigger=manual` |
@@ -467,8 +467,8 @@ classDiagram
 
 | Type | Rule | Status logic |
 |---|---|---|
-| freshness | data age vs `expected_by_et` + `lag_bdays` per dataset; intraday: age of latest tick vs session. Before `expected_by_et` the check returns `skip` ("not yet due") — e.g. eod at 17:30 ET runs before Treasury/Stooq publish; next morning's run evaluates them | warn > grace, fail > 2×grace |
-| completeness | every expected (instrument, feed) for target date has ≥1 obs; minute bars ≥ 95% of session minutes | warn <100%, fail <95% / missing |
+| freshness | data age vs `expected_by_et` + `lag_bdays` per dataset; intraday: age of latest tick vs session. Before `expected_by_et` the check returns `skip` ("not yet due") — e.g. eod at 17:30 ET runs before Treasury/Stooq publish; next morning's run evaluates them | warn > grace, fail > 2×grace; on a SIFMA recommended early close a late `SIFMA_US` value is at most warn (P-011) |
+| completeness | every expected (instrument, feed) for target date has ≥1 obs; minute bars ≥ 95% of session minutes (an early-close day counts only minutes up to the early close, P-011) | warn <100%, fail <95% / missing; on a SIFMA recommended early close a missing `SIFMA_US` value is at most warn (P-011) |
 | calendar | expected dates come from calendars (XNYS, SIFMA_US, TARGET); holidays/weekends produce `skip`, not fail | — |
 | validity | value within range for unit/kind; no NaN/inf; high ≥ low; volume ≥ 0 | fail |
 | uniqueness | no duplicate natural key within a single fetch | fail |
@@ -634,7 +634,7 @@ desk-brief/
   vba/  modNav.bas modFilter.bas modFormat.bas modCharts.bas modExport.bas  vbaProject.bin  MANIFEST.json
   tests/ unit/ fault_injection/ contract/ fixtures/{real,synthetic}/ integration/ conftest.py
   .github/ workflows/{ci.yml,morning.yml,intraday.yml,eod.yml,sla.yml,backfill.yml,rebuild.yml}  pull_request_template.md  dependabot.yml
-  docs/ architecture.md glossary.md agent-log.md specs/ plan/ process/ tasks/
+  docs/ architecture.md glossary.md agent-log.md (T00–T05 history) agent-log/T{id}.md (P-014) specs/ plan/ process/ tasks/
 ```
 
 ---
