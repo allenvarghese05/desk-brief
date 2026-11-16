@@ -1,0 +1,8 @@
+title = "desk-brief gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Example env file holds variable names only"
+paths = ['''\.env\.example$''']
