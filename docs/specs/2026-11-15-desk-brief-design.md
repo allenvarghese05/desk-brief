@@ -97,7 +97,7 @@ A differing value for the same natural key is a **revision**: recorded in `revis
 2. A parse/validation failure quarantines that fetch's rows (`clean/quarantine/`) and emits a DQ `fail`; the run continues.
 3. The morning report always ships. Missing inputs appear under "Known limits today".
 4. Runs are idempotent: rerunning a job for the same target date creates no duplicate logical rows (views dedupe on natural key).
-5. Flush semantics (P-008): the runner buffers clean rows in memory and writes each (table, ET date) once, in a `finally` block, so a failing source never loses other sources' rows. If the process dies before the flush, nothing clean is written for that run, but raw/ already holds every fetched response, so `rebuild` (or the next run's catch-up) recovers it. A retried run always gets a new `run_id`, so it can never collide with a half-flushed predecessor; duplicate logical rows are removed by the `obs_latest` view.
+5. Flush semantics (P-008): the runner buffers clean rows in memory and writes each (table, ET date) once, in a `finally` block, so a failing source never loses other sources' rows. If the process dies before the flush, nothing clean is written for that run, but raw/ already holds every fetched response, so `rebuild` (or the next run's catch-up) recovers it. The `runs` row is written last, so a run that died mid-flush counts as missed and is retried by catch-up. A retried run always gets a new `run_id`, so it can never collide with a half-flushed predecessor; duplicate logical rows are removed by the `obs_latest` view.
 6. Catch-up: each scheduled job checks the `runs` table for missed target dates (last 5 business days) and backfills them, marked `trigger=catchup`.
 
 ---
