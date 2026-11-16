@@ -30,6 +30,7 @@ value as column ``close``; the original ``field`` is kept alongside.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -88,10 +89,22 @@ def _configure_r2(conn: duckdb.DuckDBPyConnection, env: Mapping[str, str]) -> No
     conn.execute(r2_secret_sql(creds))
 
 
+_GLOB_META = re.compile(r"([*?\[])")
+
+
+def escape_glob(path: str) -> str:
+    """Make ``path`` match itself literally in a DuckDB glob (``*`` -> ``[*]``, ``[`` -> ``[[]``).
+
+    A local root such as ``/data/run[1]`` would otherwise be read as a character class.
+    """
+    return _GLOB_META.sub(r"[\1]", path)
+
+
 def _glob(table: str, base: str, clean_version: str) -> str:
     prefix = table_prefix(table, clean_version)
     pattern = "date=*.parquet" if table in DAILY_TABLES else "date=*/run=*.parquet"
-    return f"{base}/{prefix}{pattern}"
+    # base is a literal root (local path or r2://bucket); only the pattern may contain globs
+    return f"{escape_glob(base)}/{prefix}{pattern}"
 
 
 def table_source_sql(table: str, base: str, clean_version: str, *, has_files: bool) -> str:

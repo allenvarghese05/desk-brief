@@ -97,7 +97,8 @@ A differing value for the same natural key is a **revision**: recorded in `revis
 2. A parse/validation failure quarantines that fetch's rows (`clean/quarantine/`) and emits a DQ `fail`; the run continues.
 3. The morning report always ships. Missing inputs appear under "Known limits today".
 4. Runs are idempotent: rerunning a job for the same target date creates no duplicate logical rows (views dedupe on natural key).
-5. Catch-up: each scheduled job checks the `runs` table for missed target dates (last 5 business days) and backfills them, marked `trigger=catchup`.
+5. Flush semantics (P-008): the runner buffers clean rows in memory and writes each (table, ET date) once, in a `finally` block, so a failing source never loses other sources' rows. If the process dies before the flush, nothing clean is written for that run, but raw/ already holds every fetched response, so `rebuild` (or the next run's catch-up) recovers it. The `runs` row is written last, so a run that died mid-flush counts as missed and is retried by catch-up. A retried run always gets a new `run_id`, so it can never collide with a half-flushed predecessor; duplicate logical rows are removed by the `obs_latest` view.
+6. Catch-up: each scheduled job checks the `runs` table for missed target dates (last 5 business days) and backfills them, marked `trigger=catchup`.
 
 ---
 
@@ -307,11 +308,13 @@ sequenceDiagram
     R->>ST: append source_log row
     R->>S: parse(raw)
     alt schema valid
-      R->>ST: append clean/observations (run file)
+      R->>R: buffer rows in memory (per table, per ET date)
     else invalid
-      R->>ST: quarantine + dq fail
+      R->>R: buffer quarantine row + dq fail
     end
   end
+  Note over R,ST: P-008: flush once per (table, ET date) in a finally block, also when the run is degraded
+  R->>ST: append clean/observations, quarantine, source_log (one file per table/date)
   R->>Q: run checks(target_date)
   Q->>ST: dq_results, crosscheck_results, revisions, alerts
   R->>ST: write serving snapshot
@@ -422,7 +425,7 @@ erDiagram
 
 ### 7.3 DuckDB views (created by `store/duck.py` on connect)
 
-`obs_all`, `obs_latest`, `obs_pit(t)` (macro), `daily_close` (one close per instrument/date preferring tier 3 → 2 → 1, with `chosen_source`), `overnight_change(date)` (macro), `source_log`, `dq`, `xchecks`, `runs`, `scorecard`, `dim_instrument`, `dim_feed`, `dim_group`.
+`obs_all`, `obs_latest`, `obs_pit(t)` (macro), `daily_close` (one end-of-day value per instrument/ET date, fields `close`, `yield` or `rate`, preferring tier 3 → 2 → 1, with `chosen_source` and `field`; latest-version, not point-in-time; consumers label by field/unit per P-009), `overnight_change(date)` (macro), `source_log`, `dq`, `xchecks`, `runs`, `scorecard`, `dim_instrument`, `dim_feed`, `dim_group`.
 
 ### 7.4 Core classes (UML)
 

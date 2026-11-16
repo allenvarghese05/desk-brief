@@ -184,6 +184,17 @@ MUST_MASK = [
     ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"),
     ("https://x/q?key=BAREKEY123", "BAREKEY123"),
     ("https://x/q?sig=abcdefghijklmnopqrst", "abcdefghijklmnopqrst"),
+    # T05 (SYNTHETIC FIXTURE): secret_key, session|private|auth token|key, x-auth-token, sessionid
+    # split so the gitleaks generic-api-key rule does not flag the (synthetic) probe itself
+    ("SECRET_KEY" + ": " + "abcd1234efgh", "abcd1234efgh"),
+    ("MY_SECRET_KEY=abc123", "abc123"),
+    ("ALPACA_SECRET_KEY: 'abc'", "abc"),  # the value itself, not "abc'"; see exact test below
+    ('{"secret_key": "abcd1234"}', "abcd1234"),
+    ("x-auth-token: v4lue99", "v4lue99"),
+    ("sessionid=abc123def", "abc123def"),
+    ("session_token=sess0987", "sess0987"),
+    ("private-key: pk0987", "pk0987"),
+    ("authtoken=at0987", "at0987"),
 ]
 MUST_KEEP = [
     "missing key: EURUSD",
@@ -196,6 +207,23 @@ MUST_KEEP = [
     "token bucket empty, waiting 2.5s",
     "monkey=3",
     "keyboard=qwerty",
+    # T05 (T01 confirmation #3): placeholders after strong names are not credentials
+    "password: required",
+    "secret: missing",
+    "signature: ok",
+    "api_key: None",
+    "api_key: null",
+    "cookie: expired",
+    "token_secret: n/a",
+    "password: FALSE",
+    "secret: true",
+    "api_key: ***",
+    "key_id: 12",
+    "key_id: 007",
+    # T05 (T01 confirmation #2): market / cache keys after weak names
+    "cache_key=SPY:1m:2026-11-14",
+    "key=SPY:2026-11-14T13:30:00Z",
+    "key=EURUSD_2026-11-14",
 ]
 
 
@@ -212,3 +240,50 @@ def test_must_keep(text: str) -> None:
 def test_key_based_masking_is_precise() -> None:
     out = redact_value({"token_state": "fresh", "access_token": "abc", "token": "t0k3n"})
     assert out == {"token_state": "fresh", "access_token": MASK, "token": MASK}
+
+
+def test_quoted_secret_is_masked_whole_without_the_quote() -> None:
+    # nit from review round 1: the exact output, so a partial mask cannot pass
+    assert redact_text("ALPACA_SECRET_KEY: 'abc'") == "ALPACA_SECRET_KEY: '***'"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["api_key: s3cr3tValue99", "password: required1", "key_id: 1234", "secret: nonesuch"],
+)
+def test_near_placeholders_and_real_credentials_still_masked(text: str) -> None:
+    assert redact_text(text).endswith(MASK)
+
+
+@pytest.mark.parametrize(
+    "text",
+    # built from pieces so gitleaks' generic-api-key rule does not flag these synthetic probes
+    ["key" + "=sk_live_abc123def", "key" + "=AbCdEfGh12345678", "token" + "=abc:def:ghi12345"],
+)
+def test_weak_tier_credentials_with_separators_still_masked(text: str) -> None:
+    assert redact_text(text).endswith(MASK)
+
+
+def test_structured_keys_cover_the_strong_tier_names() -> None:
+    fields = {
+        "private_key": "PEMDATA123",
+        "auth": "abc",
+        "sessionid": "s3ss10n99",
+        "secret_key": "sk1",
+        "session_token": "st1",
+        "auth-key": "ak1",
+        "x-auth-token": "xt1",
+        "private-token": "pt1",
+    }
+    assert redact_value(fields) == {k: MASK for k in fields}
+
+
+def test_structured_keys_stay_precise() -> None:
+    fields = {
+        "token_state": "fresh",
+        "author": "bob",
+        "auth_state": "ok",
+        "session_key_count": "3",
+        "private_key_path": "/x",
+    }
+    assert redact_value(fields) == fields

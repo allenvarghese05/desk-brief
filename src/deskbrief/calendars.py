@@ -8,15 +8,19 @@
   rules are implemented here: weekends, Jan 1, Good Friday, Easter Monday, May 1, Dec 25, Dec 26.
   TARGET has no early closes.
 
-All datetimes returned are timezone-aware UTC. Callers pass plain ``date`` objects; a ``datetime``
-(which is a ``date`` subclass) is rejected with ``TypeError`` because silently truncating it hides
-timezone bugs. Lookups are cached per (calendar, year).
+All datetimes returned are timezone-aware UTC. Callers pass plain ``date`` objects; anything else
+(``str``, ``None``, ``datetime``, ``pandas.Timestamp``) is rejected with ``TypeError`` because
+silently truncating or parsing it hides timezone bugs. The calendar name is validated first in
+every function, before any shortcut. Lookups are cached per (calendar, year) and the cached
+objects are read-only (``MappingProxyType``, tuples, frozensets).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from functools import cache
+from types import MappingProxyType
 from typing import get_args
 
 import pandas_market_calendars as mcal
@@ -30,8 +34,9 @@ Session = tuple[datetime, datetime]
 
 
 def _check_date(d: date) -> date:
-    if isinstance(d, datetime):
-        raise TypeError(f"expected datetime.date, got datetime {d!r}")
+    # datetime and pandas.Timestamp are date subclasses, so test for them explicitly
+    if not isinstance(d, date) or isinstance(d, datetime):
+        raise TypeError(f"expected datetime.date, got {type(d).__name__}: {d!r}")
     return d
 
 
@@ -70,18 +75,23 @@ def _target_holidays(year: int) -> frozenset[date]:
 
 
 @cache
-def _schedule(cal: str, year: int) -> dict[date, Session]:
-    """Sessions for one year of a library-backed calendar: date -> (open, close) UTC."""
+def _schedule(cal: str, year: int) -> Mapping[date, Session]:
+    """Sessions for one year of a library-backed calendar: date -> (open, close) UTC.
+
+    Read-only: the cached mapping is shared by every caller.
+    """
     sched = mcal.get_calendar(cal).schedule(
         start_date=date(year, 1, 1), end_date=date(year, 12, 31)
     )
-    return {
-        ts.date(): (
-            ensure_utc(row.market_open.to_pydatetime()),
-            ensure_utc(row.market_close.to_pydatetime()),
-        )
-        for ts, row in sched.iterrows()
-    }
+    return MappingProxyType(
+        {
+            ts.date(): (
+                ensure_utc(row.market_open.to_pydatetime()),
+                ensure_utc(row.market_close.to_pydatetime()),
+            )
+            for ts, row in sched.iterrows()
+        }
+    )
 
 
 @cache
@@ -104,6 +114,7 @@ def is_business_day(cal: CalendarName, d: date) -> bool:
 
 def prev_business_day(cal: CalendarName, d: date) -> date:
     """Latest business day strictly before ``d``."""
+    _check_cal(cal)
     _check_date(d)
     for _ in range(_MAX_SCAN_DAYS):
         d -= timedelta(days=1)
@@ -114,6 +125,7 @@ def prev_business_day(cal: CalendarName, d: date) -> date:
 
 def next_business_day(cal: CalendarName, d: date) -> date:
     """Earliest business day strictly after ``d``."""
+    _check_cal(cal)
     _check_date(d)
     for _ in range(_MAX_SCAN_DAYS):
         d += timedelta(days=1)
@@ -124,6 +136,7 @@ def next_business_day(cal: CalendarName, d: date) -> date:
 
 def business_days(cal: CalendarName, start: date, end: date) -> list[date]:
     """Business days in ``[start, end]`` inclusive, ascending. Empty if ``end < start``."""
+    _check_cal(cal)  # before the empty-range shortcut below
     _check_date(start)
     _check_date(end)
     out: list[date] = []
@@ -141,7 +154,23 @@ def session_bounds_utc(d: date) -> Session | None:
     return _schedule("XNYS", d.year).get(d)
 
 
-def is_early_close(d: date, cal: CalendarName = "XNYS") -> bool:
+def add_business_days(cal: CalendarName, d: date, n: int) -> date:
+    """``d`` moved ``n`` business days: forward for ``n > 0``, back for ``n < 0``.
+
+    ``n == 0`` returns ``d`` unchanged (it is not rolled to a business day), so
+    ``add_business_days(cal, d, 1)`` equals ``next_business_day(cal, d)`` even when ``d`` is a
+    weekend or holiday.
+    """
+    _check_cal(cal)
+    _check_date(d)
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError(f"n must be an int, got {type(n).__name__}")
+    for _ in range(abs(n)):
+        d = next_business_day(cal, d) if n > 0 else prev_business_day(cal, d)
+    return d
+
+
+def is_early_close(d: date, *, cal: CalendarName = "XNYS") -> bool:
     """True if ``cal`` has a shortened session on ``d`` (XNYS by default). TARGET never does."""
     _check_cal(cal)
     _check_date(d)
@@ -151,6 +180,7 @@ def is_early_close(d: date, cal: CalendarName = "XNYS") -> bool:
 
 
 __all__ = [
+    "add_business_days",
     "business_days",
     "is_business_day",
     "is_early_close",
