@@ -1,0 +1,3 @@
+# Reviewed false positives (fingerprint = commit:file:rule:line). Each entry needs a reason.
+# Fake FRED key used to test log redaction (tests/unit/test_logging.py), not a real credential.
+593e55c13c241b1e9380649119e0dd1e6f4e7c19:tests/unit/test_logging.py:generic-api-key:50
