@@ -5,7 +5,7 @@ Status: v1, 2026-11-15. Source of truth for task order. Spec: `docs/specs/2026-1
 Rules that apply to every card:
 - One card → one branch (`t{id}-{slug}`) → one PR. Target ≤ ~400 changed lines excluding fixtures/lockfile.
 - A card may only touch files in its **Owns** list (+ its own tests and fixtures). Anything else → stop, ask the planner.
-- `config.yaml` *values* are not contracts: a source card may add or adjust feeds/datasets **for its own source** (disclose in the PR). Other config edits go through the planner.
+- `config.yaml` *values* are not contracts: a source card may add or adjust feeds/datasets **for its own source** (disclose in the PR). Other config edits go through the planner (ruling P-004 in `docs/plan/decisions.md`).
 - **Contracts** (frozen after Phase 0): `models.py`, `schemas.py`, `sources/base.py`, `store/backend.py` public API, `config.py` models, storage key layout (§6), table schemas (§7.2), Excel table names (§9.2). Changing one needs a planner-approved `contract:` PR merged first.
 - TDD: failing test first. No network in unit tests. Synthetic data only under `tests/`, labeled.
 - Definition of done for every card: acceptance criteria met, `make ci` green locally and in CI, reviewer APPROVE, `docs/agent-log.md` entry appended.
@@ -149,7 +149,7 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Owns:** `sources/stooq.py`, `sources/cboe.py` + tests. Day-1 probe decides: if Stooq is blocked/needs key, implement with `enabled: false` in config and document; Yahoo daily close becomes T3 fallback with `is_fallback=true` (implemented in T16; T13 only sets config `enabled: false` — no code dependency on T16). Cboe VIX history CSV → `VIX` close.
 
 #### T14 — Alpaca source
-- **Owns:** `sources/alpaca.py` + tests (synthetic fixtures). Datasets: `iex_latest` (latest trade + quote, multi-symbol), `iex_bars_1m`, `sip_bars_1m` (window must end ≥16 min before now — enforce and test). (`daily_bars` dropped in T01 review: daily closes come from Stooq/Yahoo.) Pagination via `next_page_token`. Acceptance: SIP window guard; pagination; headers never logged.
+- **Owns:** `sources/alpaca.py` + tests (synthetic fixtures). Datasets: `iex_latest` (latest trade + quote, multi-symbol), `iex_bars_1m`, `sip_bars_1m` (window must end ≥16 min before now — enforce and test). (`daily_bars` dropped, ruling P-003.) Pagination via `next_page_token`. Acceptance: SIP window guard; pagination; headers never logged.
 
 #### T15 — Twelve Data source
 - **Owns:** `sources/twelvedata.py` + tests (synthetic fixtures). `fx_quote` batch for 3 pairs; `fx_series_1m` for a window (ECB fix ±10 min). Budget enforced via T03 tracker. Error payloads with HTTP 200 (`{"status":"error"}`) map to `status=error`.
@@ -170,7 +170,7 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Depends:** T19, T10, T11, T12, T13, T16 · **Parallel with:** T20–T22, T30, T34
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
 - Deliverables: cron `15 10,11 * * 1-5` (DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
-- Acceptance: manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
+- Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
 #### T20 — DQ framework + single-source checks
 - **Depends:** T02, T04 · **Parallel with:** T21, T30, T34

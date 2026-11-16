@@ -138,3 +138,32 @@ def test_stdlib_and_httpx_logs_redacted_and_capped() -> None:
         h for h in stdlib_logging.getLogger().handlers if type(h).__name__ == "_RedactedHandler"
     ]
     assert len(handlers) == 1
+
+
+# --- review round 2 ----------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text",
+    ["token bucket empty, waiting 2.5s", "basic auth not used", "cache key count", "monkey=3"],
+)
+def test_ordinary_text_not_over_redacted(text: str) -> None:
+    assert redact_text(text) == text
+
+
+def test_numbers_under_secretish_keys_kept() -> None:
+    line = _log_line(requests_per_token=1, key_id_count=2)
+    assert line["requests_per_token"] == 1
+    assert line["key_id_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "leak"),
+    [
+        ("https://tokVALUE123@host/x", "tokVALUE123"),
+        ("https://x/q?key=BAREKEY123", "BAREKEY123"),
+        ("https://x/q?auth=AUTHVAL123", "AUTHVAL123"),
+        ("https://b.r2.dev/o?X-Amz-Signature=abcdef0123&X-Amz-Credential=AKIAXYZ", "abcdef0123"),
+        ("https://b.r2.dev/o?X-Amz-Signature=abcdef0123&X-Amz-Credential=AKIAXYZ", "AKIAXYZ"),
+    ],
+)
+def test_round2_bypasses_closed(text: str, leak: str) -> None:
+    assert leak not in redact_text(text)

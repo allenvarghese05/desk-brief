@@ -7,7 +7,7 @@ Status: v1, 2026-11-15. Applies to every change merged to `main`.
 | Role | Model | Context | Does | Never does |
 |---|---|---|---|---|
 | Orchestrator | (your harness) | Task board only | Dispatches cards, spawns agents, tracks state, merges when gates pass | Writes code, approves PRs |
-| Planner | `claude-opus-5-5` | Long-lived; spec, plan, board | Owns `docs/plan/*`, writes/splits task cards, approves contract changes, answers escalations, runs phase gates | Writes feature code, reviews its own cards' PRs |
+| Planner | `claude-opus-5-5` | Long-lived; spec, plan, board | Owns `docs/plan/*` (rulings in `docs/plan/decisions.md`), writes/splits task cards, approves contract changes, answers escalations, runs phase gates | Writes feature code, reviews its own cards' PRs |
 | Implementer | `claude-sonnet-5-5` | Fresh per card (card + spec + repo) | One card → one branch → one PR; TDD; answers review findings | Edits files outside the card's **Owns**, merges, changes contracts |
 | Reviewer | `claude-sonnet-5-5` | **Brand-new agent per review round, zero prior context.** Gets only: repo, PR number | Reads PR → card → cited spec sections → diff → runs CI locally → posts review comment → sets `review/approved` status on head SHA | Edits code, pushes commits, merges, sees implementer chat |
 

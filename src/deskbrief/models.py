@@ -144,6 +144,13 @@ class RawResponse:
         object.__setattr__(self, "responded_at", max(resp_at, req_at))
         if self.attempts < 1:
             raise ValueError("attempts must be >= 1")
+        # these two strings are persisted (source_log, raw sidecar): never store secrets
+        from deskbrief.logging import redact  # local import keeps models dependency-light
+
+        if self.error is not None:
+            object.__setattr__(self, "error", redact(self.error))
+        if self.url_redacted is not None:
+            object.__setattr__(self, "url_redacted", redact(self.url_redacted))
 
     @property
     def ok(self) -> bool:

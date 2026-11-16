@@ -224,3 +224,16 @@ def test_result_ids_generated_and_details_json() -> None:
             evaluated_at=T0,
             status=DQStatus.FAIL,  # type: ignore[arg-type]
         )
+
+
+def test_raw_response_persisted_strings_are_redacted() -> None:
+    r = _resp(
+        http_status=None,
+        error="GET https://api.twelvedata.com/q?apikey=PERSISTED1 timed out",
+        url_redacted="https://api.stlouisfed.org/fred?api_key=PERSISTED2&series_id=DGS10",
+    )
+    assert r.error is not None
+    assert "PERSISTED1" not in r.error
+    assert r.url_redacted is not None
+    assert "PERSISTED2" not in r.url_redacted
+    assert "series_id=DGS10" in r.url_redacted

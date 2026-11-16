@@ -402,6 +402,8 @@ def to_frame(table: str, rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
     data: dict[str, pd.Series] = {}
     for col, kind in decl.items():
         vals = [r.get(col) for r in rows]
+        if not kind.endswith("?") and any(v is None for v in vals):
+            raise ValueError(f"{table}.{col}: required (non-nullable) value missing")
         base = kind.rstrip("?")
         if base == "ts":
             if any(isinstance(v, datetime) and v.tzinfo is None for v in vals):

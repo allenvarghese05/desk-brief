@@ -259,7 +259,7 @@ class Source(Protocol):
 | ECB | eurofxref | data-api.ecb.europa.eu SDMX (EXR.D.USD+GBP+JPY.EUR.SP00.A), CSV | none | ~16:00 CET; TARGET holidays |
 | Stooq | daily | stooq.com CSV download | none / verify | Verify current access policy; if blocked, mark source disabled and use Yahoo daily close as T3 fallback **labeled as fallback** |
 | Cboe | vix_history | cdn.cboe.com VIX_History.csv | none | Verify |
-| Alpaca | iex_latest, sip_bars_1m, iex_bars_1m, daily_bars | data.alpaca.markets v2 stocks | key id + secret headers | Free: IEX real-time; SIP only ≥15 min old |
+| Alpaca | iex_latest, sip_bars_1m, iex_bars_1m (daily_bars dropped, P-003) | data.alpaca.markets v2 stocks | key id + secret headers | Free: IEX real-time; SIP only ≥15 min old |
 | Twelve Data | fx_quote (batch), fx_series_1m | api.twelvedata.com | `apikey` param (redact!) | 8/min, 800/day; batch counts per symbol |
 | Yahoo | quote, history | yfinance | none | Unofficial; second opinion only; expect rate limits from GHA IPs |
 

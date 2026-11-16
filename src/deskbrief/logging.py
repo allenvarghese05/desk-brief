@@ -48,16 +48,19 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _NAMES = (
-    r"api[_-]?key|apikey|token|secret|password|passwd|key[_-]?id|access[_-]?key"
+    r"api[_-]?key|apikey|token|secret|password|passwd|key[_-]?id|access[_-]?key|key|auth"
+    r"|signature|sig|x-amz-signature|x-amz-credential|x-amz-security-token"
     r"|APCA-API-KEY-ID|APCA-API-SECRET-KEY"
 )
 _INLINE_RE = re.compile(
-    rf"(?P<name>{_NAMES})(?P<q1>[\"']?)(?P<sep>\s*[=:]\s*)(?P<q2>[\"']?)(?P<val>[^&\s,;\"'}}]+)",
+    rf"(?<![A-Za-z0-9_\-])(?P<name>{_NAMES})(?P<q1>[\"']?)(?P<sep>\s*[=:]\s*)(?P<q2>[\"']?)(?P<val>[^&\s,;\"'}}]+)",
     re.IGNORECASE,
 )
-_BEARER_RE = re.compile(r"\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=\-]{6,}", re.IGNORECASE)
+_BEARER_RE = re.compile(
+    r"\b(bearer)\s+[A-Za-z0-9._~+/=\-]{6,}|\b(basic)\s+[A-Za-z0-9+/]{12,}={0,2}", re.IGNORECASE
+)
 _HEADER_LINE_RE = re.compile(r"\b(authorization|cookie|set-cookie)(\s*:\s*)[^\r\n]+", re.I)
-_USERINFO_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)
+_USERINFO_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^/\s@]+@", re.IGNORECASE)
 
 
 def _env_secrets(names: Iterable[str]) -> list[str]:
@@ -79,7 +82,7 @@ def redact_text(text: str, env_secrets: Iterable[str] = ()) -> str:
     def _mask(t: str) -> str:
         t = _USERINFO_RE.sub(lambda m: f"{m.group(1)}{MASK}@", t)
         t = _HEADER_LINE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", t)
-        t = _BEARER_RE.sub(lambda m: f"{m.group(1)} {MASK}", t)
+        t = _BEARER_RE.sub(lambda m: f"{m.group(1) or m.group(2)} {MASK}", t)
         t = _INLINE_RE.sub(
             lambda m: f"{m.group('name')}{m.group('q1')}{m.group('sep')}{m.group('q2')}{MASK}", t
         )
@@ -104,10 +107,10 @@ def redact_value(value: Any, env_secrets: Iterable[str] = (), key: str | None = 
     and redacted, so the JSON renderer never falls back to an unredacted ``repr()``.
     """
     secrets = list(env_secrets)
-    if key is not None and _SECRET_KEY_RE.search(key) and value not in (None, ""):
-        return MASK
     if value is None or isinstance(value, bool | int | float):
-        return value
+        return value  # numbers are never secrets (e.g. requests_per_token=1)
+    if key is not None and _SECRET_KEY_RE.search(key) and value != "":
+        return MASK
     if isinstance(value, str):
         return redact_text(value, secrets)
     if isinstance(value, bytes | bytearray):
@@ -117,6 +120,11 @@ def redact_value(value: Any, env_secrets: Iterable[str] = (), key: str | None = 
     if isinstance(value, list | tuple | set | frozenset):
         return [redact_value(v, secrets) for v in value]
     return redact_text(repr(value) if not isinstance(value, BaseException) else str(value), secrets)
+
+
+def redact(text: str) -> str:
+    """Redact free text using the inline rules plus current secret env values."""
+    return redact_text(text, _env_secrets(SECRET_ENV_VARS))
 
 
 def redact_processor(

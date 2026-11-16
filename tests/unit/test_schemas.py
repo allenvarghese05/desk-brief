@@ -245,7 +245,19 @@ def test_all_null_object_column_accepted_for_nullable() -> None:
 
 def test_to_frame_rejects_naive_and_unknown() -> None:
     with pytest.raises(ValueError, match="naive"):
-        to_frame("alerts", [{"alert_id": "A", "as_of": datetime(2026, 1, 1)}])
+        to_frame(
+            "alerts",
+            [
+                {
+                    "alert_id": "A",
+                    "run_id": "R",
+                    "kind": "stale",
+                    "severity": "warn",
+                    "message": "m",
+                    "as_of": datetime(2026, 1, 1),
+                }
+            ],
+        )
     with pytest.raises(KeyError, match="unknown"):
         to_frame("alerts", [{"nope": 1}])
 
@@ -260,3 +272,28 @@ def test_inf_value_and_empty_ids_rejected() -> None:
 def test_bool_is_not_an_int_tier() -> None:
     with pytest.raises(pandera.errors.SchemaErrors):
         validate("observations", _obs(tier=True))
+
+
+def test_to_frame_rejects_missing_required_values() -> None:
+    with pytest.raises(ValueError, match="required"):
+        to_frame("alerts", [{"alert_id": "A", "kind": "stale", "severity": "warn", "message": "m"}])
+    with pytest.raises(ValueError, match="is_derived"):
+        to_frame(
+            "parsed_observations",
+            [
+                {
+                    "instrument_id": "SPY",
+                    "source": "s",
+                    "dataset": "d",
+                    "symbol": "SPY",
+                    "tier": 1,
+                    "field": "last",
+                    "interval": "tick",
+                    "as_of": T,
+                    "value": 1.0,
+                    "unit": "USD",
+                    "is_derived": None,
+                    "is_fallback": False,
+                }
+            ],
+        )
