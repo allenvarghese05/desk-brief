@@ -18,3 +18,8 @@ How the project was built: one entry per card / review round. Real run incidents
 - Went wrong: pyarrow ships no type stubs and `pyproject.toml` (T00-owned) has no mypy override for it, so the two imports carry `# type: ignore[import-untyped]` instead of a config change. Worktree command guard rejected compound shell commands, so files were written with the editor tools.
 - Decisions: views bind to files present at connect time; tables with no files get empty typed views generated from the declared schema (not from inferred parquet types). `daily_close` reads `interval='1d'` rows with field in (`close`, `yield`, `rate`) and exposes `close`; ties inside a tier break by source name. Dim tables are real tables, not views. `Datasets.append` is write-once per (table, date, run); callers batch per partition.
 - Not done: the `overnight_change(date)` macro from §7.3 (not in the card brief; belongs with the query layer, T20+). Extra views for quarantine/revisions/alerts not added.
+
+## 2026-11-15 · T04 Market calendars · implementer (sonnet-5.5)
+- Did: `calendars.py` (is_business_day, prev/next_business_day, business_days, session_bounds_utc, is_early_close) for XNYS and SIFMA_US via pandas_market_calendars and TARGET via explicit rules (own Easter computation); per-(calendar, year) caches; 27 unit tests.
+- Went wrong: nothing significant; ruff PT018 on a compound assert.
+- Decisions: SIFMA_US exists in pandas_market_calendars 5.6.1 so it is used as-is; SIFMA recommended early closes count as business days. TARGET has no library equivalent, so explicit rules. `is_early_close(d, cal="XNYS")` takes an optional calendar. `datetime` args raise TypeError.
