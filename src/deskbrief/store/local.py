@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 from deskbrief.store.backend import KeyExistsError, KeyNotFoundError
+from deskbrief.store.raw import ensure_not_raw
 
 _TMP_SUFFIX = ".deskbrief-tmp"
 
@@ -34,6 +35,8 @@ class LocalBackend:
         return self.root / _check_key(key)
 
     def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+        if overwrite:
+            ensure_not_raw(key, "overwrite")
         dest = self._path(key)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}{_TMP_SUFFIX}")
@@ -79,5 +82,6 @@ class LocalBackend:
         return sorted(keys)
 
     def delete(self, key: str) -> None:
+        ensure_not_raw(key, "delete")
         with contextlib.suppress(FileNotFoundError):
             self._path(key).unlink()
