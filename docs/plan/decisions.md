@@ -1,6 +1,8 @@
 # Planner decisions
 
-Rulings that change the spec or plan. Each has an id, a date, the decision and the reason. PRs that edit planner-owned docs must cite a ruling here.
+Rulings that change the spec or plan. Each has an id, a date, the decision, the reason and **who ratified it**. PRs that edit planner-owned docs must cite a ratified ruling here. Agents may *propose* rulings; only the planner role, or the project owner when the planner role is held by the same agent as the implementer, may ratify them.
+
+> **Ratification record:** P-001 to P-007 were proposed by the orchestrator agent while implementing T01 and escalated after T01 review round 3 (workflow §4). The project owner, Allen Varghese, chose "Ratify all six" (P-001…P-006) when asked in the Claude Code session on 2026-11-15, and then explicitly instructed the orchestrator to write this record on his behalf. P-007 documents the workflow-doc edit that goes with that decision.
 
 ## P-001 · 2026-11-15 · Unit name `fx_rate` replaces `ratio`
 - Decision: FX observations use unit `fx_rate` (quote currency per unit of base). Spec §4 and §7.2 updated.
@@ -23,5 +25,11 @@ Rulings that change the spec or plan. Each has an id, a date, the decision and t
 - Why: without it two datasets for the same instrument (e.g. Yahoo quote vs history) would be conflated.
 
 ## P-006 · 2026-11-15 · Partition dates and `as_of` semantics
-- Decision: as documented in `src/deskbrief/store/backend.py` and spec §6.
+- Decision, partition `date=` per table: raw = UTC date of `ingested_at`; observations = ET date of `as_of`; quarantine and revisions = ET date of `detected_at`; source_log = ET date of `requested_at`; dq_results, crosscheck_results, alerts, runs = the run's `target_date`; scorecard_daily = the ET date scored.
+- Decision, `as_of`: `tick` = trade/quote instant; `1m` = bar start; `1d` = 00:00 America/New_York on the reference date; `1mo` = 00:00 America/New_York on the first of the reference month. So `et_date(as_of)` is always the reference date.
+- Implemented in `src/deskbrief/store/backend.py` (docstring + `raw_key`) and spec §6.
 - Why: catch-up, rebuild, `daily_close` and `obs_pit` all depend on one shared definition.
+
+## P-007 · 2026-11-15 · Planner rulings live in `docs/plan/decisions.md`
+- Decision: the Planner row in `docs/process/agent-workflow.md` §1 points to this log; a ruling needs ratification as described at the top of this file.
+- Why: T01 review round 3 showed a planner-owned change needs an auditable approver, not just a rationale.
