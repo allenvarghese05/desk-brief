@@ -162,7 +162,17 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Owns:** `src/deskbrief/pipeline/{runner.py,jobs.py,clean.py,catchup.py,manifest.py}`, `src/deskbrief/cli.py`, `tests/unit/pipeline/*`, `tests/fault_injection/inj_runner_*.py`
 - **Spec:** §2.4, §5.4, §5.5
 - Deliverables: `deskbrief run {morning|intraday|eod|backfill|rebuild} [--date] [--dry-run] [--sources]`; runner loop per sequence diagram; failure isolation; quarantine; `runs` row with `schedule_delay_s` (from `GITHUB_EVENT_SCHEDULE` / scheduled time); catch-up for missed business days; exit code 0 for ok/degraded, 1 for failed (only when *no* source succeeded or storage unavailable); GHA step-summary markdown writer; `rebuild` writes `clean/v{N+1}` then flips `_CURRENT`.
+- Storage rule (P-008): buffer rows per run and flush once per (table, ET date); split observations by `et_date(as_of)`.
 - Acceptance: fault-injection tests: one source raising, one returning corrupted body, one 429 storm → run `degraded`, other sources' data present, quarantine row + DQ fail written; rerun same date → no duplicate rows in `obs_latest`; catch-up picks up 2 missed days.
+
+#### T05 — Hardening follow-ups from T01/T02/T04 reviews
+- **Depends:** T02, T04 merged · **Parallel with:** Phase 1 sources (no shared files)
+- **Owns:** `src/deskbrief/logging.py`, `src/deskbrief/calendars.py`, `src/deskbrief/store/{local.py,r2.py,raw.py,datasets.py,duck.py}` and their tests
+- Deliverables (each with a test):
+  - logging: add `secret[_-]?key`, `(session|private|auth)[_-]?(token|key)`, `x-auth-token`, `sessionid` to strong names (T01 confirmation review #1)
+  - calendars: `_check_date` rejects non-`date` types with `TypeError`; validate `cal` before empty-range shortcuts; make `cal` keyword-only in `is_early_close(d, *, cal="XNYS")`; add `add_business_days(cal, d, n)` (used by freshness `lag_bdays`); return read-only cached schedules; raise `pandas-market-calendars` floor to the locked major (T04 review)
+  - storage: backends refuse `overwrite=True` and `delete()` for `raw/` keys; `RawWriter.write` is idempotent on retry (if body exists with the same sha256, continue to sidecar); `Datasets.append` asserts rows belong to `part_date` (P-006); `overwrite` only for `DAILY_TABLES`; R2 boto config `request_checksum_calculation`/`response_checksum_validation` = `when_required`; cache `_CURRENT` per run; escape glob chars in local root (T02 review)
+- Acceptance: all of the above tested; no contract file changes.
 
 ### Phase 2 — Scheduling, quality, cross-checks
 
@@ -170,6 +180,7 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - **Depends:** T19, T10, T11, T12, T13, T16 · **Parallel with:** T20–T22, T30, T34
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
 - Deliverables: cron `15 10,11 * * 1-5` (DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
+- Gate: the R2 integration test (`tests/integration/test_r2.py`) has been run once by the owner with real keys and passed.
 - Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
 #### T20 — DQ framework + single-source checks

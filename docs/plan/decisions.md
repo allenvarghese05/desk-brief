@@ -33,3 +33,14 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 ## P-007 · 2026-11-15 · Planner rulings live in `docs/plan/decisions.md`
 - Decision: the Planner row in `docs/process/agent-workflow.md` §1 points to this log; a ruling needs ratification as described at the top of this file.
 - Why: T01 review round 3 showed a planner-owned change needs an auditable approver, not just a rationale.
+
+## P-008 · 2026-11-16 · One append per (table, ET date) per run
+- Decision: keep the storage key layout (`run={run_id}.parquet`). Within one run, each table/date partition is written exactly once; the runner (T19) buffers rows per run, splits observations by `et_date(as_of)`, and flushes once per (table, date). A second append raises `KeyExistsError` by design.
+- If incremental per-source flushes are ever needed, add an optional `part` to `table_key` (`run={id}-p{n}.parquet`) via a `contract:` PR; existing globs already match it.
+- Why: surfaced in T02 review; keeps files few (small-files goal) and makes double-writes loud.
+- Status: proposed by the planner role; **pending owner ratification** (does not change spec or contracts).
+
+## P-009 · 2026-11-16 · `daily_close` field semantics and display labels
+- Decision: `daily_close` takes fields `close`, `yield` and `rate` as the day's value. Every consumer (report T30–T33, dashboard T34–T35) must label by `field`/`unit` (e.g. "ECB reference rate", "yield %"), never call an ECB fix or a Treasury yield a "close". `daily_close` is latest-version (not point-in-time); report/check code needing reproducibility uses `obs_pit` and excludes the current, unfinished ET date.
+- Why: surfaced in T02 review.
+- Status: proposed by the planner role; **pending owner ratification**.
