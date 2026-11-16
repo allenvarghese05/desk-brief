@@ -201,7 +201,7 @@ These cards collect the non-blocking findings that reviewers deferred on PRs #9�
 Order and shared files:
 - **T09 merges before T06, or in the same window.** Wiring checks into the runner (T06) makes `health_summary` double-count cross-checks until T09 fixes it.
 - **T09's anomaly-reuse bullet waits for T07's anomaly change.** The rest of T09 does not wait.
-- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving step, T31 only the morning step and T24B only the intraday step. Whichever merges later rebases on the earlier one.
+- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving hook (`steps_for`), T31 only the morning row of `steps_for`, and T24B only the intraday branch of `evaluate_gate`. Whichever merges later rebases on the earlier one.
 - T18 runs last, after T06–T09 and T17, because it touches test files those cards own.
 - T08's Twelve Data budget bullet waits for T08B, which waits for the T08A `contract:` PR. The rest of T08 does not wait.
 - Otherwise T07, T08, T08A/T08B and T17 are independent.
@@ -245,11 +245,11 @@ Order and shared files:
 
 #### T08A — `contract:` HttpClient cost argument
 - **Depends:** T03 merged · **Blocks:** T08B
-- **Owns:** `src/deskbrief/sources/base.py` (the `HttpClient` protocol only), as a planner-approved `contract:` PR under the plan's Contracts rule. PR title `contract: <summary>`.
-- Deliverables: add an optional keyword argument to `HttpClient.get` for the number of budget units a request costs, default 1. No behaviour change; `sources/http.py` keeps working with the default until T08B.
+- **Owns:** `src/deskbrief/sources/base.py` (the `HttpClient` protocol only), as a planner-approved `contract:` PR under the plan's Contracts rule (PR title `contract: <summary>`), plus the signature of `DefaultHttpClient.get` in `src/deskbrief/sources/http.py`. T08B owns `http.py` after T08A merges.
+- Deliverables: add an optional keyword argument to `HttpClient.get` for the number of budget units a request costs, default 1. Add the same defaulted keyword to `DefaultHttpClient.get`, accepted and ignored until T08B, so the runner's `http: HttpClient` typing still checks. No behaviour change.
 - Acceptance: the contracts CI check passes with the change declared; mypy passes on every source unchanged.
 
-- Changelog: card created so the contract change T08B needs is tracked, from [PR #22 round 3, finding 3](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925742514).
+- Changelog: card created so the contract change T08B needs is tracked, from [PR #22 round 3, finding 3](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925742514); `DefaultHttpClient.get` signature added from [PR #23 round 1, finding 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
 
 #### T08B — Budget units in the shared HTTP client
 - **Depends:** T03, T08A merged · **Blocks:** T08's Twelve Data budget bullet
@@ -293,7 +293,7 @@ Order and shared files:
   - Add a 2s10s spread row (spec §9.1 sample). It must be derived from two official yields of the same ET date (never a `^TNX` tick minus an official 2Y), shown in bp, and labelled as derived. Source: [PR #21 round 1, deferred items](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914850524).
 - Acceptance: a test with mirrored consistency rows proves `health_summary` counts each cross-check once; the golden test passes after a config-only edit; a 2s10s test rejects a tick leg; a test per remaining bullet.
 
-- Changelog: card created from the PR #18 and #21 reviews linked above.
+- Changelog: card created from the PR #18 and #21 reviews linked above; `tests/unit/test_query.py` added to Owns from [PR #22 round 3, finding 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925742514).
 
 #### T17 — Cross-check follow-ups
 - **Depends:** T21 merged · **Parallel with:** T06–T09 (T22 owns different files)
@@ -301,7 +301,7 @@ Order and shared files:
 - Deliverables (source: [PR #18 round 2](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), confirmation list):
   - Equity leg: exclude a Yahoo tick stamped exactly at the session close (filter `as_of < close`, not `<=`), so it cannot pair with the 15:59 bar and cause a spurious warn. Alternatively, keep it and document the effect in the module docstring (finding 2).
   - Ignore ticks before the session open, and give a pre-market-specific skip reason when no in-session tick exists (finding 3).
-  - Add a test with the summer (CEST) fix-window layout: with a Yahoo FX tick from the P-012 12:15 UTC run, the FX leg pairs it and passes; with no tick in the window, it skips with its specific reason (finding 1).
+  - Add a test with the summer (CEST) fix-window layout: with a Yahoo FX tick from the P-012 fix-time run (12:15 UTC in summer, 13:15 UTC in winter), the FX leg pairs it and passes in both seasons; with no tick in the window, it skips with its specific reason (finding 1).
 - Acceptance: tests for a tick at exactly the close, an early-close day, a pre-market-only day and the summer layout.
 
 - Changelog: card created from the PR #18 round-2 review; summer test updated for P-012.
@@ -331,7 +331,7 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 | Topic | Ruling | Where it lands |
 |---|---|---|
 | Early-close rule | P-011: checks follow each calendar's early close | spec §8.1; T07 |
-| Summer FX run | P-012: extra `intraday` cron at 12:15 UTC, FX-only near the 14:15 Berlin fix | spec §5.4; T24B; T17 test |
+| FX at the ECB fix | P-012: Yahoo FX quote at the 14:15 Berlin fix every weekday; extra 12:15 UTC cron in summer, existing 13:15 UTC trigger in winter | spec §5.3, §5.4; T24B; T17 test |
 | Morning cron form | P-013: two morning crons, one per fire time | spec §5.4; T24A |
 | Agent-log location | P-014: one file per card, `docs/agent-log/T{id}.md` | workflow §8.2, §9; definition of done |
 
@@ -376,12 +376,18 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 
 #### T24B — Remaining workflows
-- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the `pipeline/jobs.py` intraday step (allowed; shared file, see Review follow-ups)
+- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the intraday branch of `evaluate_gate` in `pipeline/jobs.py` (allowed; shared file, see Review follow-ups)
 - Acceptance: each dispatches green; intraday exits early outside session; sla fails if report missing; backfill accepts inputs.
-- `sla.yml` must also catch a morning run that the gate skipped because its cron fired late, past the next fire time.
-- Summer ECB-fix run (P-012): `intraday.yml` adds cron `15 12 * * 1-5`. The intraday step fetches only the Twelve Data FX quote and the Yahoo FX quotes when the run is within ±10 min of 14:15 Europe/Berlin, otherwise it exits `skipped`; the NYSE-session gate does not apply to this fetch. Tests: a CEST date at 12:15 UTC fetches FX only; a CET date at 12:15 UTC is `skipped`.
+- `sla.yml` catches a missing report for any cause, such as a morning run that never starts.
+- ECB-fix FX fetch (P-012):
+  - `intraday.yml` adds cron `15 12 * * 1-5`.
+  - When a trigger falls within ±10 min of 14:15 Europe/Berlin on a TARGET business day, the workflow runs `deskbrief run intraday --sources yahoo`. That is the existing CLI option, and Yahoo's intraday `quote` dataset includes `EURUSD=X`.
+  - The intraday branch of `evaluate_gate` lets that run proceed outside the NYSE session.
+  - Any other trigger outside the session exits `skipped` as today, including the 12:15 trigger in winter and on TARGET holidays.
+  - No Twelve Data request is added: the leg reads the `fx_series_1m` bars from eod.
+  - Tests: a CEST date at 12:15 UTC and a CET date at 13:15 UTC each proceed with Yahoo only; a CET date at 12:15 UTC and a TARGET holiday are `skipped`; a 13:45 UTC CET run outside the session is still `skipped`.
 
-- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012; `jobs.py` intraday-step edit for it.
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
 
 ### Phase 3 — Outputs
 

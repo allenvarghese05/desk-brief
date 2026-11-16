@@ -51,19 +51,33 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 - Status: **ratified by Allen Varghese (project owner)**: he answered "Ratify P-010" in the Claude Code session on 2026-11-15 (ET); the orchestrator wrote this record at his instruction.
 
 ## P-011 · 2026-11-16 · Data checks follow each calendar's early close
-- Decision: on an early-close day of a dataset's calendar, the checks expect the shorter session. Minute-bar completeness counts only the minutes up to the early close. For `SIFMA_US` datasets (Treasury, FRED), a missing value on a SIFMA recommended early-close day, such as Good Friday when SIFMA recommends an early close, is capped at `warn`, because those publishers may skip the day. Spec §8.1 is updated. This ratifies the behaviour T20 already implements and tests (`test_sifma_early_close_missing_value_is_warn_not_fail`).
+- Decision:
+  - On an early-close day of a dataset's calendar, the checks expect the shorter session. Minute-bar completeness counts only the minutes up to the early close.
+  - For `SIFMA_US` datasets (Treasury, FRED), when the data day is a SIFMA recommended early close (for example Good Friday, when SIFMA recommends one), a missing or late value is capped at `warn` instead of `fail`, because those publishers may skip such a day.
+  - Spec §8.1 is updated. This ratifies the behaviour T20 already implements and tests (`test_sifma_early_close_missing_value_is_warn_not_fail`).
 - Why: without it, the checks expect data that never arrives on early-close days and raise false failures. Raised in the [PR #20 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/20#pullrequestreview-5914719908).
-- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16. Asked whether the checks should treat SIFMA early-close days as ending early, he answered "yeah it should because doesnt the market close ealier on holdidays and stuff?". The orchestrator wrote this record at his instruction.
+- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16, in two answers:
+  - Asked whether the checks should treat SIFMA early-close days as ending early, he answered "yeah it should because doesnt the market close ealier on holdidays and stuff?".
+  - Asked whether a Treasury or FRED value missing on an early-close day should be a warning instead of a failure, he chose "Yes, warning (Recommended)".
+- The orchestrator wrote this record at his instruction.
 
-## P-012 · 2026-11-16 · Extra weekday run at the summer ECB fix time
-- Decision: `intraday` gets a second cron, `15 12 * * 1-5` (12:15 UTC). That is the ECB fix time (14:15 Europe/Berlin) while daylight saving is on. On that trigger the job fetches only the FX datasets (the Twelve Data FX quote and the Yahoo FX quotes), and only when the run falls within ±10 minutes of 14:15 Berlin time. Otherwise it exits as `skipped`, which is every winter day. The NYSE-session gate does not apply to this FX-only fetch. Spec §5.4 is updated; T24B builds it.
-- Why: the FX leg of `yahoo_vs_primary` needs a live Yahoo tick from the fix window. Without this run it skips every day from late March to late October. Raised in [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053).
-- Known limit: GitHub cron can start late. On a day it starts after the window, the leg still skips, with its specific reason. The same is true of the winter 13:15 UTC intraday run.
-- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16. He chose "Add the run (Recommended)" when asked whether to add one extra short run every weekday at about 12:15 UTC. The orchestrator wrote this record at his instruction.
+## P-012 · 2026-11-16 · FX fetch at the ECB fix time every weekday
+- Decision:
+  - The FX leg of `yahoo_vs_primary` gets a Yahoo FX quote at the ECB fix (14:15 Europe/Berlin) every weekday.
+  - Summer (CEST): `intraday` gets one extra cron, `15 12 * * 1-5` (12:15 UTC).
+  - Winter (CET): the existing 13:15 UTC `intraday` trigger is used, so there are no extra winter runs.
+  - At the fix time, these runs may fetch FX prices before the NYSE session opens. Without that, the intraday gate stops every run outside the session, and 13:15 UTC is before the open in both seasons.
+  - Spec §5.4 and §5.3 are updated. T24B builds it; the details are in that card.
+- Why: without this the leg skips every day of the year. Raised for summer in [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053). The winter half was found in [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
+- Known limit: GitHub cron can start late. On a day it starts after the fix window, the leg still skips, with its specific reason.
+- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16, in two answers:
+  - Asked whether to add one extra short run every weekday at about 12:15 UTC, he chose "Add the run (Recommended)".
+  - Told that the winter 13:15 UTC run also stops before the stock market opens, and asked whether to keep the 12:15 UTC summer run and let the existing 13:15 UTC winter run fetch just the FX prices before the open (no extra winter runs), he chose "Yes, cover both (Recommended)".
+- The orchestrator wrote this record at his instruction.
 
 ## P-013 · 2026-11-16 · Morning schedule uses one cron per fire time
-- Decision: `morning` uses two cron entries, `15 10 * * 1-5` and `15 11 * * 1-5`, instead of `15 10,11 * * 1-5`. `github.event.schedule` then names the exact fire, and the morning gate (T19, `scheduled_for`) uses it. Spec §5.4 is updated; T24A builds it. A run late past the next fire can still be skipped by the gate; `sla.yml` (T24B) is the safety net.
-- Why: with one combined expression, the gate cannot tell which fire a delayed run belongs to. Raised in [PR #16 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782).
+- Decision: `morning` uses two cron entries, `15 10 * * 1-5` and `15 11 * * 1-5`, instead of `15 10,11 * * 1-5`. `github.event.schedule` then names the exact fire, and the morning gate (T19, `scheduled_for`) uses it, so a delayed run still maps to its own fire and proceeds. Spec §5.4 is updated; T24A builds it. `sla.yml` (T24B) still catches a missing report for any cause, such as a run that never starts.
+- Why: with one combined expression, the gate cannot tell which fire a delayed run belongs to. Raised in [PR #16 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782) and the [T19 author's note on round-1 finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315).
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16. Asked whether to split the morning schedule into one cron per run time, he answered "yes that fine, morning cron work". The orchestrator wrote this record at his instruction.
 
 ## P-014 · 2026-11-16 · One agent-log file per card
