@@ -1,5 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
+import pandas as pd
 import pytest
 
 from deskbrief import calendars as c
@@ -188,3 +190,78 @@ def test_datetime_rejected_elsewhere():
 def test_unknown_calendar_rejected():
     with pytest.raises(ValueError, match="unknown calendar"):
         c.is_business_day("LSE", date(2026, 11, 25))  # type: ignore[arg-type]
+
+
+# --- T05 hardening ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "bad", ["2026-11-25", None, datetime(2026, 11, 25), pd.Timestamp("2026-11-25")]
+)
+def test_non_date_inputs_rejected_everywhere(bad):
+    with pytest.raises(TypeError):
+        c.is_business_day("XNYS", bad)
+    with pytest.raises(TypeError):
+        c.prev_business_day("XNYS", bad)
+    with pytest.raises(TypeError):
+        c.next_business_day("XNYS", bad)
+    with pytest.raises(TypeError):
+        c.session_bounds_utc(bad)
+    with pytest.raises(TypeError):
+        c.is_early_close(bad)
+    with pytest.raises(TypeError):
+        c.business_days("XNYS", bad, date(2026, 11, 30))
+    with pytest.raises(TypeError):
+        c.business_days("XNYS", date(2026, 11, 1), bad)
+    with pytest.raises(TypeError):
+        c.add_business_days("XNYS", bad, 1)
+
+
+def test_unknown_calendar_rejected_before_any_shortcut():
+    bad: Any = "LSE"
+    with pytest.raises(ValueError, match="unknown calendar"):
+        c.business_days(bad, date(2026, 11, 20), date(2026, 11, 19))  # empty range
+    with pytest.raises(ValueError, match="unknown calendar"):
+        c.prev_business_day(bad, date(2026, 11, 20))
+    with pytest.raises(ValueError, match="unknown calendar"):
+        c.next_business_day(bad, date(2026, 11, 20))
+    with pytest.raises(ValueError, match="unknown calendar"):
+        c.is_early_close(date(2026, 11, 28), cal=bad)  # weekend
+    with pytest.raises(ValueError, match="unknown calendar"):
+        c.add_business_days(bad, date(2026, 11, 20), 0)  # zero shortcut
+
+
+def test_is_early_close_cal_is_keyword_only():
+    with pytest.raises(TypeError):
+        c.is_early_close(date(2026, 11, 27), "SIFMA_US")  # type: ignore[misc]
+
+
+def test_add_business_days_forward_back_zero():
+    fri = date(2026, 11, 13)
+    assert c.add_business_days("XNYS", fri, 0) == fri
+    assert c.add_business_days("XNYS", fri, 1) == date(2026, 11, 16)
+    assert c.add_business_days("XNYS", fri, 5) == date(2026, 11, 20)
+    # Thanksgiving 2026-11-26 is skipped
+    assert c.add_business_days("XNYS", date(2026, 11, 25), 1) == date(2026, 11, 27)
+    assert c.add_business_days("XNYS", date(2026, 11, 27), -1) == date(2026, 11, 25)
+    assert c.add_business_days("XNYS", date(2026, 11, 16), -1) == fri
+    # from a weekend: rolls to the neighbouring business day, matching next/prev
+    sat = date(2026, 11, 14)
+    assert c.add_business_days("XNYS", sat, 1) == c.next_business_day("XNYS", sat)
+    assert c.add_business_days("XNYS", sat, -1) == c.prev_business_day("XNYS", sat)
+    assert c.add_business_days("TARGET", date(2026, 12, 24), 1) == date(2026, 12, 28)
+
+
+def test_add_business_days_rejects_non_int_n():
+    with pytest.raises(TypeError):
+        c.add_business_days("XNYS", date(2026, 11, 13), 1.5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        c.add_business_days("XNYS", date(2026, 11, 13), True)
+
+
+def test_cached_schedules_are_read_only():
+    sched = c._schedule("XNYS", 2026)
+    with pytest.raises(TypeError):
+        sched[date(2026, 11, 26)] = (datetime(2026, 1, 1, tzinfo=UTC),) * 2  # type: ignore[index]
+    assert not hasattr(sched, "pop")
+    assert isinstance(c._early_closes("XNYS", 2026), frozenset)
+    assert isinstance(sched[date(2026, 11, 27)], tuple)
+    assert c.session_bounds_utc(date(2026, 11, 26)) is None  # still closed after the attempts

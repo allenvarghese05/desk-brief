@@ -14,7 +14,7 @@ from store_fakes import make_ctx
 
 from deskbrief.config import Config
 from deskbrief.models import FetchRequest, FetchStatus, RawResponse
-from deskbrief.store.backend import KeyExistsError, raw_meta_key
+from deskbrief.store.backend import KeyExistsError, StorageError, raw_meta_key
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.raw import RawWriter, raw_extension
 
@@ -127,12 +127,59 @@ def test_secrets_in_error_never_reach_sidecar(local: LocalBackend, config: Confi
     assert b"SECRET123" not in stored
 
 
-def test_write_once_refuses_second_write(local: LocalBackend, config: Config) -> None:
+def test_identical_retry_is_idempotent(local: LocalBackend, config: Config) -> None:
     ctx = make_ctx(config, local)
     writer = RawWriter(local)
     key = writer.write(_raw(), ctx)
+    assert writer.write(_raw(), ctx) == key
+    assert local.get_bytes(key) == b'{"price": 1.5}'
+    assert len(local.list("raw/")) == 2  # still one body + one sidecar
+
+
+def test_retry_after_crash_between_body_and_sidecar_writes_the_sidecar(
+    local: LocalBackend, config: Config
+) -> None:
+    ctx = make_ctx(config, local)
+    writer = RawWriter(local)
+    key = writer.write(_raw(), ctx)
+    meta = raw_meta_key(key)
+    # INJECTED FAULT: the first attempt died after the body write, before the sidecar write.
+    # raw is immutable through the backend API, so simulate by removing the file on disk.
+    (local.root / meta).unlink()
+    assert not local.exists(meta)
+    assert writer.write(_raw(), ctx) == key
+    sha = hashlib.sha256(b'{"price": 1.5}').hexdigest()
+    assert json.loads(local.get_bytes(meta))["sha256"] == sha
+
+
+def test_existing_sidecar_is_left_untouched_on_retry(local: LocalBackend, config: Config) -> None:
+    ctx = make_ctx(config, local)
+    writer = RawWriter(local)
+    key = writer.write(_raw(), ctx)
+    before = local.get_bytes(raw_meta_key(key))
+    writer.write(_raw(attempts=3), ctx)
+    assert local.get_bytes(raw_meta_key(key)) == before
+
+
+def test_same_key_with_different_bytes_raises(local: LocalBackend, config: Config) -> None:
+    ctx = make_ctx(config, local)
+    writer = RawWriter(local)
+    key = writer.write(_raw(), ctx)
+    # INJECTED FAULT: corrupt the stored body behind the writer's back.
+    (local.root / key).write_bytes(b"tampered")
     with pytest.raises(KeyExistsError):
         writer.write(_raw(), ctx)
+    assert local.get_bytes(key) == b"tampered"  # never replaced
+
+
+def test_raw_objects_cannot_be_overwritten_or_deleted_via_backend(
+    local: LocalBackend, config: Config
+) -> None:
+    key = RawWriter(local).write(_raw(), make_ctx(config, local))
+    with pytest.raises(StorageError, match="immutable"):
+        local.put_bytes(key, b"x", overwrite=True)
+    with pytest.raises(StorageError, match="immutable"):
+        local.delete(key)
     assert local.get_bytes(key) == b'{"price": 1.5}'
 
 
