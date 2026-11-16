@@ -16,8 +16,12 @@ rates stay in the raw file only.
 
 Failure policy: a date for which any of USD/GBP/JPY is missing, or a duplicate or non-positive
 rate, raises :class:`ParseError` (no partial crosses). No data rows at all is a legitimate
-empty frame, as is an HTTP 404 from ``fetch`` (the API's "no results" answer for a day
-without a fixing).
+empty frame (header only). Data rows with none of the three currencies, a ``TIME_PERIOD``
+outside the requested window, or a non-finite/non-positive derived cross also raise.
+
+``fetch`` treats HTTP 404 as ``empty`` only when the body contains the SDMX "No results found"
+text (UNVERIFIED: taken from ECB documentation, to be confirmed by the live probe in
+``docs/sources/ecb.md``). Any other 404 (wrong URL/dataflow, gateway HTML) stays an error.
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from __future__ import annotations
 import csv
 import dataclasses
 import io
+import math
+import re
 from datetime import date
 
 import pandas as pd
@@ -41,6 +47,8 @@ SOURCE = "ecb"
 DATASET = "eurofxref"
 URL = "https://data-api.ecb.europa.eu/service/data/EXR/D.USD+GBP+JPY.EUR.SP00.A"
 _CURRENCIES = ("USD", "GBP", "JPY")
+_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", re.ASCII)  # strict: no "1_16", "nan", "1e3"
+_NO_RESULTS = re.compile(r"no\s+results\s+found", re.IGNORECASE)
 _REQUIRED_COLUMNS = ("CURRENCY", "CURRENCY_DENOM", "TIME_PERIOD", "OBS_VALUE")
 
 
@@ -58,6 +66,8 @@ class EcbSource:
 
         morning: the previous TARGET business day (today's fixing is not out before 07:00 ET);
         eod/backfill/rebuild: ``ctx.target_date`` itself; intraday: nothing (daily source).
+        A morning run on a TARGET holiday or weekend therefore re-plans the same previous
+        business day as the next run (idempotent).
         """
         if job is JobKind.INTRADAY:
             return []
@@ -85,14 +95,19 @@ class EcbSource:
 
     def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse:
         raw = http.get(req, URL, params=req.params)
-        if raw.http_status == 404:  # SDMX "no results": no fixing for the period
-            return dataclasses.replace(raw, error=None, status=FetchStatus.EMPTY)
+        if raw.http_status == 404:
+            text = raw.body[:2000].decode("utf-8", errors="replace")
+            if _NO_RESULTS.search(text) and "<html" not in text.lower():
+                return dataclasses.replace(raw, error=None, status=FetchStatus.EMPTY)
+            if raw.error is None:  # anomalous 404 on a planned day: surface it
+                return dataclasses.replace(raw, error="HTTP 404: unrecognized not-found response")
         return raw
 
     # -- parse -----------------------------------------------------------------------------
 
     def parse(self, raw: RawResponse) -> pd.DataFrame:
         rates = _read_rates(raw.body)
+        _check_window(rates, raw.request)
         if not rates:
             return empty_frame("parsed_observations")
         rows = []
@@ -107,6 +122,9 @@ class EcbSource:
                 "GBPUSD": (usd / gbp, True),
                 "USDJPY": (jpy / usd, True),
             }
+            for symbol, (value, _) in values.items():
+                if not math.isfinite(value) or value <= 0:
+                    raise ParseError(f"ECB {day}: {symbol} is not finite and positive: {value}")
             as_of = et_to_utc(day, "00:00")
             for symbol, (value, derived) in values.items():
                 if symbol not in self._feeds:
@@ -147,21 +165,41 @@ def _read_rates(body: bytes) -> dict[date, dict[str, float]]:
     if missing_cols:
         raise ParseError(f"ECB CSV missing columns {missing_cols}")
     out: dict[date, dict[str, float]] = {}
+    n_rows = 0
     for rec in reader:
+        n_rows += 1
         if rec["CURRENCY_DENOM"] != "EUR" or rec["CURRENCY"] not in _CURRENCIES:
             continue
         try:
             day = date.fromisoformat(rec["TIME_PERIOD"])
+            if not _DECIMAL.fullmatch(rec["OBS_VALUE"]):
+                raise ValueError("OBS_VALUE is not a plain decimal")
             value = float(rec["OBS_VALUE"])
         except (TypeError, ValueError) as exc:
             raise ParseError(f"ECB row not parseable: {rec!r}") from exc
-        if not value > 0 or value == float("inf"):
+        if not math.isfinite(value) or value <= 0:
             raise ParseError(f"ECB non-positive or non-finite rate: {rec!r}")
         ccy = rec["CURRENCY"]
         if ccy in out.setdefault(day, {}):
             raise ParseError(f"ECB duplicate {ccy} rate for {day}")
         out[day][ccy] = value
+    if n_rows and not out:
+        raise ParseError("ECB CSV has data rows but none for USD/GBP/JPY against EUR")
     return out
+
+
+def _check_window(rates: dict[date, dict[str, float]], req: FetchRequest) -> None:
+    """Reject dates outside the requested ``startPeriod``/``endPeriod`` (server ignored them)."""
+    try:
+        start = (
+            date.fromisoformat(req.params["startPeriod"]) if "startPeriod" in req.params else None
+        )
+        end = date.fromisoformat(req.params["endPeriod"]) if "endPeriod" in req.params else None
+    except ValueError as exc:
+        raise ParseError(f"bad request window in params: {exc}") from exc
+    for day in rates:
+        if (start and day < start) or (end and day > end):
+            raise ParseError(f"ECB TIME_PERIOD {day} outside requested window {start}..{end}")
 
 
 register(SOURCE, EcbSource)

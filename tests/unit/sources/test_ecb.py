@@ -6,6 +6,7 @@ on ECB's documented SDMX CSV; replace with a real capture (see docs/sources/ecb.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -194,11 +195,60 @@ def test_fetch_requests_ecb_url(src: EcbSource, config: Config) -> None:
     assert raw.fetch_status is FetchStatus.OK
 
 
-def test_fetch_404_is_empty_not_error(src: EcbSource, config: Config) -> None:
+class Fake404(FakeHttp):
+    """http client stand-in that sets ``error`` like DefaultHttpClient does for non-2xx."""
+
+    def get(
+        self, req: FetchRequest, url: str, *, params: Mapping[str, str] | None = None, **_: object
+    ) -> RawResponse:
+        raw = super().get(req, url, params=params)
+        return dataclasses.replace(raw, error=f"HTTP {self.status}")
+
+
+def _planned(src: EcbSource, config: Config) -> FetchRequest:
     (req,) = src.plan(JobKind.EOD, ctx(config, date(2026, 11, 13)))
-    raw = src.fetch(req, FakeHttp(404, b"No results found"))
+    return req
+
+
+def test_fetch_404_with_sdmx_no_results_body_is_empty(src: EcbSource, config: Config) -> None:
+    # body text UNVERIFIED (from ECB docs); see docs/sources/ecb.md
+    body = b"No results found"
+    raw = src.fetch(_planned(src, config), Fake404(404, body))
     assert raw.fetch_status is FetchStatus.EMPTY
     assert raw.error is None
+    assert raw.body == body  # evidence stored byte for byte
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"Not Found",
+        b"",
+        b'{"error":"unknown dataflow"}',
+        b"<html><body>404 Not Found</body></html>",
+    ],
+)
+def test_fetch_404_with_unrelated_body_is_error(
+    src: EcbSource, config: Config, body: bytes
+) -> None:
+    raw = src.fetch(_planned(src, config), Fake404(404, body))
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.error
+    assert raw.body == body
+
+
+def test_fetch_gateway_html_404_mentioning_no_results_is_error(
+    src: EcbSource, config: Config
+) -> None:
+    body = b"<html><title>404</title><p>No results found for your request</p></html>"
+    raw = src.fetch(_planned(src, config), Fake404(404, body))
+    assert raw.fetch_status is FetchStatus.ERROR
+
+
+def test_fetch_404_without_client_error_text_still_errors(src: EcbSource, config: Config) -> None:
+    raw = src.fetch(_planned(src, config), FakeHttp(404, b"Not Found"))
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.error
 
 
 def test_fetch_server_error_stays_error(src: EcbSource, config: Config) -> None:
@@ -254,3 +304,47 @@ def test_plan_morning_uses_previous_target_day(src: EcbSource, config: Config) -
 
 def test_plan_intraday_is_empty(src: EcbSource, config: Config) -> None:
     assert src.plan(JobKind.INTRADAY, ctx(config, date(2026, 11, 13))) == []
+
+
+def test_rows_without_required_currencies_raise(src: EcbSource) -> None:
+    with pytest.raises(ParseError, match="none for USD/GBP/JPY"):
+        src.parse(raw_of(rows("k,CHF,EUR,2026-11-13,0.93", "k,USD,GBP,2026-11-13,1.3")))
+
+
+@pytest.mark.parametrize("value", ["1_16", "1e0", "+1.16", " 1.16", "1,16", "inf", "\u0661.16"])
+def test_strict_decimal_rejected(src: EcbSource, value: str) -> None:
+    with pytest.raises(ParseError):
+        src.parse(raw_of(rows(f"k,USD,EUR,2026-11-13,{value}")))
+
+
+def test_non_finite_cross_raises(src: EcbSource) -> None:
+    body = rows(
+        "k,USD,EUR,2026-11-13,1.16",
+        "k,GBP,EUR,2026-11-13,0." + "0" * 330 + "1",  # underflows to 0.0 -> GBPUSD = inf/zero
+        "k,JPY,EUR,2026-11-13,180",
+    )
+    with pytest.raises(ParseError):
+        src.parse(raw_of(body))
+
+
+def test_cross_overflow_raises(src: EcbSource) -> None:
+    body = rows(
+        "k,USD,EUR,2026-11-13,0." + "0" * 300 + "1",
+        "k,GBP,EUR,2026-11-13,0.88",
+        "k,JPY,EUR,2026-11-13," + "9" * 20,  # USDJPY = 1e20 / 1e-301 overflows to inf
+    )
+    with pytest.raises(ParseError):
+        src.parse(raw_of(body))
+
+
+def test_time_period_outside_requested_window_raises(src: EcbSource, config: Config) -> None:
+    req = _planned(src, config)  # window 2026-11-13..2026-11-13
+    ok = rows(
+        *(f"k,{c},EUR,2026-11-13,{v}" for c, v in (("USD", 1.16), ("GBP", 0.88), ("JPY", 180)))
+    )
+    assert len(src.parse(raw_of(ok, req=req))) == 3
+    bad = rows(
+        *(f"k,{c},EUR,2026-11-12,{v}" for c, v in (("USD", 1.16), ("GBP", 0.88), ("JPY", 180)))
+    )
+    with pytest.raises(ParseError, match="outside requested window"):
+        src.parse(raw_of(bad, req=req))

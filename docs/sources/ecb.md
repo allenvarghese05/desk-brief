@@ -18,7 +18,8 @@
 ## Decisions
 
 - **Missing currency -> `ParseError`**, not a skip. If USD, GBP or JPY is absent for a date, the crosses cannot be built; emitting a partial set would be partial garbage (base.py rule). Duplicate, non-numeric, non-positive or NaN rates also raise.
-- **No data rows -> empty frame.** `fetch` also maps HTTP 404 (the SDMX "no results" answer) to status `empty`, not `error`. Other HTTP errors stay errors.
+- **Header-only/zero-row body -> empty frame.** Data rows but none for USD/GBP/JPY vs EUR -> `ParseError`. Derived crosses must be finite and positive; `OBS_VALUE` must be a plain decimal (`1_16`, `1e0`, `nan` rejected); `TIME_PERIOD` outside the requested `startPeriod`/`endPeriod` -> `ParseError`.
+- **HTTP 404:** `empty` only if the body contains the SDMX text "No results found" (case-insensitive) and is not HTML. This text is UNVERIFIED (from ECB documentation), pending the probe. Any other 404 (wrong URL/dataflow, gateway page) stays an `error`, because `plan` never asks for a TARGET holiday, so a 404 on a planned day is anomalous. Record the real 404 body here after the probe.
 - **TARGET holidays and weekends:** `plan` returns no request. Morning plans the previous TARGET business day; eod/backfill/rebuild plan `target_date`; intraday plans nothing.
 - The parser ignores leading `#` comment lines (used by the synthetic fixture header).
 
@@ -29,5 +30,5 @@ The probe was denied by the permission gate in the build environment, and the 40
 1. Run (no key needed):
    `curl -sS -D headers.txt -o exr.csv "https://data-api.ecb.europa.eu/service/data/EXR/D.USD+GBP+JPY.EUR.SP00.A?lastNObservations=3&format=csvdata"`
 2. Check: HTTP 200; columns include `CURRENCY`, `CURRENCY_DENOM` (= `EUR`), `TIME_PERIOD` (`YYYY-MM-DD`), `OBS_VALUE`; three currencies per date; `Content-Type`.
-3. Also check a TARGET holiday (for example `startPeriod=endPeriod=2026-04-06`): expect HTTP 404 or an empty body.
+3. Also check a TARGET holiday (for example `startPeriod=endPeriod=2026-04-06`): expect HTTP 404; record the exact body text and update `_NO_RESULTS` in `ecb.py` to match.
 4. Save the real CSV as `tests/fixtures/real/ecb/exr_d_usd_gbp_jpy.csv` (small, 3 days), point the golden test at it, update expected values, delete the synthetic fixture, and record the date, status and sample rows here and in the PR.
