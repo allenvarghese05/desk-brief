@@ -24,8 +24,11 @@ Error handling
   the same way.
 * **Batch with one bad symbol**: ``parse`` emits the good symbols and logs
   ``twelvedata.parse.symbol_error`` for each bad one (provider error entry, unusable value, or a
-  requested symbol missing from the response). Only when *no* symbol is usable does it raise
-  :class:`ParseError`. ``fetch`` leaves such a response ``ok``.
+  requested symbol missing from the response). Requested-but-missing symbols count as failures,
+  so a 200 object containing none of the requested symbols (``{}``, an unrelated object) raises
+  :class:`ParseError`, as does any response where no requested symbol is usable. A present entry
+  with an empty ``values`` list is a legitimate empty frame. ``fetch`` leaves such a response
+  ``ok``.
 
 Key and budget
 --------------
@@ -57,6 +60,7 @@ import pandas as pd
 
 from deskbrief.calendars import is_business_day
 from deskbrief.config import Config, Feed, Instrument
+from deskbrief.ids import new_id
 from deskbrief.logging import get_logger
 from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext
 from deskbrief.schemas import empty_frame, to_frame
@@ -180,14 +184,14 @@ class TwelveDataSource:
         index = self._quote if dataset == "fx_quote" else self._series
         entries = _entries(doc, dataset, raw.request.symbols)
         log = get_logger(source=self.name, dataset=dataset)
+        rows: list[dict[str, Any]] = []
+        good = bad = 0
         for sym in raw.request.symbols:
-            if sym not in entries:
+            if sym not in entries:  # a requested symbol the provider did not return is a failure
+                bad += 1
                 log.warning(
                     "twelvedata.parse.symbol_error", symbol=sym, error="missing in response"
                 )
-
-        rows: list[dict[str, Any]] = []
-        good = bad = 0
         for symbol, entry in entries.items():
             known = index.get(symbol)
             if known is None:
@@ -232,8 +236,6 @@ class _SymbolError(Exception):
 
 
 def _new_fetch_id() -> str:
-    from deskbrief.ids import new_id
-
     return new_id()
 
 

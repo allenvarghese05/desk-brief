@@ -137,7 +137,10 @@ def test_plan_quote_batch_for_morning_and_intraday(
     assert r.window is None
 
 
-def test_plan_never_carries_the_key(src: TwelveDataSource, config: Config) -> None:
+def test_plan_never_carries_the_key(
+    src: TwelveDataSource, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TWELVEDATA_API_KEY", KEY)
     for job in (JobKind.MORNING, JobKind.EOD):
         for r in src.plan(job, ctx_for(config, job)):
             assert not any("key" in k.lower() for k in r.params)
@@ -284,6 +287,24 @@ def test_parse_quote_bad_symbol_entry_is_dropped_not_fatal(src: TwelveDataSource
     doc["GBP/USD"] = bad
     df = src.parse(raw_for("fx_quote", json.dumps(doc).encode()))
     assert set(df["symbol"]) == {"EUR/USD", "USD/JPY"}
+
+
+@pytest.mark.parametrize("dataset", ["fx_quote", "fx_series_1m"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{}",
+        b'{"status": "ok"}',
+        b'{"foo": {"bar": 1}, "baz": 2}',
+        b'{"XAU/USD": {"symbol": "XAU/USD", "timestamp": 1794575700, "close": "2400.1"}}',
+    ],
+    ids=["empty-object", "status-only", "unrelated", "only-unconfigured-symbols"],
+)
+def test_parse_response_without_any_requested_symbol_is_parse_error(
+    src: TwelveDataSource, dataset: str, body: bytes
+) -> None:
+    with pytest.raises(ParseError, match="no usable"):
+        src.parse(raw_for(dataset, body, window=WIN))
 
 
 def test_parse_quote_all_symbols_failed_is_parse_error(src: TwelveDataSource) -> None:

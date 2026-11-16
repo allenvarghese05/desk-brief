@@ -20,6 +20,7 @@ verified against the live service.
 | Window | `crosschecks.fx_vs_ecb.fix_time_cet` (14:15) +/- 10 min, via `timeutil.local_to_utc(..., CET)`: 13:05-13:25 UTC in winter, 12:05-12:25 UTC in summer (21 bars; `FetchRequest.window` is `[start, end)` so it ends at 13:26) |
 | Plans | morning, intraday: `fx_quote`. eod: `fx_series_1m` on TARGET business days only (holiday or weekend plans nothing). backfill, rebuild: nothing |
 | Bars outside the window | dropped by `parse` |
+| No `mid` field | none is produced: bars give `close`, quotes give `last` (and `bid`/`ask` when present). The `fx_vs_ecb` cross-check (spec §8.2 says "1m mid") must use the bar `close` at the fix bar, or compute a mid itself |
 
 ## Error handling decisions
 
@@ -33,7 +34,9 @@ verified against the live service.
 2. **Batch where one symbol errors**: `fetch` leaves the response `ok`. `parse` emits the good
    symbols and logs `twelvedata.parse.symbol_error` (symbol and reason) for each bad one: provider
    error entry, non-numeric or non-positive value, missing timestamp, malformed bar, or a requested
-   symbol absent from the response. If no symbol is usable, `ParseError`. Zero rows with valid
+   symbol absent from the response (counted as a failure, so a 200 object with none of the
+   requested symbols, such as `{}` or an unrelated object, is a `ParseError`). If no symbol is
+   usable, `ParseError`. Zero rows with valid
    entries (empty `values`) is a legitimate empty frame. The per-symbol flag is a log line only;
    there is no schema column for it. A DQ completeness check (T20) will see the missing pair.
 3. **Missing key**: error `RawResponse` (`http_status=None`, `error` names `TWELVEDATA_API_KEY`),
