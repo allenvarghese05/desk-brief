@@ -70,6 +70,8 @@ class RawWriter:
         """Store ``raw`` and its sidecar; return the raw key.
 
         Idempotent for an identical retry; raises ``KeyExistsError`` if the key holds other bytes.
+        A retry keeps the original sidecar: if one exists it is not rewritten, so a retry with
+        different metadata (a new ``fetch_id``, more ``attempts``) silently keeps the first one.
 
         Callers decide whether responses with an empty body (budget exhausted, calendar skip)
         belong in raw/; this writer stores whatever it is given.

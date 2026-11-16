@@ -34,9 +34,12 @@ from deskbrief.models import RunContext
 from deskbrief.schemas import TABLES, empty_frame, validate
 from deskbrief.store.backend import (
     CLEAN_CURRENT_KEY,
+    CLEAN_PREFIX,
     DAILY_TABLES,
+    TABLE_LAYER,
     KeyNotFoundError,
     StorageBackend,
+    StorageError,
     scorecard_key,
     table_key,
     table_prefix,
@@ -76,6 +79,7 @@ PARTITION_RULES: dict[str, tuple[str, Callable[[object], date]]] = {
     "dq_results": ("target_date", _plain_date),
     "crosscheck_results": ("target_date", _plain_date),
     "runs": ("target_date", _plain_date),
+    "scorecard_daily": ("date", _plain_date),  # the ET date scored
 }
 
 
@@ -128,8 +132,22 @@ class Datasets:
             self._clean_version = current_clean_version(self._store)
         return self._clean_version
 
+    def _check_version_not_stale(self) -> None:
+        """One cheap read of ``clean/_CURRENT`` before a clean-table write (never on reads)."""
+        cached = self.clean_version()
+        now = current_clean_version(self._store)
+        if now != cached:
+            raise StorageError(
+                f"clean/_CURRENT is {now!r} but this Datasets instance resolved {cached!r}; "
+                "call refresh_clean_version() or create a new Datasets before writing"
+            )
+
     def refresh_clean_version(self) -> str:
-        """Re-read ``clean/_CURRENT`` (e.g. after a rebuild flipped it)."""
+        """Re-read ``clean/_CURRENT`` (e.g. after a rebuild flipped it).
+
+        An instance that forgets to call this after a flip is not silent: the next clean-table
+        ``append`` raises ``StorageError`` instead of writing to the old version.
+        """
         self._clean_version = None
         return self.clean_version()
 
@@ -158,6 +176,8 @@ class Datasets:
         if overwrite and table not in DAILY_TABLES:
             raise ValueError(f"overwrite is only allowed for daily tables, not {table!r}")
         key = self.key_for(table, part_date, ctx.run_id)
+        if TABLE_LAYER.get(table) == CLEAN_PREFIX:
+            self._check_version_not_stale()
         validate(table, df)
         check_partition(table, df, part_date)
         arrow = pa.Table.from_pandas(df, schema=arrow_schema(table), preserve_index=False)

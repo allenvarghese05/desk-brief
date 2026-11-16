@@ -49,6 +49,24 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_KEY_RE = re.compile(r"(^|[_-])token$", re.IGNORECASE)  # token, access_token; not token_state
+# Same names as the free-text strong tier, anchored so session_key_count / author / auth_state
+# stay readable: private_key, session_token, auth-key, x-auth-token, sessionid, bare "auth".
+_NAMED_KEY_RE = re.compile(
+    r"((private|session|auth)[_-]?(token|key)|sessionid|(^|[_-])auth)$", re.IGNORECASE
+)
+
+# Strong-tier values that are obviously not credentials (whole value, case-insensitive) stay
+# readable: status words, booleans, an already-masked value, and 1-3 digit numbers.
+_PLACEHOLDER_RE = re.compile(
+    r"(required|missing|none|null|ok|expired|n/a|true|false|\*\*\*|\d{1,3})", re.IGNORECASE
+)
+
+# Weak-tier values that look like market/cache keys stay readable: two or more segments split
+# on ":" or "_", each short and uppercase/numeric ("SPY", "EURUSD", "13", "00Z"), an interval
+# ("1m", "1mo"), or a date ("2026-11-14", "2026-11-14T13"). Lowercase or long segments
+# ("sk_live_abc", "AbCd...") are still treated as credentials.
+_KEY_SEGMENT = r"(?:[A-Z0-9]{1,8}|\d+(?:mo|m|h|d|w)|\d{4}-\d{2}-\d{2}(?:T\d{2})?)"
+_MARKET_KEY_RE = re.compile(rf"{_KEY_SEGMENT}(?:[:_]{_KEY_SEGMENT})+")
 
 # Free text. Two tiers so we neither leak nor mangle ordinary diagnostics:
 #  * strong names: masked after "=" or ":" whatever the value looks like
@@ -82,6 +100,24 @@ _HEADER_LINE_RE = re.compile(r"\b(authorization|cookie|set-cookie)(\s*:\s*)[^\r\
 _USERINFO_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^/\s@]+@", re.IGNORECASE)
 
 
+def _mask_header(m: re.Match[str]) -> str:
+    if _PLACEHOLDER_RE.fullmatch(m.group(0)[m.end(2) - m.start(0) :].strip()):
+        return m.group(0)
+    return f"{m.group(1)}{m.group(2)}{MASK}"
+
+
+def _mask_strong(m: re.Match[str]) -> str:
+    if _PLACEHOLDER_RE.fullmatch(m.group("val")):
+        return m.group(0)
+    return f"{m.group('name')}{m.group('q1') or ''}{m.group('sep')}{m.group('q2') or ''}{MASK}"
+
+
+def _mask_weak(m: re.Match[str]) -> str:
+    if _MARKET_KEY_RE.fullmatch(m.group("val")):
+        return m.group(0)
+    return f"{m.group('name')}{m.group('sep')}{MASK}"
+
+
 def _env_secrets(names: Iterable[str]) -> list[str]:
     vals = [os.environ.get(n, "") for n in names]
     # ignore very short values to avoid masking ordinary words
@@ -100,15 +136,10 @@ def redact_text(text: str, env_secrets: Iterable[str] = ()) -> str:
 
     def _mask(t: str) -> str:
         t = _USERINFO_RE.sub(lambda m: f"{m.group(1)}{MASK}@", t)
-        t = _HEADER_LINE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", t)
+        t = _HEADER_LINE_RE.sub(_mask_header, t)
         t = _BEARER_RE.sub(lambda m: f"{m.group(1) or m.group(2)} {MASK}", t)
-        t = _STRONG_RE.sub(
-            lambda m: (
-                f"{m.group('name')}{m.group('q1') or ''}{m.group('sep')}{m.group('q2') or ''}{MASK}"
-            ),
-            t,
-        )
-        t = _WEAK_RE.sub(lambda m: f"{m.group('name')}{m.group('sep')}{MASK}", t)
+        t = _STRONG_RE.sub(_mask_strong, t)
+        t = _WEAK_RE.sub(_mask_weak, t)
         for secret in secrets:
             for form in (secret, quote(secret, safe=""), quote_plus(secret)):
                 t = t.replace(form, MASK)
@@ -135,7 +166,7 @@ def redact_value(value: Any, env_secrets: Iterable[str] = (), key: str | None = 
     if (
         key is not None
         and value != ""
-        and (_SECRET_KEY_RE.search(key) or _TOKEN_KEY_RE.search(key))
+        and (_SECRET_KEY_RE.search(key) or _TOKEN_KEY_RE.search(key) or _NAMED_KEY_RE.search(key))
     ):
         return MASK
     if isinstance(value, str):

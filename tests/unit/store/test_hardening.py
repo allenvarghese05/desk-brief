@@ -295,16 +295,56 @@ def test_current_pointer_resolved_once_per_instance(tmp_path: Path, config: Conf
     store = _CountingBackend(tmp_path / "data")
     store.put_bytes("clean/_CURRENT", b"v3")
     ds = Datasets(store)
-    for i in range(3):
-        ds.append(
-            "observations",
-            _obs(datetime(2026, 11, 13, 5, tzinfo=UTC)),
-            make_ctx(config, store, run_id=f"R{i}"),
-            D,
-        )
-    ds.read("observations")
+    for _ in range(3):  # key_for / read never re-read the pointer
+        assert ds.key_for("observations", D, "R9").startswith("clean/v3/")
+        ds.read("observations")
     assert store.pointer_reads == 1
-    assert ds.key_for("observations", D, "R9").startswith("clean/v3/")
+    # a clean-table append makes exactly one extra cheap read as the staleness guard
+    ds.append(
+        "observations", _obs(datetime(2026, 11, 13, 5, tzinfo=UTC)), make_ctx(config, store), D
+    )
+    assert store.pointer_reads == 2
+
+
+def test_append_refuses_to_write_after_current_was_flipped(
+    local: LocalBackend, config: Config
+) -> None:
+    ds = Datasets(local)
+    obs = _obs(datetime(2026, 11, 13, 5, tzinfo=UTC))
+    ds.append("observations", obs, make_ctx(config, local, run_id="A"), D)  # resolves v1
+    local.put_bytes("clean/_CURRENT", b"v2")  # rebuild flips the pointer
+    with pytest.raises(StorageError, match="refresh_clean_version"):
+        ds.append("observations", obs, make_ctx(config, local, run_id="B"), D)
+    assert local.list("clean/v2/") == []  # nothing written to either version by the refusal
+    assert len(local.list("clean/v1/")) == 1
+    assert ds.refresh_clean_version() == "v2"
+    key = ds.append("observations", obs, make_ctx(config, local, run_id="B"), D)
+    assert key.startswith("clean/v2/")
+    # non-clean tables do not depend on the pointer
+    Datasets(local).append("runs", _runs(D), make_ctx(config, local, run_id="C"), D)
+
+
+def test_scorecard_rows_must_match_the_partition_date(local: LocalBackend, config: Config) -> None:
+    def card(day: date) -> pd.DataFrame:
+        return to_frame(
+            "scorecard_daily",
+            [
+                {
+                    "source": "yahoo",
+                    "date": day,
+                    "fetches": 1,
+                    "ok_rate": 1.0,
+                    "error_rate": 0.0,
+                    "n_crosschecks": 0,
+                }
+            ],
+        )
+
+    ds = Datasets(local)
+    with pytest.raises(ValueError, match="scorecard_daily: date falls on 2020-01-01"):
+        ds.append("scorecard_daily", card(date(2020, 1, 1)), make_ctx(config, local), D)
+    assert local.list("") == []
+    ds.append("scorecard_daily", card(D), make_ctx(config, local), D)
 
 
 # --- DuckDB glob escaping -------------------------------------------------------------------------
