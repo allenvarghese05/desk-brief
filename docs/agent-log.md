@@ -12,3 +12,8 @@ How the project was built: one entry per card / review round. Real run incidents
 - Went wrong: pandas resolved to 3.x (new default string dtype and datetime resolution), so schemas check "tz-aware UTC datetime of any unit" and "string values in str/object columns" instead of pinning dtypes.
 - Decisions: secrets never live in `FetchRequest`; they are passed to `HttpClient.get(secret_params=..., secret_headers=...)` so they can't reach raw/ or logs. Added `Instrument.is_proxy` + `label` so proxy labeling is data-driven.
 - Review round 1 (REQUEST_CHANGES, 7 major): the fresh reviewer probed redaction and found real bypasses (Bearer tokens, cookies, URL userinfo, URL-encoding, JSON-in-string, exceptions/bytes via repr, stdlib httpx logs); schemas rejected empty and all-null frames; partition-date and `as_of` semantics were undefined; config lacked feeds the source cards need. All fixed with tests; schemas are now generated from one declaration with `empty_frame`/`to_frame` helpers. Lesson: contracts need a reviewer that actively probes, not just reads.
+
+## 2026-11-15 · T04 Market calendars · implementer (sonnet-5.5)
+- Did: `calendars.py` (is_business_day, prev/next_business_day, business_days, session_bounds_utc, is_early_close) for XNYS and SIFMA_US via pandas_market_calendars and TARGET via explicit rules (own Easter computation); per-(calendar, year) caches; 27 unit tests.
+- Went wrong: nothing significant; ruff PT018 on a compound assert.
+- Decisions: SIFMA_US exists in pandas_market_calendars 5.6.1 so it is used as-is; SIFMA recommended early closes count as business days. TARGET has no library equivalent, so explicit rules. `is_early_close(d, cal="XNYS")` takes an optional calendar. `datetime` args raise TypeError.
