@@ -47,7 +47,7 @@ def test_secret_keys_masked_recursively() -> None:
 
 
 def test_env_secret_values_masked_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FRED_API_KEY", "fredkey0123456789")
+    monkeypatch.setenv("FRED_API_KEY", "fredkey0123456789")  # gitleaks:allow (fake test value)
     line = _log_line(error="401 for key fredkey0123456789 in body")
     assert "fredkey0123456789" not in json.dumps(line)
 
