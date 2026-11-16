@@ -237,7 +237,6 @@ def test_daily_close_one_row_per_instrument_and_et_date(
         "R1",
         [
             _close(3, "stooq", 3.0),  # 2026-11-13, EST
-            _close(3, "stooq", 4.0, as_of=summer),  # 2026-07-15, EDT
             obs_row(
                 instrument_id="UST_10Y",
                 source="treasury",
@@ -260,6 +259,10 @@ def test_daily_close_one_row_per_instrument_and_et_date(
             ),
         ],
     )
+    # its own partition: observations are partitioned by et_date(as_of) (P-006)
+    write_obs(
+        local, config, "R2", [_close(3, "stooq", 4.0, as_of=summer)], part=date(2026, 7, 15)
+    )  # 2026-07-15, EDT
     conn = connect(local, config)
     got = rows_of(
         conn, "SELECT instrument_id, date, close, chosen_source FROM daily_close ORDER BY 1, 2"
