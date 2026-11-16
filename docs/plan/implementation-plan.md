@@ -8,7 +8,7 @@ Rules that apply to every card:
 - `config.yaml` *values* are not contracts: a source card may add or adjust feeds/datasets **for its own source** (disclose in the PR). Other config edits go through the planner (ruling P-004 in `docs/plan/decisions.md`).
 - **Contracts** (frozen after Phase 0): `models.py`, `schemas.py`, `sources/base.py`, `store/backend.py` public API, `config.py` models, storage key layout (§6), table schemas (§7.2), Excel table names (§9.2). Changing one needs a planner-approved `contract:` PR merged first.
 - TDD: failing test first. No network in unit tests. Synthetic data only under `tests/`, labeled.
-- Definition of done for every card: acceptance criteria met, `make ci` green locally and in CI, reviewer APPROVE, `docs/agent-log.md` entry appended.
+- Definition of done for every card: acceptance criteria met, `make ci` green locally and in CI, reviewer APPROVE, `docs/agent-log/T{id}.md` entry written (P-014).
 
 ---
 
@@ -49,7 +49,8 @@ flowchart TD
   T09 --> T06
   T06 --> T23
   T20 --> T07[T07 Data-check follow-ups]
-  T03 --> T08B[T08B Budget units in HTTP client]
+  T08A[T08A contract: HttpClient cost argument] --> T08B[T08B Budget units in HTTP client]
+  T03 --> T08A
   T05 & T08B --> T08[T08 Source + logging follow-ups]
   T07 -.->|anomaly bullet only| T09
   T21 --> T17[T17 Cross-check follow-ups]
@@ -67,7 +68,7 @@ flowchart TD
 | W4 Wed/Thu | T24B | T23 | T31 | T32 → T33 | T35 | T40 |
 | W5 Fri | T41 | T42 | fixes from run history | | | |
 
-Review follow-ups (T06–T09, T08B, T17, T18) fill free lanes from W3 on, within the ordering rules in their section. T09 lands before or with T06, and T06 before T23.
+Review follow-ups (T06–T09, T08A, T08B, T17, T18) fill free lanes from W3 on, within the ordering rules in their section. T09 lands before or with T06, and T06 before T23.
 
 Critical path: **T00 → T01 → T02/T03 → T05 + T19 + official sources → T24A** (scheduled runs start) → T20/T21 → T30 → T31 (email live). Everything else hangs off this.
 
@@ -200,9 +201,10 @@ These cards collect the non-blocking findings that reviewers deferred on PRs #9�
 Order and shared files:
 - **T09 merges before T06, or in the same window.** Wiring checks into the runner (T06) makes `health_summary` double-count cross-checks until T09 fixes it.
 - **T09's anomaly-reuse bullet waits for T07's anomaly change.** The rest of T09 does not wait.
-- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving step and T31 only the morning step. Whichever merges later rebases on the earlier one.
+- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving step, T31 only the morning step and T24B only the intraday step. Whichever merges later rebases on the earlier one.
 - T18 runs last, after T06–T09 and T17, because it touches test files those cards own.
-- Otherwise T07, T08, T08B and T17 are independent.
+- T08's Twelve Data budget bullet waits for T08B, which waits for the T08A `contract:` PR. The rest of T08 does not wait.
+- Otherwise T07, T08, T08A/T08B and T17 are independent.
 
 #### T06 — Wire checks and cross-checks into the runner; runner safety
 - **Depends:** T19, T20, T21 merged; T09 merged first or in the same window · **Parallel with:** T07, T08, T17 · **Blocks:** T23 (scorecard reads `dq_results`/`crosscheck_results` written by real runs)
@@ -237,14 +239,22 @@ Order and shared files:
   - Docstring for the eod minute-completeness rule: the 22:30 UTC eod run judges the previous session's bars, per P-009 (finding 6).
   - Rename the fault-injection test file to match the Owns glob, or record why it cannot (finding 7).
 - Acceptance: one table-driven test per bullet above; no change to the `dq_results` schema.
-- Owner decision first: the Good Friday SIFMA early-close rule tested in `test_checks_schedule.py` is not in spec §8.1 (finding 3). It needs a ratified ruling before this card adds it to acceptance. See "Decisions waiting on the owner" below.
+- Early closes (P-011, now in spec §8.1): keep T20's early-close behaviour, and make every new check in this card follow it. Minute completeness counts only minutes up to the early close. A missing or late `SIFMA_US` value on a SIFMA recommended early close is at most `warn` (finding 3).
 
-- Changelog: card created from the PR #20 review and the PR #16 merge confirmation.
+- Changelog: card created from the PR #20 review and the PR #16 merge confirmation; early-close line from P-011.
+
+#### T08A — `contract:` HttpClient cost argument
+- **Depends:** T03 merged · **Blocks:** T08B
+- **Owns:** `src/deskbrief/sources/base.py` (the `HttpClient` protocol only), as a planner-approved `contract:` PR under the plan's Contracts rule. PR title `contract: <summary>`.
+- Deliverables: add an optional keyword argument to `HttpClient.get` for the number of budget units a request costs, default 1. No behaviour change; `sources/http.py` keeps working with the default until T08B.
+- Acceptance: the contracts CI check passes with the change declared; mypy passes on every source unchanged.
+
+- Changelog: card created so the contract change T08B needs is tracked, from [PR #22 round 3, finding 3](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925742514).
 
 #### T08B — Budget units in the shared HTTP client
-- **Depends:** T03 merged; a planner-approved `contract:` PR merged first (see below) · **Blocks:** T08's Twelve Data budget bullet
+- **Depends:** T03, T08A merged · **Blocks:** T08's Twelve Data budget bullet
 - **Owns:** `src/deskbrief/sources/http.py`, `tests/unit/sources/test_http.py`
-- Contract first: the `HttpClient` protocol that `Source.fetch` receives is defined in `src/deskbrief/sources/base.py`, a contract file. Adding a cost argument to `get` is a contract change. It lands as its own planner-approved `contract:` PR (plan rule "Contracts"), which adds an optional keyword argument with default 1, before T08B starts. T08B does not own `sources/base.py`.
+- Contract first: the `HttpClient` protocol that `Source.fetch` receives is defined in `src/deskbrief/sources/base.py`, a contract file. Adding a cost argument to `get` is a contract change. It lands first as card T08A, a planner-approved `contract:` PR. T08B does not own `sources/base.py`.
 - Deliverables: add a `units` argument (default 1) to `BudgetTracker.try_consume` and implement the new `HttpClient.get` cost argument in `sources/http.py`. Existing callers do not change.
 - Acceptance: a test that a cost-5 call consumes 5 units and is refused when fewer remain; all existing source tests pass unchanged.
 - Why its own card: every source uses this API, so it lands and is reviewed alone. The source review itself says it "needs a contract change". Source: [PR #17 round 2, finding 2](https://github.com/allenvarghese05/desk-brief/pull/17#pullrequestreview-5914845514).
@@ -264,14 +274,14 @@ Order and shared files:
   - Yahoo: raise the `yfinance` floor to the 1.x API the code uses; document (or fix) that futures, indices and yields drop today's bar even after the session ends; make the "empty on a US business day means error" rule depend on the symbol set, not only the date. Source: [PR #13 round 2, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/13#pullrequestreview-5914461338).
   - FRED: add a test that every configured FRED series has an entry in `SERIES_SPECS`, so a new config series fails CI; assert the warning in the skip test; consider logging the skip at error level. Source: [PR #14 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/14#pullrequestreview-5914397821).
   - Logging: decide each of two known gaps: all-uppercase short-segment credential values kept by the weak tier, and short numeric values kept for strong names (passwords, secrets, API keys) by the placeholder exemption. For each, either tighten the rule and add the probes from the source review as MUST_MASK cases, or record the cases as known-unmasked in the `logging.py` docstring and as MUST_KEEP cases with a comment. The review offers both options. Source: [PR #15 review, findings 1–2](https://github.com/allenvarghese05/desk-brief/pull/15#pullrequestreview-5914412921).
-- Acceptance: a test per bullet. T08 makes no change to `sources/base.py`; the protocol change belongs to the `contract:` PR before T08B.
+- Acceptance: a test per bullet. T08 makes no change to `sources/base.py`; the protocol change belongs to T08A.
 - Out of scope: live probes (owner task; see "Live-probe gates" below).
 
 - Changelog: card created from the PR #11, #13, #14, #15, #17 and #19 reviews linked above.
 
 #### T09 — Brief-model follow-ups
 - **Depends:** T30 merged; T07 for the anomaly-reuse bullet · **Parallel with:** T08, T17 · **Blocks:** T06 (or merges in the same window)
-- **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/*`, `tests/brief_synth.py`
+- **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/*`, `tests/unit/test_query.py`, `tests/brief_synth.py`
 - Deliverables:
   - `health_summary`: do not count a cross-check twice. T21 mirrors each cross-check as a `consistency` row in `dq_results`. Exclude those rows from the DQ count, or count only the mirror. Source: [PR #18 merge confirmation](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6907020326).
   - Where the model shows cross-check rows, label them with `details.ref_date`, not the run's `target_date`. Source: [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053).
@@ -291,10 +301,10 @@ Order and shared files:
 - Deliverables (source: [PR #18 round 2](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), confirmation list):
   - Equity leg: exclude a Yahoo tick stamped exactly at the session close (filter `as_of < close`, not `<=`), so it cannot pair with the 15:59 bar and cause a spurious warn. Alternatively, keep it and document the effect in the module docstring (finding 2).
   - Ignore ticks before the session open, and give a pre-market-specific skip reason when no in-session tick exists (finding 3).
-  - Add a test with the summer (CEST) fix-window layout. Today it proves the FX leg skips with its specific reason. If the owner adds a summer run, it proves the leg passes (finding 1).
+  - Add a test with the summer (CEST) fix-window layout: with a Yahoo FX tick from the P-012 12:15 UTC run, the FX leg pairs it and passes; with no tick in the window, it skips with its specific reason (finding 1).
 - Acceptance: tests for a tick at exactly the close, an early-close day, a pre-market-only day and the summer layout.
 
-- Changelog: card created from the PR #18 round-2 review.
+- Changelog: card created from the PR #18 round-2 review; summer test updated for P-012.
 
 #### T18 — Make the test suite runnable in a sandbox
 - **Depends:** T06, T07, T08, T09, T17 merged (they own most of the test directories below) · **Parallel with:** T22 and later cards
@@ -315,26 +325,26 @@ Every source card merged with its live probe PENDING and synthetic fixtures only
 
 - Changelog: list created from the reviews linked above; it adds no new gate beyond G1.
 
-#### Decisions waiting on the owner
-These need a ratified ruling in `docs/plan/decisions.md` (P-010). This PR proposes none.
+#### Owner decisions (ruled 2026-11-16)
+The four open questions from the follow-up reviews are now ratified rulings in `docs/plan/decisions.md`:
 
-| Topic | Question | Source |
+| Topic | Ruling | Where it lands |
 |---|---|---|
-| Early-close rule | Should freshness use the SIFMA early close (e.g. Good Friday) and cap due times at it? It is tested in T20 but not in spec §8.1. | [PR #20, finding 3](https://github.com/allenvarghese05/desk-brief/pull/20#pullrequestreview-5914719908) |
-| Summer FX run | Spec §7 crons have no run inside the summer (CEST) ECB fix window, 12:05–12:25 UTC, so the FX leg of `yahoo_vs_primary` skips from late March to late October. Add a run in that window? | [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) |
-| Morning cron form | Spec §7 and T24A use one cron with two fire times (`15 10,11 * * 1-5`). With one expression per fire time, `github.event.schedule` would name the exact fire, but that changes the spec §7 cron text. Split it? A run late past the next fire can be skipped by the gate either way, and `sla.yml` (T24B) is the safety net. | [PR #16 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782), [author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315) |
-| Agent-log location | Workflow §8.2 says `docs/agent-log.md`, but every card since T10 wrote `docs/agent-log/T{id}.md`. Which is right? Until ruled, follow-up cards update agent logs wherever the card's PR already keeps them. | [PR #11, finding 7](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201), [PR #14, finding 3](https://github.com/allenvarghese05/desk-brief/pull/14#pullrequestreview-5914397821) |
+| Early-close rule | P-011: checks follow each calendar's early close | spec §8.1; T07 |
+| Summer FX run | P-012: extra `intraday` cron at 12:15 UTC, FX-only near the 14:15 Berlin fix | spec §5.4; T24B; T17 test |
+| Morning cron form | P-013: two morning crons, one per fire time | spec §5.4; T24A |
+| Agent-log location | P-014: one file per card, `docs/agent-log/T{id}.md` | workflow §8.2, §9; definition of done |
 
 ### Phase 2 — Scheduling, quality, cross-checks
 
 #### T24A — `morning.yml` v0 (ship first)
 - **Depends:** T19, T10, T11, T12, T13, T16, T05 · **Parallel with:** T20–T22, T30, T34
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
-- Deliverables: cron `15 10,11 * * 1-5` (DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
+- Deliverables: two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013; DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
 - **Depends also on T05** (R2 checksum config). Gate: the owner runs `tests/integration/test_r2.py` with real keys **on `main` at or after the T05 merge**, and the commit SHA plus the pass output are pasted into the T24A PR description.
 - Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
-- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review.
+- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review; two morning crons from P-013.
 #### T20 — DQ framework + single-source checks
 - P-009: checks needing reproducible daily values read `obs_pit`, never `daily_close`, and exclude the current unfinished ET date.
 - **Depends:** T02, T04 · **Parallel with:** T21, T30, T34
@@ -366,12 +376,12 @@ These need a ratified ruling in `docs/plan/decisions.md` (P-010). This PR propos
 - Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 
 #### T24B — Remaining workflows
-- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`
+- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the `pipeline/jobs.py` intraday step (allowed; shared file, see Review follow-ups)
 - Acceptance: each dispatches green; intraday exits early outside session; sla fails if report missing; backfill accepts inputs.
 - `sla.yml` must also catch a morning run that the gate skipped because its cron fired late, past the next fire time.
-- If the owner rules to add a summer ECB-fix run (see "Decisions waiting on the owner"), it lives in `intraday.yml` and the FX leg of `yahoo_vs_primary` passes on a CEST date in a dispatch test.
+- Summer ECB-fix run (P-012): `intraday.yml` adds cron `15 12 * * 1-5`. The intraday step fetches only the Twelve Data FX quote and the Yahoo FX quotes when the run is within ±10 min of 14:15 Europe/Berlin, otherwise it exits `skipped`; the NYSE-session gate does not apply to this fetch. Tests: a CEST date at 12:15 UTC fetches FX only; a CET date at 12:15 UTC is `skipped`.
 
-- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053).
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012; `jobs.py` intraday-step edit for it.
 
 ### Phase 3 — Outputs
 

@@ -159,7 +159,7 @@ Rules:
 - Source cards: run one live probe locally with real keys (never commit responses from commercial
   providers) and record results in the PR.
 - Open the PR with the template fully filled; title `t{ID}: <summary>`.
-- Append an entry to docs/agent-log.md: date, card, what you did, what went wrong, decisions.
+- Write your entry in docs/agent-log/T{ID}.md (P-014): date, card, what you did, what went wrong, decisions.
 - On review: address each finding by number; reply in each thread; push fixes as new commits
   (no force-push). Never resolve a reviewer's thread yourself — the next reviewer does.
 - Never set the `review/approved` commit status. Only reviewer agents set it.
@@ -200,7 +200,7 @@ You are reviewing PR #{N} in desk-brief. You have no other context; that is inte
 5. Do not edit code, push, or merge. Do not approve if CI is red.
 ```
 
-## 9. Agent log format (`docs/agent-log.md`)
+## 9. Agent log format (`docs/agent-log/T{ID}.md`, one file per card, P-014)
 
 ```
 ## 2026-11-17 · T14 Alpaca source · implementer (sonnet-5.5)
