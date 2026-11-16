@@ -184,6 +184,17 @@ MUST_MASK = [
     ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"),
     ("https://x/q?key=BAREKEY123", "BAREKEY123"),
     ("https://x/q?sig=abcdefghijklmnopqrst", "abcdefghijklmnopqrst"),
+    # T05 (SYNTHETIC FIXTURE): secret_key, session|private|auth token|key, x-auth-token, sessionid
+    # split so the gitleaks generic-api-key rule does not flag the (synthetic) probe itself
+    ("SECRET_KEY" + ": " + "abcd1234efgh", "abcd1234efgh"),
+    ("MY_SECRET_KEY=abc123", "abc123"),
+    ("ALPACA_SECRET_KEY: 'abc'", "abc'"),
+    ('{"secret_key": "abcd1234"}', "abcd1234"),
+    ("x-auth-token: v4lue99", "v4lue99"),
+    ("sessionid=abc123def", "abc123def"),
+    ("session_token=sess0987", "sess0987"),
+    ("private-key: pk0987", "pk0987"),
+    ("authtoken=at0987", "at0987"),
 ]
 MUST_KEEP = [
     "missing key: EURUSD",

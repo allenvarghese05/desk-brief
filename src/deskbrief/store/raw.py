@@ -1,11 +1,16 @@
 """Raw layer writer: provider bytes stored exactly as received, plus a metadata sidecar.
 
 Spec §2.2: raw is write-once. The key holds the ingest timestamp and a sha256 prefix, and both
-objects are written with ``overwrite=False``, so a second write of the same response raises
-``KeyExistsError`` instead of replacing evidence.
+objects are written with ``overwrite=False``; the backends also refuse ``overwrite=True`` and
+``delete()`` for anything under ``raw/`` (:func:`ensure_not_raw`).
 
 Order: body first, then sidecar. If the sidecar write fails the body stays (it is still the
 true provider response); the error propagates so the run records it.
+
+Retries are idempotent: if the body key already exists and its stored bytes hash to the same
+sha256 as the new body, the writer carries on and writes the sidecar if it is missing (the
+previous attempt died between the two writes). A body key that holds *different* bytes raises
+``KeyExistsError``; an existing sidecar is left untouched.
 
 ``ingested_at`` of a raw object is ``RawResponse.responded_at`` (the same instant every parsed
 observation later carries), and its partition date is the UTC date of that instant (P-006).
@@ -13,13 +18,27 @@ observation later carries), and its partition date is the UTC date of that insta
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from datetime import datetime
 from typing import Any
 
 from deskbrief.models import RawResponse, RunContext
-from deskbrief.store.backend import StorageBackend, raw_key, raw_meta_key
+from deskbrief.store.backend import (
+    RAW_PREFIX,
+    KeyExistsError,
+    StorageBackend,
+    StorageError,
+    raw_key,
+    raw_meta_key,
+)
+
+
+def ensure_not_raw(key: str, action: str) -> None:
+    """Raise ``StorageError`` if ``key`` is under ``raw/`` (raw is immutable evidence)."""
+    if key.startswith(f"{RAW_PREFIX}/"):
+        raise StorageError(f"raw is immutable: refusing to {action} {key!r}")
 
 
 def raw_extension(content_type: str) -> str:
@@ -48,7 +67,9 @@ class RawWriter:
         self._store = store
 
     def write(self, raw: RawResponse, ctx: RunContext) -> str:
-        """Store ``raw`` and its sidecar; return the raw key. Raises ``KeyExistsError`` on repeat.
+        """Store ``raw`` and its sidecar; return the raw key.
+
+        Idempotent for an identical retry; raises ``KeyExistsError`` if the key holds other bytes.
 
         Callers decide whether responses with an empty body (budget exhausted, calendar skip)
         belong in raw/; this writer stores whatever it is given.
@@ -61,8 +82,17 @@ class RawWriter:
             sha256=sha,
             ext=raw_extension(raw.content_type),
         )
-        self._store.put_bytes(key, raw.body)
-        self._store.put_bytes(raw_meta_key(key), self._sidecar(raw, ctx, sha))
+        try:
+            self._store.put_bytes(key, raw.body)
+        except KeyExistsError:
+            existing = self._store.get_bytes(key)
+            if hashlib.sha256(existing).hexdigest() != sha:
+                raise KeyExistsError(key) from None
+        meta_key = raw_meta_key(key)
+        if not self._store.exists(meta_key):
+            # KeyExistsError: a concurrent retry wrote it first; the sidecar is write-once
+            with contextlib.suppress(KeyExistsError):
+                self._store.put_bytes(meta_key, self._sidecar(raw, ctx, sha))
         return key
 
     @staticmethod

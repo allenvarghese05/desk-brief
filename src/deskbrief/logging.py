@@ -58,8 +58,9 @@ _TOKEN_KEY_RE = re.compile(r"(^|[_-])token$", re.IGNORECASE)  # token, access_to
 # The look-behind forbids only letters/digits, so prefixed names (client_secret,
 # x-api-key, refresh-token) still match while "monkey=3" does not.
 _STRONG = (
-    r"api[_-]?key|apikey|[a-z]*secret|password|passwd|access[_-]?key|key[_-]?id"
+    r"api[_-]?key|apikey|secret[_-]?key|[a-z]*secret|password|passwd|access[_-]?key|key[_-]?id"
     r"|access[_-]?token|refresh[_-]?token|id[_-]?token|signature|credential|security[_-]?token"
+    r"|(?:session|private|auth)[_-]?(?:token|key)|x-auth-token|sessionid"
     r"|x-amz-signature|x-amz-credential|x-amz-security-token|APCA-API-KEY-ID|APCA-API-SECRET-KEY"
 )
 _STRONG_RE = re.compile(
