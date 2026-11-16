@@ -6,13 +6,19 @@ SYNTHETIC FIXTURE: all data comes from ``brief_synth`` (made-up values, labelled
 
 from __future__ import annotations
 
+import itertools
+import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
+import brief_synth
 from brief_synth import FRI, MON, MON_0700, World, daily, et, monday_rows, tick
 from deskbrief.report.model import BriefModel, Row, signed
+
+GOLDEN = Path(__file__).parent / "golden" / "brief_model.json"
 
 
 @pytest.fixture
@@ -60,7 +66,7 @@ def test_thanksgiving_gap_skips_the_holiday(tmp_path: Path) -> None:
 
 def test_yield_label_is_basis_points_since_previous_official_value(world: World) -> None:
     r = row(build(world), "UST_10Y")
-    assert r.description == "US 10-year Treasury yield, −3bp since previous official value"
+    assert r.description == "US 10-year Treasury yield, −3bp since previous official value (13 Nov)"
     assert r.value_text == "4.37%"
 
 
@@ -181,3 +187,53 @@ def test_json_round_trip_and_determinism(world: World) -> None:
     assert BriefModel.from_json(text) == m
     assert build(world).to_json() == text
     assert "−" in text  # UTF-8 kept, not escaped
+
+
+def test_stale_tick_shows_its_date(tmp_path: Path, world: World) -> None:
+    assert row(build(world), "ES_F").as_of_text == "06:59"
+    w = World(tmp_path / "stale")
+    w.observations(
+        [
+            daily("WTI", FRI, 72.0, source="yahoo", dataset="history", tier=2),
+            tick("WTI", et(FRI, "15:30"), 71.0),
+        ]
+    )
+    wti = row(build(w), "WTI")
+    assert wti.as_of_text == "13 Nov 15:30"
+
+
+def test_baseline_date_is_part_of_the_description(world: World) -> None:
+    es = row(build(world), "ES_F")
+    assert es.description.endswith("since previous NYSE close (13 Nov)")
+
+
+def test_derived_cross_is_a_known_limit(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    ecb = {"source": "ecb", "dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}
+    w.observations(
+        [
+            daily("GBPUSD", date(2026, 11, 12), 1.30, is_derived=True, **ecb),
+            daily("GBPUSD", FRI, 1.31, is_derived=True, **ecb),
+        ]
+    )
+    m = build(w)
+    assert "ECB derived cross rate" in row(m, "GBPUSD").description
+    assert "GBPUSD" in {k.kind: k.text for k in m.known_limits}["derived"]
+
+
+def test_golden_json_snapshot(tmp_path: Path) -> None:
+    brief_synth._ids = itertools.count(1)  # ids appear in lineage: make them order-independent
+    world = World(tmp_path)
+    world.observations(monday_rows())
+    world.dq(MON, [("fresh", "pass", "yahoo", None), ("range", "fail", "stooq", "WTI")])
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)])
+    world.fetches(MON, [("yahoo", "ok")])
+    text = build(world).to_json()
+    json.loads(text, parse_constant=_reject_constant)
+    if os.environ.get("UPDATE_GOLDEN"):
+        GOLDEN.write_text(text, encoding="utf-8")
+    assert text == GOLDEN.read_text(encoding="utf-8")
+
+
+def _reject_constant(name: str) -> None:
+    raise AssertionError(f"non-finite number in JSON: {name}")

@@ -171,7 +171,7 @@ class BriefModel:
         enabled = [s for s, st in config.sources.items() if st.enabled]
         summary = health_summary(duck, report_date, expected_sources=enabled)
 
-        rows = {i.id: _row(i, changes.get(i.id)) for i in config.instruments}
+        rows = {i.id: _row(i, changes.get(i.id), report_date) for i in config.instruments}
         sections = tuple(
             Section(ac, title, tuple(rows[i.id] for i in config.instruments if i.asset_class == ac))
             for ac, title in SECTIONS
@@ -196,7 +196,7 @@ class BriefModel:
     # -- serialisation ------------------------------------------------------
     def to_json(self) -> str:
         """Deterministic JSON (stable key order, UTC ISO timestamps, UTF-8 characters kept)."""
-        return json.dumps(_encode(self), indent=2, ensure_ascii=False) + "\n"
+        return json.dumps(_encode(self), indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
     @classmethod
     def from_json(cls, text: str) -> Self:
@@ -241,11 +241,25 @@ def value_text(row: ValueRow) -> str:
     return f"{v:,.2f}"
 
 
-def _as_of_text(row: ValueRow) -> str:
+def _as_of_text(row: ValueRow, report_date: date) -> str:
+    """Daily values show their date; intraday ones show the time, plus the date unless today."""
     et = to_et(row.as_of)
     if row.interval in ("1d", "1mo"):
         return f"{et.day} {et:%b}"
-    return f"{et:%H:%M}"
+    if et.date() == report_date:
+        return f"{et:%H:%M}"
+    return f"{et.day} {et:%b} {et:%H:%M}"
+
+
+def _basis_text(change: ChangeRow) -> str:
+    """``previous NYSE close (13 Nov)``: the baseline always carries its own date."""
+    text = change.basis
+    if change.previous is not None:
+        prev = to_et(change.previous.as_of)
+        text += f" ({prev.day} {prev:%b})"
+    if change.note:
+        text += f"; {change.note}"
+    return text
 
 
 def _title(report_time: datetime) -> str:
@@ -262,7 +276,7 @@ def _short(instrument_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _row(inst: Instrument, change: ChangeRow | None) -> Row:
+def _row(inst: Instrument, change: ChangeRow | None, report_date: date) -> Row:
     if change is None:
         return Row(
             instrument_id=inst.id,
@@ -287,7 +301,7 @@ def _row(inst: Instrument, change: ChangeRow | None) -> Row:
     if last.is_proxy and last.proxy_label:
         label = f"{label} — {last.proxy_label}"
     if change.status == "ok":
-        tail = f"{change_text(change)} since {change.basis}"
+        tail = f"{change_text(change)} since {_basis_text(change)}"
     elif change.status == "no_move_yet":
         tail = f"no move to report since {change.basis}"
     else:
@@ -304,7 +318,7 @@ def _row(inst: Instrument, change: ChangeRow | None) -> Row:
         change_text=change_text(change),
         description=f"{label}, {tail}",
         basis=change.basis,
-        as_of_text=_as_of_text(last),
+        as_of_text=_as_of_text(last, report_date),
         tier=last.tier,
         tier_glyph=TIER_GLYPH.get(last.tier, ""),
         tier_name=TIER_NAME.get(last.tier, ""),
@@ -371,7 +385,9 @@ def _notable(
         if ch.change is None:
             continue
         past = hist.get(ch.last.instrument_id, ())
-        diffs = [measure(ch.last, a.value, b.value)[0] for a, b in pairwise(past)]
+        diffs = [
+            d for a, b in pairwise(past) if (d := measure(ch.last, a.value, b.value)[0]) is not None
+        ]
         diffs = diffs[-window:]
         if len(diffs) < MIN_MOVES_FOR_Z or (sd := statistics.stdev(diffs)) == 0:
             continue
@@ -417,13 +433,18 @@ def _known_limits(
         out.append(
             KnownLimit(
                 "tiers",
-                "◐ delayed values are exact but not live; ○ official values are as of "
+                "◐ delayed values are not live; ○ official values are as of "
                 "their publication date (shown), not today",
             )
         )
     fallbacks = sorted({f"{r.instrument_id} ({r.source})" for r in snapshot if r.is_fallback})
     if fallbacks:
         out.append(KnownLimit("fallback", "Fallback source standing in: " + ", ".join(fallbacks)))
+    derived = sorted(r.instrument_id for r in snapshot if r.is_derived)
+    if derived:
+        out.append(
+            KnownLimit("derived", "Derived values, not published directly: " + ", ".join(derived))
+        )
     missing = [r.instrument_id for r in rows.values() if not r.available]
     if missing:
         out.append(KnownLimit("unavailable", f"{UNAVAILABLE.capitalize()}: " + ", ".join(missing)))

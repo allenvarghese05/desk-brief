@@ -48,6 +48,7 @@ def obs(
     dataset: str = "daily",
     symbol: str = "SYN",
     is_fallback: bool = False,
+    is_derived: bool = False,
     ingested_at: datetime | None = None,
     fetch_id: str | None = None,
 ) -> dict[str, Any]:
@@ -69,7 +70,7 @@ def obs(
         "as_of": as_of,
         "value": value,
         "unit": unit,
-        "is_derived": False,
+        "is_derived": is_derived,
         "is_fallback": is_fallback,
         "fetch_id": fetch_id or f"F{n}",
         "run_id": f"RUNOBS{n // 1000}",

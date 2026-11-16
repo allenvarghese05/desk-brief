@@ -132,7 +132,7 @@ def test_measure_units(world: World) -> None:
     assert (bp, unit) == (pytest.approx(-3.0), "bp")
     assert query.measure(snap["ES_F"], 100.0, 101.0) == (pytest.approx(1.0), "pct")
     assert query.measure(snap["VIX"], 16.0, 16.6) == (pytest.approx(0.6), "pts")
-    assert query.measure(snap["EURUSD"], 0.0, 1.0) == (0.0, "pct")  # no division by zero
+    assert query.measure(snap["EURUSD"], 0.0, 1.0) == (None, "pct")  # missing, not 0%
 
 
 def test_series_one_value_per_day_oldest_first_without_current_day(world: World) -> None:
@@ -233,3 +233,42 @@ def test_health_summary_on_empty_store(tmp_path: Path) -> None:
     assert h.issues == ()
     assert h.run_status is None
     assert {s.status for s in h.sources} == {"missing"}  # every configured source
+
+
+def test_derived_cross_is_not_called_a_reference_rate(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    ecb = {"source": "ecb", "dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}
+    w.observations(
+        [
+            daily("GBPUSD", THU, 1.30, is_derived=True, **ecb),
+            daily("GBPUSD", FRI, 1.31, is_derived=True, **ecb),
+            daily("EURUSD", FRI, 1.08, **ecb),
+        ]
+    )
+    snap = {r.instrument_id: r for r in query.latest_snapshot(w.connect(), MON_0700)}
+    assert snap["GBPUSD"].is_derived
+    assert query.field_label(snap["GBPUSD"]) == "ECB derived cross rate"
+    assert query.field_label(snap["EURUSD"]) == "ECB reference rate"
+
+
+def test_zero_baseline_gives_missing_change(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations([daily("WTI", FRI, 0.0), tick("WTI", et(MON, "06:58"), 5.0)])
+    ch = change_of(query.overnight_changes(w.connect(), MON, MON_0700), "WTI")
+    assert ch.change is None
+    assert ch.status == "no_baseline"
+
+
+def test_baseline_from_another_source_is_noted(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    ecb = {"dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}
+    w.observations(
+        [
+            daily("EURUSD", THU, 1.00, source="ecb", **ecb),
+            daily("EURUSD", FRI, 1.10, source="stooq", tier=3, **{**ecb, "dataset": "daily"}),
+        ]
+    )
+    ch = change_of(query.overnight_changes(w.connect(), MON, MON_0700), "EURUSD")
+    assert ch.previous is not None
+    assert ch.note is not None
+    assert "ecb" in ch.note

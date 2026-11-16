@@ -245,25 +245,36 @@ def family_of(row: ValueRow) -> str:
     return "price"
 
 
-def measure(row: ValueRow, previous: float, last: float) -> tuple[float, str]:
-    """The change from ``previous`` to ``last`` in the unit used to display ``row``."""
+def measure(row: ValueRow, previous: float, last: float) -> tuple[float | None, str]:
+    """The change from ``previous`` to ``last`` in the unit used to display ``row``.
+
+    The change is None (missing) when a percentage is asked of a zero baseline.
+    """
     family = family_of(row)
     if family == "yield":
         return (last - previous) * 100.0, "bp"
     if row.asset_class == "vol":
         return last - previous, "pts"
     if family in ("price", "rate") and (row.unit != "pct" or family == "price"):
-        return ((last / previous - 1.0) * 100.0 if previous else 0.0), "pct"
+        return ((last / previous - 1.0) * 100.0 if previous else None), "pct"
     return last - previous, "pp" if row.unit == "pct" else "pts"
 
 
-def _change(last: ValueRow, previous: ValueRow | None, basis: str, status: str) -> ChangeRow:
+def _change(
+    last: ValueRow,
+    previous: ValueRow | None,
+    basis: str,
+    status: str,
+    note: str | None = None,
+) -> ChangeRow:
     family = family_of(last)
     if previous is None or status != "ok":
         unit = measure(last, 1.0, 1.0)[1]
         return ChangeRow(last, previous, family, basis, None, unit, status)
     change, unit = measure(last, previous.value, last.value)
-    return ChangeRow(last, previous, family, basis, change, unit, "ok")
+    if change is None:
+        return ChangeRow(last, previous, family, basis, None, unit, "no_baseline")
+    return ChangeRow(last, previous, family, basis, change, unit, "ok", note)
 
 
 def _et(row: ValueRow) -> date:
@@ -315,7 +326,14 @@ def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
         ]
         earlier = same or earlier
     previous = earlier[0] if earlier else None  # history is newest first, best tier first
-    return _change(last, previous, BASIS_OFFICIAL, "ok" if previous else "no_baseline")
+    note = None
+    if (
+        previous is not None
+        and last.interval in OFFICIAL_INTERVALS
+        and previous.source != last.source
+    ):
+        note = f"baseline from {previous.source}, not {last.source}"
+    return _change(last, previous, BASIS_OFFICIAL, "ok" if previous else "no_baseline", note)
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +528,9 @@ def _source_health(
 def field_label(row: ValueRow) -> str:
     """What the value *is*: never calls a yield or an ECB fix a close."""
     if row.field == "rate":
-        return "ECB reference rate" if row.source == "ecb" else "rate"
+        if row.source != "ecb":
+            return "rate"
+        return "ECB derived cross rate" if row.is_derived else "ECB reference rate"
     if row.field == "yield" or row.kind == "yield":
         return "yield"
     return row.field  # close | last
