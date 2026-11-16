@@ -21,6 +21,7 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from deskbrief.store.backend import KeyExistsError, KeyNotFoundError, StorageError
+from deskbrief.store.raw import ensure_not_raw
 
 _NOT_FOUND = {"NoSuchKey", "404", "NotFound"}
 _PRECONDITION_FAILED = {"PreconditionFailed", "412"}
@@ -52,6 +53,16 @@ def r2_credentials_from_env(env: Mapping[str, str]) -> R2Credentials:
     raise StorageError(f"R2 credentials not configured; missing env vars: {', '.join(missing)}")
 
 
+def r2_boto_config() -> BotoConfig:
+    """Client config for R2. boto3 >= 1.36 adds CRC checksums by default, which R2 rejects on
+    some operations; ``when_required`` restores the old behaviour."""
+    return BotoConfig(
+        retries={"max_attempts": 5, "mode": "standard"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    )
+
+
 def _code(exc: ClientError) -> str:
     return str(exc.response.get("Error", {}).get("Code", ""))
 
@@ -71,7 +82,7 @@ class R2Backend:
             aws_access_key_id=creds.access_key_id,
             aws_secret_access_key=creds.secret_access_key,
             region_name="auto",
-            config=BotoConfig(retries={"max_attempts": 5, "mode": "standard"}),
+            config=r2_boto_config(),
         )
         return cls(bucket, client)
 
@@ -82,6 +93,8 @@ class R2Backend:
         )
 
     def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+        if overwrite:
+            ensure_not_raw(key, "overwrite")
         kwargs: dict[str, Any] = {"Bucket": self.bucket, "Key": key, "Body": data}
         if not overwrite:
             kwargs["IfNoneMatch"] = "*"
@@ -123,6 +136,7 @@ class R2Backend:
         return sorted(keys)
 
     def delete(self, key: str) -> None:
+        ensure_not_raw(key, "delete")
         try:
             self._client.delete_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:

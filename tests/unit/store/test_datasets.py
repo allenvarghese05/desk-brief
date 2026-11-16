@@ -96,7 +96,8 @@ def test_write_once_per_run_table_and_date(local: LocalBackend, config: Config) 
     ds.append("observations", df, ctx, D)
     with pytest.raises(KeyExistsError):
         ds.append("observations", df, ctx, D)
-    ds.append("observations", df, ctx, D, overwrite=True)  # explicit opt-in only
+    with pytest.raises(ValueError, match="overwrite is only allowed for daily tables"):
+        ds.append("observations", df, ctx, D, overwrite=True)
     ds.append("observations", df, make_ctx(config, local, run_id="RUN2"), D)  # new run is fine
     assert len(ds.read("observations")) == 2
 
@@ -115,7 +116,7 @@ def test_read_filters_by_partition_date_and_spans_runs(local: LocalBackend, conf
     d1, d2 = date(2026, 11, 12), date(2026, 11, 13)
     ds.append(
         "observations",
-        to_frame("observations", [obs_row(value=1.0)]),
+        to_frame("observations", [obs_row(value=1.0, as_of=datetime(2026, 11, 12, 5, tzinfo=UTC))]),
         make_ctx(config, local, run_id="A"),
         d1,
     )
@@ -190,6 +191,8 @@ def test_read_follows_current_pointer(local: LocalBackend, config: Config) -> No
         D,
     )
     local.put_bytes("clean/_CURRENT", b"v2")
+    assert ds.clean_version() == "v1"  # resolved once per instance, not re-read on every call
+    assert ds.refresh_clean_version() == "v2"
     assert ds.read("observations").empty  # v2 has no data yet
     ds.append(
         "observations",
