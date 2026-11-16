@@ -1,0 +1,379 @@
+# Desk Brief configuration. Validated by deskbrief.config (python -m deskbrief.config).
+# Thresholds are starting values; every tuning is recorded in INCIDENTS.md ("false alarm tuned").
+# Items marked VERIFY must be confirmed against the live source by the matching source card.
+version: 1
+timezone_report: America/New_York
+
+storage:
+  backend: local          # r2 in GitHub Actions / dashboard (DESKBRIEF_STORAGE_BACKEND overrides)
+  bucket: deskbrief-data
+  local_root: ./.data
+
+sources:
+  alpaca:     {rate_per_min: 180, timeout_s: 10, retries: 3}
+  twelvedata: {rate_per_min: 7, daily_budget: 750, timeout_s: 10, retries: 2}
+  fred:       {rate_per_min: 100, timeout_s: 15, retries: 3}
+  treasury:   {rate_per_min: 30, timeout_s: 20, retries: 3}
+  ecb:        {rate_per_min: 30, timeout_s: 15, retries: 3}
+  stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}   # VERIFY access policy (T13)
+  yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
+  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # VERIFY VIX_History.csv (T13)
+
+instruments:
+  # ---------------- Equities (ETFs and portfolio stocks) ----------------
+  - id: SPY
+    name: SPDR S&P 500 ETF
+    asset_class: equity
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for the S&P 500
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: SPY, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: SPY, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: SPY, tier: 2}
+      - {source: stooq, dataset: daily, symbol: spy.us, tier: 3}
+  - id: QQQ
+    name: Invesco QQQ (Nasdaq-100)
+    asset_class: equity
+    kind: etf
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: QQQ, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: QQQ, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: QQQ, tier: 2}
+      - {source: stooq, dataset: daily, symbol: qqq.us, tier: 3}
+  - id: IWM
+    name: iShares Russell 2000 ETF
+    asset_class: equity
+    kind: etf
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: IWM, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: IWM, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: IWM, tier: 2}
+      - {source: stooq, dataset: daily, symbol: iwm.us, tier: 3}
+  - id: ES_F
+    name: E-mini S&P 500 futures (front month)
+    asset_class: equity
+    kind: future
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ES=F, tier: 2}
+  - id: AAPL
+    name: Apple Inc.
+    asset_class: equity
+    kind: stock
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: AAPL, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: AAPL, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: AAPL, tier: 2}
+      - {source: stooq, dataset: daily, symbol: aapl.us, tier: 3}
+  - id: MSFT
+    name: Microsoft Corp.
+    asset_class: equity
+    kind: stock
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: MSFT, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: MSFT, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: MSFT, tier: 2}
+      - {source: stooq, dataset: daily, symbol: msft.us, tier: 3}
+  - id: NVDA
+    name: NVIDIA Corp.
+    asset_class: equity
+    kind: stock
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: NVDA, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: NVDA, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: NVDA, tier: 2}
+      - {source: stooq, dataset: daily, symbol: nvda.us, tier: 3}
+
+  # ---------------- Commodities ----------------
+  - id: USO
+    name: United States Oil Fund
+    asset_class: commodity
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for WTI crude (holds futures, drifts over time)
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: USO, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: USO, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: USO, tier: 2}
+      - {source: stooq, dataset: daily, symbol: uso.us, tier: 3}
+  - id: BNO
+    name: United States Brent Oil Fund
+    asset_class: commodity
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for Brent crude
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: BNO, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: BNO, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: BNO, tier: 2}
+      - {source: stooq, dataset: daily, symbol: bno.us, tier: 3}
+  - id: GLD
+    name: SPDR Gold Shares
+    asset_class: commodity
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for gold
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: GLD, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: GLD, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: GLD, tier: 2}
+      - {source: stooq, dataset: daily, symbol: gld.us, tier: 3}
+  - id: WTI
+    name: WTI crude oil
+    asset_class: commodity
+    kind: future
+    unit: USD
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: CL=F, tier: 2}
+      - {source: fred, dataset: series, symbol: DCOILWTICO, tier: 3}
+  - id: BRENT
+    name: Brent crude oil
+    asset_class: commodity
+    kind: future
+    unit: USD
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: BZ=F, tier: 2}
+      - {source: fred, dataset: series, symbol: DCOILBRENTEU, tier: 3}
+  - id: GOLD_F
+    name: Gold futures (front month)
+    asset_class: commodity
+    kind: future
+    unit: USD
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: GC=F, tier: 2}
+
+  # ---------------- Rates ----------------
+  - id: SHY
+    name: iShares 1-3 Year Treasury Bond ETF
+    asset_class: rates
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for short rates (price moves opposite to yields)
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: SHY, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: SHY, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: SHY, tier: 2}
+      - {source: stooq, dataset: daily, symbol: shy.us, tier: 3}
+  - id: IEF
+    name: iShares 7-10 Year Treasury Bond ETF
+    asset_class: rates
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for 10-year yields (price moves opposite to yields)
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: IEF, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: IEF, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: IEF, tier: 2}
+      - {source: stooq, dataset: daily, symbol: ief.us, tier: 3}
+  - id: TLT
+    name: iShares 20+ Year Treasury Bond ETF
+    asset_class: rates
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for long yields (price moves opposite to yields)
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: TLT, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: TLT, tier: 2}
+      - {source: yahoo, dataset: quote, symbol: TLT, tier: 2}
+      - {source: stooq, dataset: daily, symbol: tlt.us, tier: 3}
+  - id: UST_3M
+    name: US 3-month bill yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^IRX, tier: 2}           # VERIFY scale
+      - {source: treasury, dataset: par_curve, symbol: 3 Mo, tier: 3}
+  - id: UST_2Y
+    name: US 2-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: DGS2, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 2 Yr, tier: 3}
+  - id: UST_10Y
+    name: US 10-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^TNX, tier: 2}           # VERIFY scale
+      - {source: fred, dataset: series, symbol: DGS10, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 10 Yr, tier: 3}
+  - id: UST_20Y
+    name: US 20-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: DGS20, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 20 Yr, tier: 3}
+  - id: UST_30Y
+    name: US 30-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: DGS30, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 30 Yr, tier: 3}
+
+  # ---------------- FX (ECB GBP/JPY rates are derived crosses via EUR) ----------------
+  - id: EURUSD
+    name: Euro / US dollar
+    asset_class: fx
+    kind: fx
+    unit: fx_rate
+    feeds:
+      - {source: twelvedata, dataset: fx_quote, symbol: EUR/USD, tier: 1}
+      - {source: yahoo, dataset: quote, symbol: EURUSD=X, tier: 2}
+      - {source: ecb, dataset: eurofxref, symbol: EURUSD, tier: 3}
+  - id: GBPUSD
+    name: British pound / US dollar
+    asset_class: fx
+    kind: fx
+    unit: fx_rate
+    feeds:
+      - {source: twelvedata, dataset: fx_quote, symbol: GBP/USD, tier: 1}
+      - {source: yahoo, dataset: quote, symbol: GBPUSD=X, tier: 2}
+      - {source: ecb, dataset: eurofxref, symbol: GBPUSD, tier: 3}
+  - id: USDJPY
+    name: US dollar / Japanese yen
+    asset_class: fx
+    kind: fx
+    unit: fx_rate
+    feeds:
+      - {source: twelvedata, dataset: fx_quote, symbol: USD/JPY, tier: 1}
+      - {source: yahoo, dataset: quote, symbol: JPY=X, tier: 2}
+      - {source: ecb, dataset: eurofxref, symbol: USDJPY, tier: 3}
+
+  # ---------------- Volatility ----------------
+  - id: VIX
+    name: Cboe Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VIX, tier: 2}
+      - {source: cboe, dataset: vix_history, symbol: VIX, tier: 3}
+
+  # ---------------- Overseas indices (overnight) ----------------
+  - id: N225
+    name: Nikkei 225
+    asset_class: index
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^N225, tier: 2}
+  - id: FTSE
+    name: FTSE 100
+    asset_class: index
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^FTSE, tier: 2}
+  - id: DAX
+    name: DAX
+    asset_class: index
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^GDAXI, tier: 2}
+
+  # ---------------- Macro (monthly CPI/UNRATE, daily DFF) ----------------
+  - id: CPI
+    name: CPI, all urban consumers (index)
+    asset_class: macro
+    kind: macro
+    unit: index_pts
+    feeds:
+      - {source: fred, dataset: series, symbol: CPIAUCSL, tier: 3}
+  - id: UNRATE
+    name: Unemployment rate
+    asset_class: macro
+    kind: macro
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: UNRATE, tier: 3}
+  - id: DFF
+    name: Effective federal funds rate (daily)
+    asset_class: macro
+    kind: macro
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: DFF, tier: 3}
+
+groups:
+  - {id: sp500, label: S&P 500, proxy: SPY, exact: ES_F, official: SPY, relation: return,
+     tolerance: {warn_bps: 30, fail_bps: 100}}
+  - {id: nasdaq, label: Nasdaq-100, proxy: QQQ, exact: QQQ, official: QQQ, relation: same,
+     tolerance: {warn_bps: 5, fail_bps: 25}}
+  - {id: smallcap, label: Russell 2000, proxy: IWM, exact: IWM, official: IWM, relation: same,
+     tolerance: {warn_bps: 5, fail_bps: 25}}
+  - {id: oil_wti, label: WTI crude, proxy: USO, exact: WTI, official: WTI, relation: return,
+     tolerance: {warn_bps: 150, fail_bps: 400}}
+  - {id: oil_brent, label: Brent crude, proxy: BNO, exact: BRENT, official: BRENT, relation: return,
+     tolerance: {warn_bps: 150, fail_bps: 400}}
+  - {id: gold, label: Gold, proxy: GLD, exact: GOLD_F, relation: return,
+     tolerance: {warn_bps: 50, fail_bps: 150}}
+  - {id: ust_2y, label: US 2-year, proxy: SHY, official: UST_2Y, relation: inverse_duration,
+     duration: 1.9, tolerance: {warn_bps: 10, fail_bps: 30}}          # VERIFY duration
+  - {id: ust_10y, label: US 10-year, proxy: IEF, exact: UST_10Y, official: UST_10Y,
+     relation: inverse_duration, duration: 7.0, tolerance: {warn_bps: 15, fail_bps: 40}}  # VERIFY
+  - {id: ust_long, label: US 20-year+, proxy: TLT, official: UST_20Y, relation: inverse_duration,
+     duration: 16.5, tolerance: {warn_bps: 40, fail_bps: 100}}        # VERIFY duration
+  - {id: ust_3m, label: US 3-month bill, exact: UST_3M, official: UST_3M, relation: level,
+     tolerance: {warn_bps: 3, fail_bps: 10}}
+  - {id: eurusd, label: EUR/USD, exact: EURUSD, official: EURUSD, relation: level,
+     tolerance: {warn_bps: 5, fail_bps: 15}}
+  - {id: gbpusd, label: GBP/USD, exact: GBPUSD, official: GBPUSD, relation: level,
+     tolerance: {warn_bps: 5, fail_bps: 15}}
+  - {id: usdjpy, label: USD/JPY, exact: USDJPY, official: USDJPY, relation: level,
+     tolerance: {warn_bps: 5, fail_bps: 15}}
+  - {id: vix, label: VIX, exact: VIX, official: VIX, relation: level,
+     tolerance: {warn_bps: 50, fail_bps: 200}}
+
+datasets:   # expected publish times drive freshness; before expected_by the check is "skip"
+  - {source: treasury, dataset: par_curve, expected_by_et: "18:00", lag_bdays: 0, calendar: SIFMA_US}
+  - {source: fred, dataset: series, expected_by_et: "16:30", lag_bdays: 1, calendar: SIFMA_US}
+  - {source: ecb, dataset: eurofxref, expected_by_et: "11:00", lag_bdays: 0, calendar: TARGET}
+  - {source: stooq, dataset: daily, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
+  - {source: cboe, dataset: vix_history, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
+
+checks:
+  anomaly: {window_days: 30, z_warn: 3.0, z_fail: 5.0}
+  validity:
+    pct: [-2, 25]
+    fx_rate: [0.0001, 100000]
+    USD: [0.01, 1000000]
+    index_pts: [0.01, 1000000]
+
+crosschecks:
+  iex_vs_sip: {symbols: [SPY, QQQ, IWM, GLD, TLT], warn_bps: 5, fail_bps: 20, max_fail_minutes_pct: 5}
+  fx_vs_ecb: {pairs: [EURUSD, GBPUSD, USDJPY], fix_time_cet: "14:15", warn_bps: 5, fail_bps: 15}
+  official_pair: {pairs: [[DGS2, 2 Yr], [DGS10, 10 Yr], [DGS20, 20 Yr], [DGS30, 30 Yr]],
+                  warn_bps: 0.5, fail_bps: 2}
+  yahoo_vs_primary: {warn_bps: 10, fail_bps: 50}
+  close_vs_official: {warn_bps: 5, fail_bps: 25}
+
+report:
+  recipients_env: REPORT_RECIPIENTS
+  headline_instruments: [ES_F, UST_10Y, EURUSD, WTI, VIX]
+
+dashboard:
+  mode_env: DESKBRIEF_DISPLAY_MODE
+  refresh_seconds: 60
+  hosted_hidden_tiers: [1]
