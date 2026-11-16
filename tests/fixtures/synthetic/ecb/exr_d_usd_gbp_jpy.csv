@@ -1,0 +1,9 @@
+# SYNTHETIC FIXTURE — modeled on ECB's documented format; to be replaced by a real capture
+# Request: GET https://data-api.ecb.europa.eu/service/data/EXR/D.USD+GBP+JPY.EUR.SP00.A?startPeriod=2026-11-12&endPeriod=2026-11-13&format=csvdata
+KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE,OBS_STATUS,OBS_CONF,OBS_PRE_BREAK,OBS_COM,TIME_FORMAT,BREAKS,COLLECTION,COMPILING_ORG,DISS_ORG,DOM_SER_IDS,PUBL_ECB,PUBL_MU,PUBL_PUBLIC,UNIT_INDEX_BASE,COMPILATION,COVERAGE,DECIMALS,NAT_TITLE,SOURCE_AGENCY,SOURCE_PUB,TITLE,TITLE_COMPL,UNIT,UNIT_MULT
+EXR.D.GBP.EUR.SP00.A,D,GBP,EUR,SP00,A,2026-11-12,0.8750,A,F,,,P1D,,A,,,,,,,,,,4,,4F0,,UK pound sterling/Euro,ECB reference exchange rate,GBP,0
+EXR.D.GBP.EUR.SP00.A,D,GBP,EUR,SP00,A,2026-11-13,0.8800,A,F,,,P1D,,A,,,,,,,,,,4,,4F0,,UK pound sterling/Euro,ECB reference exchange rate,GBP,0
+EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,2026-11-12,181.50,A,F,,,P1D,,A,,,,,,,,,,2,,4F0,,Japanese yen/Euro,ECB reference exchange rate,JPY,0
+EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,2026-11-13,180.00,A,F,,,P1D,,A,,,,,,,,,,2,,4F0,,Japanese yen/Euro,ECB reference exchange rate,JPY,0
+EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,2026-11-12,1.1625,A,F,,,P1D,,A,,,,,,,,,,4,,4F0,,US dollar/Euro,ECB reference exchange rate,USD,0
+EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,2026-11-13,1.1600,A,F,,,P1D,,A,,,,,,,,,,4,,4F0,,US dollar/Euro,ECB reference exchange rate,USD,0
