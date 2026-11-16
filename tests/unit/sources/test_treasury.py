@@ -7,6 +7,7 @@ replaces it; see docs/sources/treasury.md.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from deskbrief.config import Config, load_config
 from deskbrief.models import FetchRequest, JobKind, RawResponse, RunContext, Trigger
 from deskbrief.schemas import validate
 from deskbrief.sources import registry
+from deskbrief.sources import treasury as treasury_module
 from deskbrief.sources.base import ParseError, Source
 from deskbrief.sources.treasury import TreasurySource
 
@@ -240,13 +242,31 @@ def test_no_configured_tenor_columns_gives_empty(src: TreasurySource) -> None:
         b"Date,10 Yr\nnot-a-date,4.25\n",
         b"Date,10 Yr\n11/13/2026,abc\n",
         b"Date,10 Yr\n11/13/2026,inf\n",
-        b"Date,10 Yr\n11/13/2026,4.25,9.9\n",  # ragged row
+        b"Date,10 Yr\n11/13/2026,4.25,9.9\n",  # long row
+        b"Date,10 Yr,2 Yr\n11/13/2026,4.25\n",  # short row (truncated download)
+        b"Date,10 Yr\n,4.25\n",  # blank date with data
+        b"Date,10 Yr\n   ,4.25\n",
+        b"Date,10 Yr\n01/01/0001,4.25\n",  # out-of-range year
+        b"Date,10 Yr\n11/13/2026,4.1\n11/13/2026,9\n",  # conflicting duplicate
+        b"Date,10 Yr,10 yr\n11/13/2026,4.1,4.1\n",  # duplicate header
+        b"Date,10 Yr,DATE\n11/13/2026,4.1,4.1\n",  # two Date columns
+        b"Date,10 Yr\n11/13/2026," + b"9" * 200_000 + b"\n",  # csv field limit
         b"\xff\xfe\x00bad",
     ],
 )
 def test_malformed_raises_parse_error(src: TreasurySource, body: bytes) -> None:
     with pytest.raises(ParseError):
         src.parse(raw(body))
+
+
+def test_trailing_all_empty_row_is_ignored(src: TreasurySource) -> None:
+    df = src.parse(raw(b"Date,10 Yr,2 Yr\n11/13/2026,4.25,3.7\n,,\n"))
+    assert len(df) == 2
+
+
+def test_identical_duplicate_dates_are_deduped(src: TreasurySource) -> None:
+    df = src.parse(raw(b"Date,10 Yr\n11/13/2026,4.25\n11/13/2026,4.25\n"))
+    assert len(df) == 1
 
 
 def test_error_response_raises_parse_error(src: TreasurySource) -> None:
@@ -257,11 +277,14 @@ def test_error_response_raises_parse_error(src: TreasurySource) -> None:
 # ---------------------------------------------------------------- wiring
 
 
-def test_is_a_source_and_registered(config: Config) -> None:
+def test_is_a_source(config: Config) -> None:
     s = TreasurySource(config)
     assert isinstance(s, Source)
     assert s.name == "treasury"
-    registry.clear()
-    registry.register("treasury", TreasurySource)
-    assert [x.name for x in registry.get_sources(config) if x.name == "treasury"] == ["treasury"]
-    registry.clear()
+
+
+def test_importing_module_registers_treasury(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "_FACTORIES", {})
+    importlib.reload(treasury_module)
+    assert registry.registered() == ["treasury"]
+    # reloading rebinds the class; a fresh registry per test keeps other modules untouched

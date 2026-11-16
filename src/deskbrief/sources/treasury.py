@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import csv
 import math
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -54,10 +54,13 @@ def _parse_date(text: str) -> date:
     text = text.strip()
     for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
         try:
-            return pd.to_datetime(text, format=fmt).date()
+            d = datetime.strptime(text, fmt).date()  # noqa: DTZ007 - naive date only
         except ValueError:
             continue
-    raise ParseError(f"treasury: unparseable date {text!r}")
+        if not 1990 <= d.year <= 2100:
+            break
+        return d
+    raise ParseError(f"treasury: empty or unparseable date {text!r}")
 
 
 class TreasurySource:
@@ -131,47 +134,67 @@ class TreasurySource:
             return empty_frame("parsed_observations")
 
         reader = csv.DictReader(lines, skipinitialspace=True)
-        fields = {_norm(f): f for f in reader.fieldnames or []}
+        fields: dict[str, str] = {}
+        for raw_name in reader.fieldnames or []:
+            name = _norm(raw_name)
+            if not name:
+                continue  # trailing comma in the header
+            if name in fields:
+                raise ParseError(f"treasury: duplicate column {raw_name!r}")
+            fields[name] = raw_name
         if "date" not in fields:
             raise ParseError("treasury: no 'Date' column (not a par yield curve CSV?)")
         by_norm = {_norm(sym): sym for sym in self._index}
         cols = [(fields[n], by_norm[n]) for n in fields if n in by_norm]
 
         rows: list[dict[str, object]] = []
-        for rec in reader:
-            if None in rec:
-                raise ParseError("treasury: row has more cells than the header")
-            day = _parse_date(rec[fields["date"]] or "")
-            as_of = et_to_utc(day, "00:00")
-            for col, symbol in cols:
-                cell = (rec[col] or "").strip()
-                if cell.lower() in _MISSING:
+        seen: dict[date, tuple[str, ...]] = {}
+        try:
+            for rec in reader:
+                if None in rec:
+                    raise ParseError("treasury: row has more cells than the header")
+                if all((v or "").strip() == "" for v in rec.values()):
+                    continue  # e.g. a trailing ",,,,," line
+                if any(rec[f] is None for f in fields.values()):
+                    raise ParseError("treasury: row has fewer cells than the header (truncated?)")
+                day = _parse_date(rec[fields["date"]] or "")
+                cells = tuple((rec[col] or "").strip() for col, _ in cols)
+                if day in seen:
+                    if seen[day] != cells:
+                        raise ParseError(f"treasury: conflicting duplicate rows for {day}")
                     continue
-                try:
-                    value = float(cell)
-                except ValueError as exc:
-                    raise ParseError(
-                        f"treasury: non-numeric {symbol!r} on {day}: {cell!r}"
-                    ) from exc
-                if not math.isfinite(value):
-                    raise ParseError(f"treasury: non-finite {symbol!r} on {day}: {cell!r}")
-                inst, feed = self._index[symbol]
-                rows.append(
-                    {
-                        "instrument_id": inst.id,
-                        "source": SOURCE,
-                        "dataset": DATASET,
-                        "symbol": symbol,
-                        "tier": feed.tier,
-                        "field": "yield",
-                        "interval": "1d",
-                        "as_of": as_of,
-                        "value": value * feed.scale,
-                        "unit": inst.unit,
-                        "is_derived": False,
-                        "is_fallback": False,
-                    }
-                )
+                seen[day] = cells
+                as_of = et_to_utc(day, "00:00")
+                for (_, symbol), cell in zip(cols, cells, strict=True):
+                    if cell.lower() in _MISSING:
+                        continue
+                    try:
+                        value = float(cell)
+                    except ValueError as exc:
+                        raise ParseError(
+                            f"treasury: non-numeric {symbol!r} on {day}: {cell!r}"
+                        ) from exc
+                    if not math.isfinite(value):
+                        raise ParseError(f"treasury: non-finite {symbol!r} on {day}: {cell!r}")
+                    inst, feed = self._index[symbol]
+                    rows.append(
+                        {
+                            "instrument_id": inst.id,
+                            "source": SOURCE,
+                            "dataset": DATASET,
+                            "symbol": symbol,
+                            "tier": feed.tier,
+                            "field": "yield",
+                            "interval": "1d",
+                            "as_of": as_of,
+                            "value": value * feed.scale,
+                            "unit": inst.unit,
+                            "is_derived": False,
+                            "is_fallback": False,
+                        }
+                    )
+        except csv.Error as exc:
+            raise ParseError(f"treasury: CSV error: {exc}") from exc
         if not rows:
             return empty_frame("parsed_observations")
         return to_frame("parsed_observations", rows)
