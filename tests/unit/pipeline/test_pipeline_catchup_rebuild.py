@@ -545,6 +545,8 @@ def test_cli_backfill_range_and_rebuild(cli_env: Path, capsys: Any) -> None:
     assert code == 0
     out = capsys.readouterr().out
     assert out.count("### Desk Brief `backfill`") == 3  # Fri, Mon, Tue (weekend skipped)
+    code = cli.main(["run", "backfill", "--date", "2026-11-24", "--end-date", "2026-11-27", *CFG])
+    assert capsys.readouterr().out.count("### Desk Brief `backfill`") == 3  # Thanksgiving skipped
     assert cli.main(["run", "rebuild", *CFG]) == 0
     assert cli.main(["run", "backfill", *CFG]) == 2  # needs --date
     assert cli.main(["run", "morning", "--end-date", "2026-11-17", *CFG]) == 2
@@ -560,3 +562,87 @@ def test_cli_bad_config_and_unavailable_storage(
 
     monkeypatch.setattr(cli, "build_store", no_store)
     assert cli.main(["run", "morning", *CFG]) == 1
+
+
+def test_rebuild_recovers_target_date_for_window_filtering_parsers(tmp_path: Path) -> None:
+    pts = [
+        (datetime(2026, 11, 1, 5, 0, tzinfo=UTC), 400.0),  # outside the 3-day window
+        (datetime(2026, 11, 2, 5, 0, tzinfo=UTC), 401.0),
+        (datetime(2026, 11, 13, 5, 0, tzinfo=UTC), 450.0),
+        (datetime(2026, 11, 16, 5, 0, tzinfo=UTC), 451.0),
+    ]
+    env = make_env(tmp_path, [FakeSource("cboe", points=pts, windowed=True)])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    before = Datasets(env.store).read("observations").sort_values("as_of")
+    assert list(before["value"]) == [450.0, 451.0]  # window applied by the original run
+    rebuilt = run_rebuild(env)
+    assert rebuilt.status is RunStatus.OK
+    after = Datasets(env.store).read("observations").sort_values("as_of")
+    assert list(after["value"]) == list(before["value"])
+    assert len([k for k in obs_keys(env, "v2")]) == len(obs_keys(env, "v1"))
+
+
+def test_rebuild_falls_back_to_the_runs_row_for_target_date(tmp_path: Path) -> None:
+    pts = [
+        (datetime(2026, 11, 2, 5, 0, tzinfo=UTC), 401.0),
+        (datetime(2026, 11, 13, 5, 0, tzinfo=UTC), 450.0),
+    ]
+    env = make_env(tmp_path, [FakeSource("cboe", points=pts, windowed=True)])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    for key in env.store.list("logs/source_log/"):  # the source_log row is lost
+        env.store.delete(key)
+    run_rebuild(env)
+    assert list(Datasets(env.store).read("observations")["value"]) == [450.0]
+
+
+def test_rebuild_reports_raw_without_recoverable_target_date(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    for key in env.store.list("logs/") + env.store.list("derived/runs/"):
+        env.store.delete(key)  # simulates a hard crash before anything but raw was written
+    m = run_rebuild(env)
+    assert any("no recoverable target_date" in n for n in m.notes)
+
+
+def test_rebuild_skips_non_ok_raw_even_for_registered_sources(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq"), FakeSource("ecb", mode="http_500")])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    m = run_rebuild(env)  # ecb stays registered: its raw is an error body
+    assert "raw skipped: 1" in " ".join(m.notes)
+    assert list(Datasets(env.store).read("observations")["source"]) == ["stooq"]
+    assert Datasets(env.store).read("quarantine").empty  # skipped, not parsed
+
+
+def test_rebuild_works_with_the_stale_current_guard(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    old = Datasets(env.store)
+    assert old.clean_version() == "v1"
+    assert run_rebuild(env).status is RunStatus.OK
+    ctx = make_context(env, JobKind.BACKFILL, Trigger.MANUAL, MONDAY, NOW)
+    frame = Datasets(env.store).read("observations")
+    from deskbrief.store.backend import StorageError
+
+    with pytest.raises(StorageError, match="_CURRENT"):  # the guard still protects stale writers
+        old.append("observations", frame, ctx, date(2026, 11, 13))
+    fresh = Datasets(env.store)
+    assert fresh.clean_version() == "v2"
+    # later runs write to v2 through a fresh instance
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    assert len(obs_keys(env, "v2")) == 2
+
+
+def test_concurrent_pointer_move_aborts_rebuild(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    run_job(env, JobKind.BACKFILL, target_date=MONDAY, trigger=Trigger.MANUAL)
+    real_get = env.store.get_bytes
+
+    def moved(key: str) -> bytes:
+        if key.endswith(".meta.json"):  # mid-rebuild, someone else flips the pointer
+            env.store.put_bytes(CLEAN_CURRENT_KEY, b"v9", overwrite=True)
+        return real_get(key)
+
+    env.store.get_bytes = moved  # type: ignore[method-assign]
+    m = run_rebuild(env)
+    assert m.status is RunStatus.FAILED
+    assert any("moved" in n for n in m.notes)

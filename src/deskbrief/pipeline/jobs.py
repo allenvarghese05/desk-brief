@@ -80,11 +80,18 @@ class Gate:
     reason: str = ""
 
 
-def evaluate_gate(job: JobKind, trigger: Trigger, now_utc: datetime) -> Gate:
-    """Whether a *scheduled* run should do any work right now."""
+def evaluate_gate(
+    job: JobKind, trigger: Trigger, now_utc: datetime, scheduled_for: datetime | None = None
+) -> Gate:
+    """Whether a *scheduled* run should do any work right now.
+
+    ``morning`` is gated on the instant the cron was *meant* to fire (``scheduled_for``, from
+    ``GITHUB_EVENT_SCHEDULE``) when known, so a delayed GitHub runner still produces the
+    report; otherwise on the wall clock.
+    """
     if trigger is not Trigger.SCHEDULE:
         return Gate(True)
-    et = to_et(now_utc)
+    et = to_et(scheduled_for if scheduled_for is not None and job is JobKind.MORNING else now_utc)
     day = et.date()
     if job is JobKind.MORNING:
         if not is_business_day("XNYS", day):
@@ -100,6 +107,7 @@ def evaluate_gate(job: JobKind, trigger: Trigger, now_utc: datetime) -> Gate:
         bounds = session_bounds_utc(day)
         if bounds is None:
             return Gate(False, f"{day} is not an XNYS business day")
+        et = to_et(now_utc)
         opens, closes = bounds
         if not opens <= ensure_utc(now_utc) <= closes:
             return Gate(False, f"{et:%H:%M} ET is outside the XNYS session")

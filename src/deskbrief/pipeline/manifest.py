@@ -18,6 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from deskbrief.logging import get_logger
 from deskbrief.models import JobKind, RunStatus, Trigger
 
 
@@ -50,10 +51,11 @@ class RunManifest:
     skipped_reason: str | None = None
     sources: dict[str, SourceStats] = field(default_factory=dict)
     n_obs: int = 0
-    n_dq_fail: int = 0
-    n_dq_warn: int = 0
+    n_dq_fail: int = 0  # runner-emitted DQ rows only; rows written by check hooks (T20/T21)
+    n_dq_warn: int = 0  # are not included (they belong to dq_results, not to this counter)
     storage_ok: int = 0
     storage_failed: int = 0
+    flush_data_lost: bool = False  # a data table (observations, source_log, quarantine) failed
     notes: list[str] = field(default_factory=list)
     planned: list[str] = field(default_factory=list)  # dry-run: "source/dataset (symbols)"
     report_key: str | None = None
@@ -144,6 +146,10 @@ def write_step_summary(env: Mapping[str, str], manifest: RunManifest) -> bool:
     path = env.get("GITHUB_STEP_SUMMARY")
     if not path:
         return False
-    with Path(path).open("a", encoding="utf-8") as fh:
-        fh.write(manifest.to_markdown())
+    try:
+        with Path(path).open("a", encoding="utf-8") as fh:
+            fh.write(manifest.to_markdown())
+    except OSError as exc:  # the run is already recorded; a summary must never fail it
+        get_logger().warning("step_summary.unwritable", error=str(exc))
+        return False
     return True

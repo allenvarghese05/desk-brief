@@ -20,7 +20,6 @@ from deskbrief.pipeline.runner import RunEnv, execute_run, make_context, run_job
 from deskbrief.store import duck
 from deskbrief.store.backend import KeyExistsError, StorageBackend
 from deskbrief.store.datasets import Datasets
-from deskbrief.timeutil import et_date
 
 MONDAY = date(2026, 11, 16)
 NOW = datetime(2026, 11, 16, 11, 20, tzinfo=UTC)
@@ -80,23 +79,19 @@ def test_ingested_at_is_the_responded_at_of_the_fetch(tmp_path: Path) -> None:
 def test_observations_are_split_by_et_date_of_as_of(tmp_path: Path) -> None:
     pts = [
         (datetime(2026, 11, 13, 5, 0, tzinfo=UTC), 450.0),  # Fri 00:00 ET
-        (datetime(2026, 11, 13, 23, 30, tzinfo=UTC), 451.0),  # Fri 18:30 ET
-        (datetime(2026, 11, 14, 2, 0, tzinfo=UTC), 452.0),  # still Fri 21:00 ET
-        (datetime(2026, 11, 14, 5, 30, tzinfo=UTC), 453.0),  # Sat 00:30 ET
+        (datetime(2026, 11, 14, 2, 0, tzinfo=UTC), 451.0),  # Fri 21:00 ET: UTC date is Saturday
+        (datetime(2026, 11, 14, 4, 59, tzinfo=UTC), 452.0),  # Fri 23:59 ET
+        (datetime(2026, 11, 14, 5, 0, tzinfo=UTC), 453.0),  # Sat 00:00 ET
     ]
     env = make_env(tmp_path, [FakeSource("stooq", points=pts)])
     run(env)
+    ds = Datasets(env.store)
+    fri = ds.read("observations", part_date=date(2026, 11, 13))
+    sat = ds.read("observations", part_date=date(2026, 11, 14))
+    assert sorted(fri["value"]) == [450.0, 451.0, 452.0]  # a UTC split would put two in Saturday
+    assert sorted(sat["value"]) == [453.0]
     keys = [k for k in env.store.list("clean/v1/observations/") if k.endswith(".parquet")]
-    assert sorted(k.split("/")[3] for k in keys) == ["date=2026-11-13", "date=2026-11-14"]
-    obs = table(env, "observations")
-    assert sorted(et_date(t.to_pydatetime()) for t in obs["as_of"]) == [
-        date(2026, 11, 13),
-        date(2026, 11, 13),
-        date(2026, 11, 13),
-        date(2026, 11, 14),
-    ]
-    # each (table, date) is written once: one file per partition for this run
-    assert len(keys) == 2
+    assert len(keys) == 2  # one file per (table, ET date)
 
 
 def test_empty_response_is_not_a_failure(tmp_path: Path) -> None:
@@ -202,7 +197,9 @@ def test_429_storm_degrades_and_other_data_is_present(tmp_path: Path) -> None:
     log = table(env, "source_log")
     assert list(log[log["source"] == "twelvedata"]["status"]) == ["rate_limited"] * 3
     assert len(table(env, "observations")) == 1
-    assert (table(env, "dq_results")["status"] == "fail").sum() == 3
+    dq = table(env, "dq_results")
+    assert len(dq) == 1  # identical failures collapse to one row per (source, reason)
+    assert json.loads(dq.iloc[0]["details_json"])["count"] == 3
 
 
 def test_http_500_keeps_the_error_body_as_raw_evidence(tmp_path: Path) -> None:
@@ -521,3 +518,61 @@ def test_runs_row_validates_against_the_schema(tmp_path: Path) -> None:
     env = make_env(tmp_path, [FakeSource("stooq")])
     run(env)
     schemas.validate("runs", table(env, "runs"))
+
+
+def test_flush_failure_of_observations_makes_the_run_failed(tmp_path: Path) -> None:
+    class FailObs(_WriteOnlyBroken):
+        def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+            if "clean/v1/observations/" in key:
+                raise OSError("disk full")
+            self._inner.put_bytes(key, data, overwrite=overwrite)
+
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    env.store = FailObs(env.store)  # type: ignore[assignment]
+    m = run(env)
+    assert m.status is RunStatus.FAILED
+    assert m.exit_code == 1
+    assert table(env, "runs").iloc[0]["status"] == "failed"
+    from deskbrief.pipeline.catchup import missed_dates
+
+    # the date is not covered, so the next scheduled run retries it
+    next_day = date(2026, 11, 17)
+    assert MONDAY in missed_dates(table(env, "runs"), JobKind.MORNING, next_day)
+
+
+def test_dry_run_with_no_sources_is_failed_like_a_real_run(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [])
+    assert run(env, dry_run=True).status is RunStatus.FAILED
+
+
+def test_unwritable_step_summary_never_fails_the_run(tmp_path: Path) -> None:
+    env = make_env(
+        tmp_path,
+        [FakeSource("stooq")],
+        env={"GITHUB_STEP_SUMMARY": str(tmp_path / "no_such_dir" / "summary.md")},
+    )
+    assert run(env).status is RunStatus.OK
+
+
+def test_morning_gate_uses_the_scheduled_time_so_a_delayed_cron_still_runs(
+    tmp_path: Path,
+) -> None:
+    env = make_env(
+        tmp_path,
+        [FakeSource("stooq")],
+        env={"GITHUB_EVENT_SCHEDULE": "15 10,11 * * 1-5"},
+    )
+    # EST: the 11:15 UTC fire (06:15 ET) starts 2 h late, at 08:20 ET
+    m = _sched(env, JobKind.MORNING, datetime(2026, 11, 16, 13, 20, tzinfo=UTC))
+    assert m.status is None  # last fire before 13:20 UTC is 11:15 UTC...
+    # ...so with the fire time known, 11:15 UTC is 06:15 ET and the run proceeds
+    env.clock = FakeClock(datetime(2026, 11, 16, 11, 50, tzinfo=UTC))  # 35 min late
+    assert run_job(env, JobKind.MORNING, trigger=Trigger.SCHEDULE).status is RunStatus.OK
+
+
+def test_eod_runs_on_an_xnyse_holiday_when_target_is_open(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    thanksgiving = datetime(2026, 11, 26, 22, 30, tzinfo=UTC)
+    assert _sched(env, JobKind.EOD, thanksgiving).status is RunStatus.OK  # TARGET is open
+    christmas = datetime(2026, 12, 25, 22, 30, tzinfo=UTC)
+    assert _sched(env, JobKind.EOD, christmas).status is None  # every calendar is closed

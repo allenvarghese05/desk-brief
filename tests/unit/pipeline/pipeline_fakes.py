@@ -89,6 +89,7 @@ class FakeSource:
         instrument: str = "SPY",
         dataset: str = "daily",
         requests: int = 1,
+        windowed: bool = False,
     ) -> None:
         self.name = name
         self.mode = mode
@@ -96,6 +97,7 @@ class FakeSource:
         self.dataset = dataset
         self.points = points or [(datetime(2026, 11, 13, 5, 0, tzinfo=UTC), 450.0)]
         self.n_requests = requests
+        self.windowed = windowed  # parse() honours request.target_date, like the Cboe parser
         self.plans: list[tuple[JobKind, date]] = []
 
     def plan(self, job: JobKind, ctx: RunContext) -> list[FetchRequest]:
@@ -155,6 +157,12 @@ class FakeSource:
             rows = json.loads(raw.body)
         except json.JSONDecodeError as exc:
             raise ParseError(f"corrupted JSON: {exc}") from exc
+        if not rows:
+            return empty_frame("parsed_observations")
+        if self.windowed and raw.request.target_date is not None:
+            lo = raw.request.target_date - timedelta(days=3)
+            hi = raw.request.target_date
+            rows = [r for r in rows if lo <= datetime.fromisoformat(r[0]).date() <= hi]
         if not rows:
             return empty_frame("parsed_observations")
         frames = [

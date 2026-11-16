@@ -17,10 +17,11 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from deskbrief import __version__
+from deskbrief.calendars import business_days
 from deskbrief.config import load_config
 from deskbrief.config import main as config_main
 from deskbrief.logging import configure_logging, get_logger
@@ -52,9 +53,10 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
-def _weekdays(start: date, end: date) -> list[date]:
-    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    return [d for d in days if d.weekday() < 5]
+def _business_days(start: date, end: date) -> list[date]:
+    """XNYS business days in ``[start, end]``. One run per day: the source contract plans from a
+    single ``target_date``, so month-chunked flushing is not possible without a contract change."""
+    return business_days("XNYS", start, end)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -101,7 +103,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if job is JobKind.REBUILD:
         manifests = [run_rebuild(env, from_date=args.date, dry_run=args.dry_run)]
     elif job is JobKind.BACKFILL:
-        days = _weekdays(args.date, args.end_date or args.date)
+        days = _business_days(args.date, args.end_date or args.date)
         manifests = [run_job(env, job, target_date=d, dry_run=args.dry_run) for d in days]
     else:
         manifests = [run_job(env, job, target_date=args.date, dry_run=args.dry_run)]

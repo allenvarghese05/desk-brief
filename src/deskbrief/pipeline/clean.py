@@ -44,6 +44,7 @@ from deskbrief.store.backend import (
     CLEAN_PREFIX,
     RAW_PREFIX,
     StorageBackend,
+    StorageError,
 )
 from deskbrief.store.datasets import Datasets, current_clean_version
 from deskbrief.timeutil import ET, ensure_utc, et_date
@@ -189,6 +190,7 @@ class FlushReport:
     written: int = 0
     rows_by_table: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    failed_tables: set[str] = field(default_factory=set)
 
 
 class RunBuffer:
@@ -197,6 +199,8 @@ class RunBuffer:
     def __init__(self) -> None:
         self._obs: list[pd.DataFrame] = []
         self._rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        #: collapse key -> (buffered dq row, its details); see ``runner._dq_fail``
+        self.dq_index: dict[tuple[str, str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
 
     def add_observations(self, df: pd.DataFrame) -> None:
         if not df.empty:
@@ -224,6 +228,7 @@ class RunBuffer:
             except (
                 Exception
             ) as exc:  # storage or schema trouble in one partition must not stop the rest
+                report.failed_tables.add(table)
                 report.errors.append(f"{table} {part_date}: {type(exc).__name__}: {exc}")
                 log.error("flush.failed", table=table, part_date=str(part_date), error=str(exc))
             else:
@@ -255,12 +260,22 @@ class RunBuffer:
 class _VersionedDatasets(Datasets):
     """``Datasets`` that writes to a fixed clean version instead of ``clean/_CURRENT``."""
 
-    def __init__(self, store: StorageBackend, version: str) -> None:
+    def __init__(self, store: StorageBackend, version: str, previous: str) -> None:
         super().__init__(store)
         self._version = version
+        self._previous = previous
 
     def clean_version(self) -> str:
         return self._version
+
+    def _check_version_not_stale(self) -> None:
+        """The stale-``_CURRENT`` guard, adapted: we write to ``new`` on purpose, but the
+        pointer must still be where we found it (otherwise another rebuild flipped it)."""
+        now = current_clean_version(self._store)
+        if now != self._previous:
+            raise StorageError(
+                f"clean/_CURRENT moved from {self._previous!r} to {now!r} during rebuild"
+            )
 
 
 @dataclass
@@ -271,6 +286,7 @@ class RebuildResult:
     skipped: int = 0
     rows: int = 0
     quarantined: int = 0
+    no_target_date: int = 0  # raw whose request context could not be recovered
     flip_done: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -288,13 +304,55 @@ def next_clean_version(store: StorageBackend) -> str:
     return f"v{highest + 1}"
 
 
-def _raw_from_sidecar(meta: dict[str, Any], key: str, body: bytes) -> RawResponse:
+@dataclass(frozen=True)
+class RequestInfo:
+    """What the raw sidecar lacks and parsers may need: ``target_date`` and ``window``."""
+
+    target_date: date | None = None
+    window: tuple[datetime, datetime] | None = None
+
+
+def _info_from_request_json(text: str) -> RequestInfo:
+    try:
+        data = json.loads(text)
+        td = data.get("target_date")
+        win = data.get("window")
+        return RequestInfo(
+            date.fromisoformat(td) if td else None,
+            (datetime.fromisoformat(win[0]), datetime.fromisoformat(win[1])) if win else None,
+        )
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return RequestInfo()
+
+
+def recover_request_info(store: StorageBackend) -> tuple[dict[str, RequestInfo], dict[str, date]]:
+    """``({fetch_id: info}, {run_id: target_date})`` from ``source_log`` and ``runs``.
+
+    The runner writes ``target_date`` and ``window`` into ``source_log.request_redacted``; the
+    ``runs`` row is the fallback (its target date) for fetches whose source_log row is lost.
+    """
+    datasets = Datasets(store)
+    by_fetch: dict[str, RequestInfo] = {}
+    log = datasets.read("source_log")
+    for fid, req in zip(log["fetch_id"], log["request_redacted"], strict=True):
+        by_fetch[str(fid)] = _info_from_request_json(str(req))
+    runs = datasets.read("runs")
+    by_run = {str(r): d for r, d in zip(runs["run_id"], runs["target_date"], strict=True)}
+    return by_fetch, by_run
+
+
+def _raw_from_sidecar(
+    meta: dict[str, Any], key: str, body: bytes, info: RequestInfo | None = None
+) -> RawResponse:
     ext = key.rpartition(".")[2]
+    info = info or RequestInfo()
     req = FetchRequest(
         source=meta["source"],
         dataset=meta["dataset"],
         params=meta.get("params") or {},
         symbols=tuple(meta.get("symbols") or ()),
+        target_date=info.target_date,
+        window=info.window,
     )
     return RawResponse(
         request=req,
@@ -327,9 +385,10 @@ def rebuild(
     previous = current_clean_version(store)
     new = next_clean_version(store)
     result = RebuildResult(new_version=new, previous_version=previous)
-    datasets = _VersionedDatasets(store, new)
+    datasets = _VersionedDatasets(store, new, previous)
     by_name = {s.name: s for s in sources}
     buf = RunBuffer()
+    by_fetch, by_run = recover_request_info(store)
 
     for key in store.list(f"{RAW_PREFIX}/"):
         if not key.endswith(".meta.json"):
@@ -343,7 +402,13 @@ def rebuild(
             result.skipped += 1
             continue
         raw_key = key.removesuffix(".meta.json")
-        raw = _raw_from_sidecar(meta, raw_key, store.get_bytes(raw_key))
+        info = by_fetch.get(meta["fetch_id"])
+        if info is None or info.target_date is None:
+            fallback = by_run.get(str(meta.get("run_id")))
+            info = RequestInfo(fallback, info.window if info else None)
+        if info.target_date is None:
+            result.no_target_date += 1
+        raw = _raw_from_sidecar(meta, raw_key, store.get_bytes(raw_key), info)
         result.fetches += 1
         cleaned = clean_response(source, raw, ctx.run_id)
         if cleaned.ok:

@@ -68,6 +68,9 @@ from deskbrief.store.datasets import Datasets
 from deskbrief.store.raw import RawWriter
 from deskbrief.timeutil import Clock, et_date, utc_now
 
+#: A failed flush of one of these loses data (raw may still hold it): the run is ``failed`` so
+#: catch-up treats the date as missed (spec §2.4 item 5). A lost dq_results partition degrades.
+_DATA_TABLES = frozenset({"observations", "source_log", "quarantine"})
 _FAILED_FETCH = frozenset(
     {FetchStatus.ERROR, FetchStatus.RATE_LIMITED, FetchStatus.BUDGET_EXHAUSTED}
 )
@@ -276,26 +279,40 @@ def _dq_fail(
     raw: RawResponse,
     **details: object,
 ) -> None:
-    detail = {
+    """One DQ ``fail`` row per (check, source, reason); repeats only bump ``count``.
+
+    A source with many requests (one per series) and a missing key would otherwise write N
+    identical rows; the first row keeps its fetch_id and gains ``count`` and ``datasets``.
+    """
+    key = (name, raw.request.source, json.dumps(details, sort_keys=True, default=str))
+    prior = buf.dq_index.get(key)
+    if prior is not None:
+        row, info = prior
+        info["count"] += 1
+        if raw.request.dataset not in info["datasets"]:
+            info["datasets"].append(raw.request.dataset)
+        row["details_json"] = json.dumps(info, sort_keys=True, default=str, separators=(",", ":"))
+        return
+    info = {
         "dataset": raw.request.dataset,
+        "datasets": [raw.request.dataset],
+        "count": 1,
         "fetch_id": raw.fetch_id,
         "http_status": raw.http_status,
         "error": raw.error,
         **details,
     }
-    buf.add(
-        "dq_results",
-        dq_row(
-            runner_dq(
-                ctx,
-                name=name,
-                check_type=check_type,
-                source=raw.request.source,
-                at=env.clock(),
-                details=detail,
-            )
-        ),
+    result = runner_dq(
+        ctx,
+        name=name,
+        check_type=check_type,
+        source=raw.request.source,
+        at=env.clock(),
+        details=info,
     )
+    row = dq_row(result)
+    buf.add("dq_results", row)
+    buf.dq_index[key] = (row, info)
 
 
 def _source_log_row(
@@ -312,6 +329,7 @@ def _source_log_row(
         "url": raw.url_redacted,
         "params": dict(req.params),
         "target_date": req.target_date.isoformat() if req.target_date else None,
+        "window": [t.isoformat() for t in req.window] if req.window else None,
     }
     return {
         "fetch_id": raw.fetch_id,
@@ -342,6 +360,7 @@ def _flush(buf: RunBuffer, datasets: Datasets, ctx: RunContext, manifest: RunMan
     report = buf.flush(datasets, ctx)
     manifest.storage_ok += report.written
     manifest.storage_failed += len(report.errors)
+    manifest.flush_data_lost = bool(report.failed_tables & _DATA_TABLES)
     manifest.n_obs = report.rows_by_table.get("observations", 0)
     dq = buf.rows("dq_results")
     manifest.n_dq_fail = sum(1 for r in dq if r["status"] == "fail")
@@ -374,6 +393,9 @@ def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest) -> list[str]
 
 
 def _decide(env: RunEnv, manifest: RunManifest, degraded: list[str]) -> RunStatus:
+    if manifest.flush_data_lost:
+        manifest.notes.append("clean rows were not stored: run is failed so catch-up retries it")
+        return RunStatus.FAILED
     if manifest.storage_failed and not manifest.storage_ok:
         manifest.notes.append("storage unavailable: nothing could be written")
         return RunStatus.FAILED
@@ -421,7 +443,7 @@ def run_job(
     ctx = make_context(env, job, trig, target, now, scheduled_for)
     log = get_logger(run_id=ctx.run_id, job=job.value)
 
-    gate = evaluate_gate(job, trig, now)
+    gate = evaluate_gate(job, trig, now, scheduled_for)
     if not gate.proceed:
         manifest = _manifest(ctx)
         manifest.skipped_reason = gate.reason
@@ -437,6 +459,9 @@ def run_job(
 def _plan_only(env: RunEnv, ctx: RunContext) -> RunManifest:
     manifest = _manifest(ctx)
     manifest.status = RunStatus.OK
+    if not env.sources:
+        manifest.status = RunStatus.FAILED
+        manifest.notes.append("no sources selected or registered")
     for source in env.sources:
         try:
             for req in source.plan(ctx.job, ctx):
@@ -507,6 +532,10 @@ def run_rebuild(
             f"clean {result.previous_version} -> {result.new_version}"
             f"{'' if result.flip_done else ' (NOT flipped)'}; raw skipped: {result.skipped}"
         )
+        if result.no_target_date:
+            manifest.notes.append(
+                f"{result.no_target_date} raw objects had no recoverable target_date"
+            )
         manifest.notes.extend(f"flush failed: {e}" for e in result.errors)
         if result.flip_done:
             manifest.status = RunStatus.DEGRADED if result.quarantined else RunStatus.OK
