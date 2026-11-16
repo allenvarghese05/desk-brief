@@ -7,6 +7,7 @@ on ECB's documented SDMX CSV; replace with a real capture (see docs/sources/ecb.
 from __future__ import annotations
 
 import dataclasses
+import importlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 from deskbrief.config import Config, load_config
 from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext, Trigger
 from deskbrief.schemas import PARSED_OBS_SCHEMA
+from deskbrief.sources import ecb as ecb_module
 from deskbrief.sources import registry
 from deskbrief.sources.base import ParseError, Source
 from deskbrief.sources.ecb import URL, EcbSource
@@ -74,7 +76,16 @@ def by_symbol(df: pd.DataFrame, day: str) -> pd.DataFrame:
 def test_is_a_source_and_registered(src: EcbSource) -> None:
     assert isinstance(src, Source)
     assert src.name == "ecb"
-    assert "ecb" in registry.registered()
+
+
+def test_module_registers_ecb_on_import() -> None:
+    # other tests clear the global registry, so re-run the import-time registration
+    registry.clear()
+    try:
+        importlib.reload(ecb_module)
+        assert "ecb" in registry.registered()
+    finally:
+        registry.clear()
 
 
 def test_golden_parse(src: EcbSource) -> None:
