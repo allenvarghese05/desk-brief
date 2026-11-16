@@ -18,7 +18,10 @@ model); a failure of one symbol among several is kept in the body and skipped by
 
 Time semantics (P-006): ``tick`` ``as_of`` = Yahoo's ``regularMarketTime`` (the quote instant);
 ``1d`` ``as_of`` = 00:00 America/New_York on the bar's exchange-local date.
-Volume is not emitted: it is shares for ETFs but contracts or zero for futures and indices.
+Volume is not emitted as an observation (shares vs contracts vs zero) but is kept in raw.
+Only final trading-day bars are emitted (see ``_final_bar_filter``). ``fetch`` turns off
+yfinance's ``hide_exceptions`` so blocks/rate limits raise instead of looking like empty data.
+The module registers ``YahooSource`` with the registry on import.
 """
 
 from __future__ import annotations
@@ -29,18 +32,21 @@ import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
+from deskbrief import calendars
 from deskbrief.config import Config, Feed
 from deskbrief.ids import new_id
-from deskbrief.logging import get_logger
+from deskbrief.logging import get_logger, redact
 from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext
 from deskbrief.schemas import empty_frame, to_frame
 from deskbrief.sources.base import HttpClient, ParseError
 from deskbrief.sources.http import TokenBucket
-from deskbrief.timeutil import ET, Clock, ensure_utc, utc_now
+from deskbrief.sources.registry import register, registered
+from deskbrief.timeutil import ET, Clock, ensure_utc, et_date, utc_now
 
 SOURCE = "yahoo"
 HISTORY_LOOKBACK_DAYS = 10  # enough to span weekends/holidays around the target date
@@ -129,11 +135,12 @@ class YahooSource:
         url = f"yfinance://{req.dataset}"
         status: FetchStatus | None = None
         try:
+            version = str(yf.__version__)
             symbols = self._collect(req)
             body = json.dumps(
                 {
                     "dataset": req.dataset,
-                    "yfinance_version": str(yf.__version__),
+                    "yfinance_version": version,
                     "fetched_at": requested_at.isoformat(),
                     "symbols": symbols,
                 },
@@ -145,7 +152,12 @@ class YahooSource:
             if symbols and len(errors) == len(symbols):
                 http_status, error = None, errors[0]  # every symbol failed
             elif not any(("price" in v) or v.get("bars") for v in symbols.values()):
-                status = FetchStatus.EMPTY
+                if calendars.is_business_day("XNYS", et_date(requested_at)):
+                    # a business day with nothing at all is a block or outage, not "no data"
+                    http_status = None
+                    error = f"all {len(symbols)} symbols returned no data on an XNYS business day"
+                else:
+                    status = FetchStatus.EMPTY
             if errors:
                 log.warning("yahoo.symbol_errors", n_errors=len(errors), n_symbols=len(symbols))
         except Exception as exc:  # fetch must never raise; the model redacts `error`
@@ -167,16 +179,24 @@ class YahooSource:
         if req.dataset != "quote" and req.dataset not in _BAR_DATASETS:
             raise ValueError(f"unsupported yahoo dataset {req.dataset!r}")
         out: dict[str, dict[str, Any]] = {}
-        for symbol in req.symbols:
-            self._bucket.acquire()
-            try:
-                out[symbol] = (
-                    self._quote(symbol)
-                    if req.dataset == "quote"
-                    else self._bars(symbol, req.params)
-                )
-            except Exception as exc:  # isolate one symbol from the rest
-                out[symbol] = {"error": f"{type(exc).__name__}: {exc}"}
+        # yfinance 1.8 hides exceptions by default (rate limits/blocks come back as empty data);
+        # make it raise for the duration of our calls so they become per-symbol errors.
+        debug = yf.config.debug
+        previous = debug.hide_exceptions
+        debug.hide_exceptions = False
+        try:
+            for symbol in req.symbols:
+                self._bucket.acquire()
+                try:
+                    out[symbol] = (
+                        self._quote(symbol)
+                        if req.dataset == "quote"
+                        else self._bars(symbol, req.params)
+                    )
+                except Exception as exc:  # isolate one symbol from the rest
+                    out[symbol] = {"error": redact(f"{type(exc).__name__}: {exc}")}
+        finally:
+            debug.hide_exceptions = previous
         return out
 
     @staticmethod
@@ -188,13 +208,19 @@ class YahooSource:
         when = _to_utc_iso(meta.get("regularMarketTime"))
         if price is None or when is None:
             return {"no_data": True}
-        return {"price": price, "time": when, "currency": meta.get("currency")}
+        currency = meta.get("currency")
+        return {
+            "price": price,
+            "time": when,
+            "currency": None if currency is None else str(currency),
+        }
 
     @staticmethod
     def _bars(symbol: str, params: Any) -> dict[str, Any]:
         frame = yf.Ticker(symbol).history(
             start=params.get("start"), end=params.get("end"), interval="1d", auto_adjust=False
         )
+        tz = getattr(frame.index, "tz", None)
         bars: list[dict[str, Any]] = []
         for idx, rec in frame.iterrows():
             ts = pd.Timestamp(idx)
@@ -204,10 +230,11 @@ class YahooSource:
                 ("high", "High"),
                 ("low", "Low"),
                 ("close", "Close"),
+                ("volume", "Volume"),  # kept in raw only; parse does not emit it
             ):
                 bar[key] = _finite_float(rec.get(col))
             bars.append(bar)
-        return {"bars": bars}
+        return {"bars": bars, "tz": None if tz is None else str(tz)}
 
     # -- parse -----------------------------------------------------------------------------
 
@@ -228,7 +255,15 @@ class YahooSource:
             if dataset == "quote":
                 parsed: list[tuple[str, float, datetime]] = [_quote_point(symbol, entry)]
             else:
-                parsed = _bar_points(symbol, entry, only_close=dataset == "daily_fallback")
+                hit = index.get(symbol)
+                keep = (
+                    _final_bar_filter(hit[0].kind, entry.get("tz"), raw.responded_at)
+                    if hit
+                    else _never
+                )
+                parsed = _bar_points(
+                    symbol, entry, only_close=dataset == "daily_fallback", keep=keep
+                )
             hit = index.get(symbol)
             if hit is None:
                 continue  # provider rows without a configured instrument stay in raw only
@@ -265,8 +300,39 @@ def _quote_point(symbol: str, entry: dict[str, Any]) -> tuple[str, float, dateti
     return "last", price, ensure_utc(when)
 
 
+def _never(_: date) -> bool:
+    return False
+
+
+def _final_bar_filter(kind: str, tz_name: object, now: datetime) -> Callable[[date], bool]:
+    """Which bar dates are final, trading-day bars, judged at ``now`` (the fetch time).
+
+    US ``etf``/``stock`` instruments follow XNYS: a bar counts only if that day was a session
+    and the session has closed (early closes honoured). Everything else (futures, indices,
+    yields, other exchanges) has no calendar here: drop Saturday/Sunday bars, and drop any bar
+    dated today or later in the exchange's own timezone (the session may still be running).
+    """
+    if kind in ("etf", "stock"):
+
+        def xnys(d: date) -> bool:
+            bounds = calendars.session_bounds_utc(d)
+            return bounds is not None and bounds[1] <= now
+
+        return xnys
+    try:
+        zone = ZoneInfo(tz_name) if isinstance(tz_name, str) else ET
+    except (KeyError, ValueError):  # unknown tz name in a hand-edited raw file
+        zone = ET
+    today = now.astimezone(zone).date()
+    return lambda d: d.weekday() < 5 and d < today
+
+
 def _bar_points(
-    symbol: str, entry: dict[str, Any], *, only_close: bool
+    symbol: str,
+    entry: dict[str, Any],
+    *,
+    only_close: bool,
+    keep: Callable[[date], bool],
 ) -> list[tuple[str, float, datetime]]:
     bars = entry.get("bars")
     if not isinstance(bars, list):
@@ -280,6 +346,7 @@ def _bar_points(
         except (KeyError, ValueError) as exc:
             raise ParseError(f"{symbol}: bad bar date {bar.get('date')!r}") from exc
         as_of = datetime(day.year, day.month, day.day, tzinfo=ET).astimezone(UTC)
+        final = keep(day)  # False: non-business day or session not finished at fetch time
         for field, key in BAR_FIELDS:
             if only_close and field != "close":
                 continue
@@ -288,7 +355,8 @@ def _bar_points(
             value = _finite_float(bar[key])
             if value is None:
                 raise ParseError(f"{symbol}: bad {key} {bar[key]!r} on {day}")
-            points.append((field, value, as_of))
+            if final:
+                points.append((field, value, as_of))
     return points
 
 
@@ -316,3 +384,7 @@ def _obs(
         "is_derived": False,
         "is_fallback": dataset == "daily_fallback",
     }
+
+
+if SOURCE not in registered():
+    register(SOURCE, YahooSource)

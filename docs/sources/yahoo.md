@@ -8,7 +8,7 @@ Code: `src/deskbrief/sources/yahoo.py`. Tier 2 "second opinion" source, unoffici
 | Dataset | Rows | Notes |
 |---|---|---|
 | `quote` | `field=last`, `interval=tick`, `as_of` = Yahoo `regularMarketTime` (the quote instant, P-006) | One `Ticker.history(period="1d")` call per symbol, then `history_metadata` (`regularMarketPrice`, `regularMarketTime`). |
-| `history` | `field` in open/high/low/close, `interval=1d`, `as_of` = 00:00 ET on the bar's exchange-local date | Window `[target_date - 10d, target_date + 1d)`, `auto_adjust=False`. A null field (partial bar) is skipped. |
+| `history` | `field` in open/high/low/close, `interval=1d`, `as_of` = 00:00 ET on the bar's exchange-local date | Window `[target_date - 10d, target_date + 1d)`, `auto_adjust=False`. Only final trading-day bars are kept (see below). A null field is skipped. |
 | `daily_fallback` | `field=close`, `interval=1d`, `is_fallback=true` | T3 fallback for symbols Stooq normally serves. See below. |
 
 Planned per job: morning and eod = quote + history + daily_fallback; intraday = quote only;
@@ -41,6 +41,33 @@ Token bucket from `sources/http.py` (`TokenBucket`), `rate_per_min` from `config
 (30), burst 1, one token per symbol call. There is no retry: a failed symbol is reported, and the
 next scheduled run tries again.
 
+## Errors are made visible (hide_exceptions)
+
+yfinance 1.8 defaults to `config.debug.hide_exceptions = True`: rate limits and blocks are logged
+and come back as empty data. `fetch` sets it to `False` around its calls (restored in `finally`)
+so they raise and become per-symbol errors. Because Yahoo can still return nothing for a bad
+symbol, "every requested symbol returned no data" is an `error` on an XNYS business day (ET date
+of the fetch) and `empty` only on weekends and NYSE holidays.
+
+## Which daily bars are kept
+
+`parse` judges each bar at the fetch time (`RawResponse.responded_at`):
+
+- `etf`/`stock` instruments (the `daily_fallback` symbols): XNYS calendar. The bar's date must be a
+  session and the session (early closes honoured) must have closed.
+- Everything else (futures, indices, yields): no exchange calendar is modelled. Saturday and
+  Sunday bars are dropped (e.g. the `ES=F` Sunday-evening session bar), and so is any bar dated
+  today or later in the exchange's own timezone (taken from the history index, ET if unknown),
+  because that session may still be running. Holidays on other exchanges are not filtered; Yahoo
+  normally returns no bar for them.
+
+## Scope: daily bars only, volume only in raw
+
+`history` is daily only. The card text says "daily + 1m", but nothing in the spec or the
+cross-checks consumes Yahoo 1m bars yet, and a 1m window multiplies requests against the 30/min
+limit; add it with the check that needs it. Volume is not emitted as an observation (shares vs
+contracts vs zero) but is kept in the raw body so it can be recovered on replay.
+
 ## Enabling `daily_fallback` (when Stooq is disabled, T13)
 
 Add one feed per equity/ETF symbol to its instrument in `config.yaml` (tier 3, same tier as
@@ -56,8 +83,8 @@ T13 has not disabled Stooq.
 
 ## `^TNX` / `^IRX` scale: VERIFY at live probe
 
-Historically Yahoo quoted `^TNX` and `^IRX` as yield x 10 (42.5 meant 4.25%), which needs
-`scale: 0.1` on the feed. `config.yaml` currently sets no scale (1.0) and still carries
+Yahoo may have quoted `^TNX` and `^IRX` as yield x 10 at some point (unverified, no source
+checked); if a live value is ~10x the official yield the feed needs `scale: 0.1`. `config.yaml` currently sets no scale (1.0) and still carries
 `# VERIFY scale`. The live probe has not been recorded for this PR (status: PENDING). Check the
 live value against the 10-year yield from FRED/Treasury before the first scheduled run and set
 `scale` on the `^TNX`/`^IRX` quote and history feeds if the value is ~10x. The validity and anomaly

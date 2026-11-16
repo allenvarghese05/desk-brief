@@ -5,6 +5,7 @@ Fixtures under ``tests/fixtures/synthetic/yahoo`` are SYNTHETIC (invented values
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -50,6 +51,9 @@ class FakeYF:
     __version__ = "9.9.9"
 
     def __init__(self) -> None:
+        # real yfinance 1.8 defaults to hide_exceptions=True: errors come back as empty frames
+        self.config = SimpleNamespace(debug=SimpleNamespace(hide_exceptions=True))
+        self.hide_seen: list[bool] = []
         self.frames: dict[str, pd.DataFrame] = {}
         self.meta: dict[str, dict[str, Any]] = {}
         self.raises: dict[str, Exception] = {}
@@ -60,7 +64,10 @@ class FakeYF:
 
         def history(**kwargs: Any) -> pd.DataFrame:
             outer.calls.append((symbol, kwargs))
+            outer.hide_seen.append(outer.config.debug.hide_exceptions)
             if symbol in outer.raises:
+                if outer.config.debug.hide_exceptions:
+                    return pd.DataFrame()  # what real yfinance does: swallow and log
                 raise outer.raises[symbol]
             return outer.frames.get(symbol, pd.DataFrame())
 
@@ -75,8 +82,8 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakeYF:
 
 
 class Clock:
-    def __init__(self) -> None:
-        self.t = T0
+    def __init__(self, t: datetime = T0) -> None:
+        self.t = t
 
     def __call__(self) -> datetime:
         return self.t
@@ -95,9 +102,8 @@ def with_feeds(config: Config, instrument: str, feeds: tuple[Feed, ...]) -> Conf
     return config.model_copy(update={"instruments": insts})
 
 
-def make(config: Config, sleeps: list[float] | None = None) -> YahooSource:
-    rec = sleeps if sleeps is not None else []
-    return YahooSource(config, sleep=rec.append, now=Clock())
+def make(config: Config, now: datetime = T0) -> YahooSource:
+    return YahooSource(config, sleep=lambda _: None, now=Clock(now))
 
 
 def ctx(config: Config, job: JobKind = JobKind.MORNING) -> RunContext:
@@ -114,12 +120,17 @@ def ctx(config: Config, job: JobKind = JobKind.MORNING) -> RunContext:
     )
 
 
-def raw_from(dataset: str, payload: dict[str, Any], symbols: tuple[str, ...] = ()) -> RawResponse:
+def raw_from(
+    dataset: str,
+    payload: dict[str, Any],
+    symbols: tuple[str, ...] = (),
+    at: datetime = T0,
+) -> RawResponse:
     return RawResponse(
         request=FetchRequest(source="yahoo", dataset=dataset, symbols=symbols),
         fetch_id="f1",
-        requested_at=T0,
-        responded_at=T0,
+        requested_at=at,
+        responded_at=at,
         http_status=200,
         content_type="application/json",
         body=json.dumps(payload).encode(),
@@ -146,13 +157,14 @@ def test_is_a_source_and_registers(config: Config) -> None:
     src = YahooSource(config)
     assert isinstance(src, Source)
     assert src.name == "yahoo"
-    registry.clear()
-    try:
-        registry.register("yahoo", YahooSource)
-        built = registry.get_sources(config)
-        assert [s.name for s in built] == ["yahoo"]
-    finally:
-        registry.clear()
+
+
+def test_module_registers_itself_on_import(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "_FACTORIES", {})
+    assert "yahoo" not in registry.registered()
+    importlib.reload(yahoo)  # re-runs the module-level registration against the empty map
+    assert "yahoo" in registry.registered()
+    assert [s.name for s in registry.get_sources(config)] == ["yahoo"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -271,12 +283,75 @@ def test_fetch_respects_rate_limit_between_symbols(config: Config, fake: FakeYF)
     assert sleeps == [pytest.approx(2.0), pytest.approx(4.0)]
 
 
-def test_fetch_all_symbols_empty_is_status_empty(config: Config, fake: FakeYF) -> None:
-    raw = make(config).fetch(history_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
+SUNDAY = datetime(2026, 11, 15, 15, 0, tzinfo=UTC)
+
+
+def test_fetch_all_symbols_empty_on_non_business_day_is_status_empty(
+    config: Config, fake: FakeYF
+) -> None:
+    raw = make(config, SUNDAY).fetch(history_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
     assert raw.error is None
     assert raw.status is FetchStatus.EMPTY
     assert raw.fetch_status is FetchStatus.EMPTY
     assert raw.ok
+
+
+def test_fetch_all_symbols_empty_on_xnys_business_day_is_error(
+    config: Config, fake: FakeYF
+) -> None:
+    raw = make(config, T0).fetch(history_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.error is not None
+    assert "no data on an XNYS business day" in raw.error
+    assert not raw.ok
+
+
+def test_fetch_makes_yfinance_raise_and_restores_the_setting(config: Config, fake: FakeYF) -> None:
+    fake.raises["SPY"] = RuntimeError("rate limited")  # swallowed by real yfinance by default
+    raw = make(config).fetch(quote_req("SPY"), http=None)  # type: ignore[arg-type]
+    assert fake.hide_seen == [False]  # hide_exceptions was off during the call
+    assert fake.config.debug.hide_exceptions is True  # restored
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.error is not None
+    assert "rate limited" in raw.error
+
+
+def test_fetch_restores_hide_exceptions_even_when_collect_fails(
+    config: Config, fake: FakeYF
+) -> None:
+    src = make(config)
+
+    def boom() -> float:
+        raise KeyboardInterrupt("stop")  # not an Exception: escapes the per-symbol handler
+
+    src._bucket.acquire = boom  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        src.fetch(quote_req("SPY"), http=None)  # type: ignore[arg-type]
+    assert fake.config.debug.hide_exceptions is True
+
+
+def test_fetch_per_symbol_error_is_redacted_in_body(config: Config, fake: FakeYF) -> None:
+    secret = "".join(["Qw", "7z", "Lp", "93", "Xk"])
+    fake.raises["SPY"] = RuntimeError(f"GET https://q.example/v1?crumb=1&api_key={secret}")
+    fake.meta["QQQ"] = {"regularMarketPrice": 1.0, "regularMarketTime": 1_794_000_000}
+    raw = make(config).fetch(quote_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
+    assert secret.encode() not in raw.body
+    assert "RuntimeError" in json.loads(raw.body)["symbols"]["SPY"]["error"]
+
+
+def test_fetch_non_native_currency_does_not_fail_the_dataset(config: Config, fake: FakeYF) -> None:
+    fake.meta["SPY"] = {
+        "regularMarketPrice": 500.0,
+        "regularMarketTime": 1_794_000_000,
+        "currency": object(),
+    }
+    fake.meta["QQQ"] = {"regularMarketPrice": 400.0, "regularMarketTime": 1_794_000_000}
+    raw = make(config).fetch(quote_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
+    assert raw.fetch_status is FetchStatus.OK
+    body = json.loads(raw.body)["symbols"]
+    assert body["SPY"]["price"] == 500.0
+    assert isinstance(body["SPY"]["currency"], str)
+    assert body["QQQ"]["currency"] is None
 
 
 def test_fetch_exception_on_every_symbol_is_error_response(config: Config, fake: FakeYF) -> None:
@@ -306,6 +381,8 @@ def test_fetch_unexpected_failure_outside_symbol_loop_never_raises(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Broken:
+        config = SimpleNamespace(debug=SimpleNamespace(hide_exceptions=True))
+
         @property
         def __version__(self) -> str:
             raise RuntimeError("no version")
@@ -327,7 +404,7 @@ def test_fetch_unsupported_dataset_is_error(config: Config, fake: FakeYF) -> Non
 
 def test_fetch_nan_price_counts_as_no_data(config: Config, fake: FakeYF) -> None:
     fake.meta["SPY"] = {"regularMarketPrice": float("nan"), "regularMarketTime": 1_794_000_000}
-    raw = make(config).fetch(quote_req("SPY"), http=None)  # type: ignore[arg-type]
+    raw = make(config, SUNDAY).fetch(quote_req("SPY"), http=None)  # type: ignore[arg-type]
     assert raw.status is FetchStatus.EMPTY
 
 
@@ -391,14 +468,62 @@ def test_parse_history_fixture_daily_bars(config: Config) -> None:
     # P-006: 1d as_of is 00:00 America/New_York on the reference date (EST in November)
     assert close.iloc[1]["as_of"] == pd.Timestamp("2026-11-13T05:00:00Z")
     assert close.iloc[1]["tier"] == 2
-    # ES=F Sunday bar with a null close: open/high/low kept, no close row; SPY has no bars
+    # ES=F Sunday bar (non-null close) is dropped; only Friday's 4 fields remain
     es = df[df["instrument_id"] == "ES_F"]
-    assert set(es[es["as_of"] == pd.Timestamp("2026-11-15T05:00:00Z")]["field"]) == {
-        "open",
-        "high",
-        "low",
-    }
+    assert set(es["as_of"]) == {pd.Timestamp("2026-11-13T05:00:00Z")}
+    assert len(es) == 4
     assert "SPY" not in set(df["instrument_id"])
+
+
+def history_payload(symbol: str, day: str, tz: str | None = "America/New_York") -> dict[str, Any]:
+    bar = {"date": day, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}
+    return {"symbols": {symbol: {"tz": tz, "bars": [bar]}}}
+
+
+def test_parse_drops_weekend_bar_with_non_null_close(config: Config) -> None:
+    at = datetime(2026, 11, 17, 15, 0, tzinfo=UTC)  # Tuesday: Sunday's bar is long finished
+    raw = raw_from("history", history_payload("ES=F", "2026-11-15"), at=at)
+    assert make(config).parse(raw).empty
+    raw = raw_from("history", history_payload("ES=F", "2026-11-14"), at=at)  # Saturday
+    assert make(config).parse(raw).empty
+
+
+def test_parse_drops_in_progress_bar_of_non_xnys_instrument(config: Config) -> None:
+    payload = history_payload("ES=F", "2026-11-16")  # Monday bar, fetched Monday 06:15 ET
+    assert make(config).parse(raw_from("history", payload, at=T0)).empty
+    next_day = datetime(2026, 11, 17, 11, 15, tzinfo=UTC)
+    df = make(config).parse(raw_from("history", payload, at=next_day))
+    assert set(df["field"]) == {"open", "high", "low", "close"}
+
+
+def test_parse_uses_the_exchange_timezone_for_today(config: Config) -> None:
+    # 2026-11-16 20:00Z is already Tuesday 05:00 in Tokyo: Monday's N225 bar is final
+    at = datetime(2026, 11, 16, 20, 0, tzinfo=UTC)
+    payload = history_payload("^N225", "2026-11-16", tz="Asia/Tokyo")
+    assert not make(config).parse(raw_from("history", payload, at=at)).empty
+    # an unknown tz name falls back to ET (conservative) instead of failing
+    bad = history_payload("^N225", "2026-11-16", tz="Not/AZone")
+    assert make(config).parse(raw_from("history", bad, at=T0)).empty
+
+
+def test_parse_xnys_instrument_bar_needs_a_closed_session(config: Config) -> None:
+    cfg = with_feeds(
+        config,
+        "AAPL",
+        (Feed(source="yahoo", dataset="daily_fallback", symbol="AAPL", tier=3),),
+    )
+    payload = history_payload("AAPL", "2026-11-16")
+    before_open = datetime(2026, 11, 16, 11, 15, tzinfo=UTC)
+    mid_session = datetime(2026, 11, 16, 18, 0, tzinfo=UTC)
+    after_close = datetime(2026, 11, 16, 22, 30, tzinfo=UTC)  # close is 21:00Z in November
+    for at in (before_open, mid_session):
+        assert make(cfg).parse(raw_from("daily_fallback", payload, at=at)).empty
+    df = make(cfg).parse(raw_from("daily_fallback", payload, at=after_close))
+    assert len(df) == 1
+    assert df.iloc[0]["field"] == "close"
+    holiday = history_payload("AAPL", "2026-11-26")  # Thanksgiving
+    late = datetime(2026, 11, 30, 15, 0, tzinfo=UTC)
+    assert make(cfg).parse(raw_from("daily_fallback", holiday, at=late)).empty
 
 
 def test_parse_daily_fallback_flags_and_close_only(config: Config) -> None:
