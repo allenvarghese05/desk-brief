@@ -393,11 +393,11 @@ def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest) -> list[str]
 
 
 def _decide(env: RunEnv, manifest: RunManifest, degraded: list[str]) -> RunStatus:
-    if manifest.flush_data_lost:
-        manifest.notes.append("clean rows were not stored: run is failed so catch-up retries it")
-        return RunStatus.FAILED
     if manifest.storage_failed and not manifest.storage_ok:
         manifest.notes.append("storage unavailable: nothing could be written")
+        return RunStatus.FAILED
+    if manifest.flush_data_lost:
+        manifest.notes.append("clean rows were not stored: run is failed so catch-up retries it")
         return RunStatus.FAILED
     if not env.sources:
         manifest.notes.append("no sources selected or registered")

@@ -511,6 +511,7 @@ def test_source_log_request_is_json_without_secrets(tmp_path: Path) -> None:
         "url": "https://example.invalid/stooq",
         "params": {"n": "0"},
         "target_date": "2026-11-16",
+        "window": None,
     }
 
 
@@ -562,10 +563,10 @@ def test_morning_gate_uses_the_scheduled_time_so_a_delayed_cron_still_runs(
         [FakeSource("stooq")],
         env={"GITHUB_EVENT_SCHEDULE": "15 10,11 * * 1-5"},
     )
-    # EST: the 11:15 UTC fire (06:15 ET) starts 2 h late, at 08:20 ET
+    # EST: the 11:15 UTC fire (06:15 ET) starts 2 h late, at 08:20 ET; the gate looks at the
+    # fire time (06:15 ET), not the wall clock, so the run proceeds
     m = _sched(env, JobKind.MORNING, datetime(2026, 11, 16, 13, 20, tzinfo=UTC))
-    assert m.status is None  # last fire before 13:20 UTC is 11:15 UTC...
-    # ...so with the fire time known, 11:15 UTC is 06:15 ET and the run proceeds
+    assert m.status is RunStatus.OK
     env.clock = FakeClock(datetime(2026, 11, 16, 11, 50, tzinfo=UTC))  # 35 min late
     assert run_job(env, JobKind.MORNING, trigger=Trigger.SCHEDULE).status is RunStatus.OK
 
