@@ -1,0 +1,6 @@
+{
+  "_synthetic": "SYNTHETIC FIXTURE: invented values; the GBP/USD entry is an invented per-symbol error",
+  "EUR/USD": {"symbol": "EUR/USD", "name": "EUR/USD", "exchange": "", "datetime": "2026-11-13", "timestamp": 1794575700, "close": "1.08420", "is_market_open": true},
+  "GBP/USD": {"code": 400, "message": "**symbol** not found: GBP/USD (synthetic)", "status": "error"},
+  "USD/JPY": {"symbol": "USD/JPY", "name": "USD/JPY", "exchange": "", "datetime": "2026-11-13", "timestamp": 1794575702, "close": "154.520", "is_market_open": true}
+}
