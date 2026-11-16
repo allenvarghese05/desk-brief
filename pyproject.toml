@@ -78,6 +78,7 @@ markers = [
 [tool.coverage.run]
 source = ["deskbrief"]
 branch = true
+# cli.py is a thin argparse shell exercised end-to-end, excluded per spec §13
 omit = ["*/deskbrief/cli.py"]
 
 [tool.coverage.report]

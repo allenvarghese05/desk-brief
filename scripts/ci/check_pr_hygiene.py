@@ -26,10 +26,21 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     'Files outside "Owns"',
     "Risks and follow-ups",
 )
-PLACEHOLDERS: tuple[str, ...] = ("T__", "<title>", "§…", "- …")
+PLACEHOLDERS: tuple[str, ...] = (
+    "T__",
+    "<title>",
+    "§…",
+    "- …",
+    "<copied from card",
+    "<list",
+    "<date>",
+)
+TITLE_CARD_RE = re.compile(r"^t(\d{2}[a-z]?):")
+FENCE_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
 
 
 def _sections(body: str) -> dict[str, str]:
+    body = FENCE_RE.sub("", body)  # '##' lines inside code fences are not headings
     found: dict[str, str] = {}
     current: str | None = None
     lines: list[str] = []
@@ -59,6 +70,11 @@ def problems(title: str, body: str | None) -> list[str]:
             errs.append(f"missing section '## {name}'")
         elif not sections[name]:
             errs.append(f"section '## {name}' is empty")
+    m = TITLE_CARD_RE.match(title)
+    if m and f"T{m.group(1).upper()}" not in sections.get("Card", ""):
+        errs.append(f"'## Card' must name the card in the title (T{m.group(1).upper()})")
+    if "- [ ]" in sections.get("Acceptance criteria", ""):
+        errs.append("unticked acceptance criterion: tick it with evidence or explain why not")
     for ph in PLACEHOLDERS:
         if ph in text:
             errs.append(f"unfilled template placeholder {ph!r}")

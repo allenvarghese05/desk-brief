@@ -70,6 +70,17 @@ class TestContracts:
             "src/deskbrief/config.py"
         ]
 
+    def test_parse_real_rename_line_sees_both_paths(self) -> None:
+        text = "R100\tsrc/deskbrief/models.py\tsrc/deskbrief/elsewhere.py\nM\tREADME.md\n"
+        pairs = contracts.parse_name_status(text)
+        assert ("R100", "src/deskbrief/models.py") in pairs
+        assert contracts.violations(pairs, "t02: x", []) == ["src/deskbrief/models.py"]
+
+    def test_parse_no_renames_output(self) -> None:
+        text = "D\tsrc/deskbrief/models.py\nA\tsrc/deskbrief/elsewhere.py\n"
+        pairs = contracts.parse_name_status(text)
+        assert contracts.violations(pairs, "t02: x", []) == ["src/deskbrief/models.py"]
+
 
 class TestHygiene:
     def test_good_pr_passes(self) -> None:
@@ -95,3 +106,22 @@ class TestHygiene:
 
     def test_none_body(self) -> None:
         assert hygiene.problems("t01: x", None)
+
+    def test_card_must_match_title(self) -> None:
+        errs = hygiene.problems("t02: storage", GOOD_BODY)
+        assert any("T02" in e for e in errs)
+
+    def test_unticked_acceptance_rejected(self) -> None:
+        body = GOOD_BODY.replace("- [x] config loads", "- [ ] config loads")
+        assert any("unticked" in e for e in hygiene.problems("t01: x", body))
+
+    def test_headings_inside_code_fences_ignored(self) -> None:
+        body = "```\n## Card\nT01\n```\n"
+        errs = hygiene.problems("t01: x", body)
+        assert any("missing section '## Card'" in e for e in errs)
+
+    def test_template_placeholders_rejected(self) -> None:
+        body = GOOD_BODY.replace(
+            "None\n\n## Risks", "None / <list + planner approval link>\n\n## Risks"
+        )
+        assert any("<list" in e for e in hygiene.problems("t01: x", body))

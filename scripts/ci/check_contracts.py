@@ -41,19 +41,30 @@ def violations(changes: Iterable[tuple[str, str]], title: str, labels: Sequence[
     )
 
 
+def parse_name_status(text: str) -> list[tuple[str, str]]:
+    """Parse ``git diff --name-status`` output into (status, path) pairs.
+
+    Rename/copy lines (``R100<TAB>old<TAB>new``) yield one pair per path, so moving a
+    contract file away is still seen as touching it. CI also passes ``--no-renames``.
+    """
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        pairs.extend((status, path) for path in parts[1:])
+    return pairs
+
+
 def _changed_files(base_ref: str) -> list[tuple[str, str]]:
     out = subprocess.run(
-        ["git", "diff", "--name-status", f"origin/{base_ref}...HEAD"],
+        ["git", "diff", "--no-renames", "--name-status", f"origin/{base_ref}...HEAD"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    pairs: list[tuple[str, str]] = []
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            pairs.append((parts[0], parts[-1]))
-    return pairs
+    return parse_name_status(out)
 
 
 def main() -> int:
