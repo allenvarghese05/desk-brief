@@ -69,9 +69,9 @@ Concurrency limits: ≤ 6 implementers at once; never two open PRs owning the sa
 |---|---|---|
 | `lint` | `uv run ruff check . && uv run ruff format --check .` | any lint/format issue |
 | `typecheck` | `uv run mypy --strict src` | any type error |
-| `test` | `uv run pytest -m "not integration" --cov=src/deskbrief --cov-fail-under=85` with sockets disabled | test failure, coverage < 85%, any test opening a socket |
+| `test` | `uv run pytest -m "not integration" --cov=deskbrief --cov-fail-under=85` with sockets disabled | test failure, coverage < 85%, any test opening a socket |
 | `lockfile` | `uv lock --check` | `pyproject.toml` and `uv.lock` out of sync |
-| `security` | gitleaks on diff; `pip-audit`/`uv` audit on lock | secret detected; known-vulnerable dep (high) |
+| `security` | gitleaks (blocking); `pip-audit` on exported lock (**report-only** for now, so an upstream CVE with no fix cannot freeze every merge; planner reviews its output weekly and turns real issues into cards) | secret detected |
 | `config` | `uv run python -m deskbrief.config` | `config.yaml` fails schema/cross-reference validation |
 | `contracts` | `tests/contract/` + script: if a PR touches contract files (list in implementation plan) it must carry label `contract` and title prefix `contract:` | unlabeled contract change |
 | `vba-manifest` (from T33) | `.bas` hashes match `vba/MANIFEST.json` | VBA source changed without rebuilt bin |

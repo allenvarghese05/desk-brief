@@ -216,27 +216,33 @@ All thresholds above are starting values; tuning them is expected and each tunin
 # deskbrief/sources/base.py
 @dataclass(frozen=True)
 class FetchRequest:
-    source: str; dataset: str
-    params: Mapping[str, str]          # never contains secrets
+    source: str
+    dataset: str
+    params: Mapping[str, str]  # never contains secrets
     symbols: tuple[str, ...]
     target_date: date | None
-    window: tuple[datetime, datetime] | None   # UTC
+    window: tuple[datetime, datetime] | None  # UTC
+
 
 @dataclass(frozen=True)
 class RawResponse:
     request: FetchRequest
-    fetch_id: str                      # ulid
-    requested_at: datetime; responded_at: datetime   # UTC
+    fetch_id: str  # ulid
+    requested_at: datetime
+    responded_at: datetime  # UTC
     http_status: int | None
-    content_type: str; body: bytes
-    error: str | None                  # set on transport/HTTP failure; body may be empty
+    content_type: str
+    body: bytes
+    error: str | None  # set on transport/HTTP failure; body may be empty
+
 
 class Source(Protocol):
     name: str
-    parser_version: str                # bump on any parse change
+    parser_version: str  # bump on any parse change
+
     def plan(self, job: JobKind, ctx: RunContext) -> list[FetchRequest]: ...
-    def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse: ...   # IO only
-    def parse(self, raw: RawResponse) -> pd.DataFrame: ...                     # pure; returns OBS_COLUMNS
+    def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse: ...  # IO only
+    def parse(self, raw: RawResponse) -> pd.DataFrame: ...  # pure; returns OBS_COLUMNS
 ```
 
 - `fetch` does IO only; `parse` is a pure function of bytes → DataFrame. Parsers are unit-tested from fixture files and can replay any raw file.
