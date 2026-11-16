@@ -6,7 +6,6 @@ on ECB's documented SDMX CSV; replace with a real capture (see docs/sources/ecb.
 
 from __future__ import annotations
 
-import dataclasses
 import importlib
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
@@ -78,14 +77,11 @@ def test_is_a_source_and_registered(src: EcbSource) -> None:
     assert src.name == "ecb"
 
 
-def test_module_registers_ecb_on_import() -> None:
-    # other tests clear the global registry, so re-run the import-time registration
-    registry.clear()
-    try:
-        importlib.reload(ecb_module)
-        assert "ecb" in registry.registered()
-    finally:
-        registry.clear()
+def test_module_registers_ecb_on_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    # re-run the import-time registration against a private registry (restored at teardown)
+    monkeypatch.setattr(registry, "_FACTORIES", {})
+    importlib.reload(ecb_module)
+    assert "ecb" in registry.registered()
 
 
 def test_golden_parse(src: EcbSource) -> None:
@@ -206,14 +202,33 @@ def test_fetch_requests_ecb_url(src: EcbSource, config: Config) -> None:
     assert raw.fetch_status is FetchStatus.OK
 
 
-class Fake404(FakeHttp):
-    """http client stand-in that sets ``error`` like DefaultHttpClient does for non-2xx."""
+def _planned(src: EcbSource, config: Config) -> FetchRequest:
+    (req,) = src.plan(JobKind.EOD, ctx(config, date(2026, 11, 13)))
+    return req
+
+
+def _raw404(body: bytes, content_type: str | None, req: FetchRequest) -> RawResponse:
+    return RawResponse(
+        request=req,
+        fetch_id="f404",
+        requested_at=NOW,
+        responded_at=NOW,
+        http_status=404,
+        content_type=content_type or "",
+        body=body,
+        error="HTTP 404",
+    )
+
+
+class Fake404Typed(FakeHttp):
+    def __init__(self, body: bytes, content_type: str | None) -> None:
+        super().__init__(404, body)
+        self.content_type = content_type
 
     def get(
         self, req: FetchRequest, url: str, *, params: Mapping[str, str] | None = None, **_: object
     ) -> RawResponse:
-        raw = super().get(req, url, params=params)
-        return dataclasses.replace(raw, error=f"HTTP {self.status}")
+        return _raw404(self.body, self.content_type, req)
 
 
 def _planned(src: EcbSource, config: Config) -> FetchRequest:
@@ -221,10 +236,19 @@ def _planned(src: EcbSource, config: Config) -> FetchRequest:
     return req
 
 
-def test_fetch_404_with_sdmx_no_results_body_is_empty(src: EcbSource, config: Config) -> None:
-    # body text UNVERIFIED (from ECB docs); see docs/sources/ecb.md
-    body = b"No results found"
-    raw = src.fetch(_planned(src, config), Fake404(404, body))
+# UNVERIFIED message (ECB docs); see docs/sources/ecb.md
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"No results found.", "text/plain; charset=utf-8"),
+        (b"No results found", "text/plain"),
+        (b"  No results found.\n", "TEXT/PLAIN;charset=UTF-8"),
+    ],
+)
+def test_fetch_404_exact_no_results_text_plain_is_empty(
+    src: EcbSource, config: Config, body: bytes, content_type: str
+) -> None:
+    raw = src.fetch(_planned(src, config), Fake404Typed(body, content_type))
     assert raw.fetch_status is FetchStatus.EMPTY
     assert raw.error is None
     assert raw.body == body  # evidence stored byte for byte
@@ -233,26 +257,39 @@ def test_fetch_404_with_sdmx_no_results_body_is_empty(src: EcbSource, config: Co
 @pytest.mark.parametrize(
     "body",
     [
+        b"no results found.",  # mixed case
+        b"NO RESULTS FOUND",
+        b'{"message":"No results found"}',
+        b'{"error":"upstream: No results found for dataflow"}',
+        b"<html><title>404</title><p>No results found</p></html>",
+        b"<?xml version='1.0'?><error>No results found</error>",
+        b"404 Not Found\nnginx: No results found\n",
+        b"No results found. Please check the key and try again, or visit our status page.",
+        b"Error: No results found.",
+        b"No results found.\nNo results found.",
+        b"No results found..",
         b"Not Found",
         b"",
-        b'{"error":"unknown dataflow"}',
-        b"<html><body>404 Not Found</body></html>",
+        b"\xff\xfe",
     ],
 )
-def test_fetch_404_with_unrelated_body_is_error(
-    src: EcbSource, config: Config, body: bytes
+@pytest.mark.parametrize("content_type", ["text/plain", "text/html", "application/json", None])
+def test_fetch_404_everything_else_is_error(
+    src: EcbSource, config: Config, body: bytes, content_type: str | None
 ) -> None:
-    raw = src.fetch(_planned(src, config), Fake404(404, body))
+    raw = src.fetch(_planned(src, config), Fake404Typed(body, content_type))
     assert raw.fetch_status is FetchStatus.ERROR
     assert raw.error
     assert raw.body == body
 
 
-def test_fetch_gateway_html_404_mentioning_no_results_is_error(
-    src: EcbSource, config: Config
+@pytest.mark.parametrize(
+    "content_type", ["text/html", "text/html; charset=utf-8", "application/json", None, ""]
+)
+def test_fetch_404_exact_phrase_wrong_content_type_is_error(
+    src: EcbSource, config: Config, content_type: str | None
 ) -> None:
-    body = b"<html><title>404</title><p>No results found for your request</p></html>"
-    raw = src.fetch(_planned(src, config), Fake404(404, body))
+    raw = src.fetch(_planned(src, config), Fake404Typed(b"No results found.", content_type))
     assert raw.fetch_status is FetchStatus.ERROR
 
 

@@ -19,9 +19,14 @@ rate, raises :class:`ParseError` (no partial crosses). No data rows at all is a 
 empty frame (header only). Data rows with none of the three currencies, a ``TIME_PERIOD``
 outside the requested window, or a non-finite/non-positive derived cross also raise.
 
-``fetch`` treats HTTP 404 as ``empty`` only when the body contains the SDMX "No results found"
-text (UNVERIFIED: taken from ECB documentation, to be confirmed by the live probe in
-``docs/sources/ecb.md``). Any other 404 (wrong URL/dataflow, gateway HTML) stays an error.
+``fetch`` treats HTTP 404 as ``empty`` only for a ``text/plain`` response whose whole body is
+exactly the SDMX message "No results found." (UNVERIFIED: taken from ECB documentation, to be
+confirmed by the live probe in ``docs/sources/ecb.md``). Any other 404 (wrong URL/dataflow,
+JSON, HTML, gateway text, other content types) stays an error.
+
+A ``TIME_PERIOD`` outside the requested window raises ``ParseError`` on purpose (fail loud: the
+server ignored the window, so the payload is not what was asked for). Revisit once the probe
+shows the API's boundary behaviour.
 """
 
 from __future__ import annotations
@@ -48,7 +53,9 @@ DATASET = "eurofxref"
 URL = "https://data-api.ecb.europa.eu/service/data/EXR/D.USD+GBP+JPY.EUR.SP00.A"
 _CURRENCIES = ("USD", "GBP", "JPY")
 _DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", re.ASCII)  # strict: no "1_16", "nan", "1e3"
-_NO_RESULTS = re.compile(r"no\s+results\s+found", re.IGNORECASE)
+# UNVERIFIED: the SDMX "no results" message as documented by ECB (case-sensitive, nothing else in
+# the body, served as text/plain). Confirm with the live probe in docs/sources/ecb.md.
+_NO_RESULTS = re.compile(r"No results found\.?")
 _REQUIRED_COLUMNS = ("CURRENCY", "CURRENCY_DENOM", "TIME_PERIOD", "OBS_VALUE")
 
 
@@ -96,8 +103,7 @@ class EcbSource:
     def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse:
         raw = http.get(req, URL, params=req.params)
         if raw.http_status == 404:
-            text = raw.body[:2000].decode("utf-8", errors="replace")
-            if _NO_RESULTS.search(text) and "<html" not in text.lower():
+            if _is_no_results(raw):
                 return dataclasses.replace(raw, error=None, status=FetchStatus.EMPTY)
             if raw.error is None:  # anomalous 404 on a planned day: surface it
                 return dataclasses.replace(raw, error="HTTP 404: unrecognized not-found response")
@@ -151,12 +157,25 @@ class EcbSource:
         return to_frame("parsed_observations", rows)
 
 
+def _is_no_results(raw: RawResponse) -> bool:
+    """True only for a text/plain body that is exactly the SDMX no-results message."""
+    media_type = raw.content_type.split(";")[0].strip().lower()
+    if not media_type.startswith("text/plain"):
+        return False
+    try:
+        text = raw.body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return _NO_RESULTS.fullmatch(text.strip()) is not None
+
+
 def _read_rates(body: bytes) -> dict[date, dict[str, float]]:
     """``{reference date: {currency: EUR rate}}`` from SDMX CSV; ``{}`` if there are no rows."""
     try:
         text = body.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ParseError(f"ECB payload is not UTF-8: {exc}") from exc
+    # TODO: drop the "#" comment skip once the real capture replaces the synthetic fixture.
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
     if not lines:
         return {}

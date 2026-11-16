@@ -19,7 +19,8 @@
 
 - **Missing currency -> `ParseError`**, not a skip. If USD, GBP or JPY is absent for a date, the crosses cannot be built; emitting a partial set would be partial garbage (base.py rule). Duplicate, non-numeric, non-positive or NaN rates also raise.
 - **Header-only/zero-row body -> empty frame.** Data rows but none for USD/GBP/JPY vs EUR -> `ParseError`. Derived crosses must be finite and positive; `OBS_VALUE` must be a plain decimal (`1_16`, `1e0`, `nan` rejected); `TIME_PERIOD` outside the requested `startPeriod`/`endPeriod` -> `ParseError`.
-- **HTTP 404:** `empty` only if the body contains the SDMX text "No results found" (case-insensitive) and is not HTML. This text is UNVERIFIED (from ECB documentation), pending the probe. Any other 404 (wrong URL/dataflow, gateway page) stays an `error`, because `plan` never asks for a TARGET holiday, so a 404 on a planned day is anomalous. Record the real 404 body here after the probe.
+- **HTTP 404:** `empty` only if the response is `text/plain` (parameters ignored) and the whole stripped body is exactly `No results found.` (trailing period optional, case-sensitive). That message is UNVERIFIED (from ECB documentation), pending the probe. Everything else (JSON, HTML, XML, gateway text, other content types, extra text) stays an `error`, because `plan` never asks for a TARGET holiday, so a 404 on a planned day is anomalous. Record the real 404 content type and body here after the probe and update `_NO_RESULTS`.
+- **Out-of-window `TIME_PERIOD` -> `ParseError` is deliberate** (fail loud: the server ignored the requested window). Revisit once the probe shows boundary behaviour.
 - **TARGET holidays and weekends:** `plan` returns no request. Morning plans the previous TARGET business day; eod/backfill/rebuild plan `target_date`; intraday plans nothing.
 - The parser ignores leading `#` comment lines (used by the synthetic fixture header).
 
