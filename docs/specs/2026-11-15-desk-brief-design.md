@@ -154,7 +154,7 @@ instruments:
     name: SPDR S&P 500 ETF
     asset_class: equity      # equity|rates|fx|commodity|index|vol|macro
     kind: etf                # etf|stock|future|index|yield|fx|macro
-    unit: USD                # USD | pct | ratio | index_pts
+    unit: USD                # USD | pct | fx_rate | index_pts  (observations may also use shares for volume)
     feeds:
       - {source: alpaca, dataset: iex_latest, symbol: SPY, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: SPY, tier: 2}
@@ -197,7 +197,7 @@ crosschecks:
   close_vs_official: {warn_bps: 5, fail_bps: 25}
 report:
   recipients_env: REPORT_RECIPIENTS   # comma-separated, from secret
-  headline_instruments: [SPY, UST_10Y, EURUSD, WTI, VIX]
+  headline_instruments: [ES_F, UST_10Y, EURUSD, WTI, VIX]   # S&P futures trade overnight; SPY does not
 dashboard:
   mode_env: DESKBRIEF_DISPLAY_MODE    # hosted | local
   refresh_seconds: 60
@@ -259,7 +259,7 @@ class Source(Protocol):
 | ECB | eurofxref | data-api.ecb.europa.eu SDMX (EXR.D.USD+GBP+JPY.EUR.SP00.A), CSV | none | ~16:00 CET; TARGET holidays |
 | Stooq | daily | stooq.com CSV download | none / verify | Verify current access policy; if blocked, mark source disabled and use Yahoo daily close as T3 fallback **labeled as fallback** |
 | Cboe | vix_history | cdn.cboe.com VIX_History.csv | none | Verify |
-| Alpaca | iex_latest, sip_bars_1m, iex_bars_1m, daily_bars | data.alpaca.markets v2 stocks | key id + secret headers | Free: IEX real-time; SIP only ≥15 min old |
+| Alpaca | iex_latest, sip_bars_1m, iex_bars_1m (daily_bars dropped, P-003) | data.alpaca.markets v2 stocks | key id + secret headers | Free: IEX real-time; SIP only ≥15 min old |
 | Twelve Data | fx_quote (batch), fx_series_1m | api.twelvedata.com | `apikey` param (redact!) | 8/min, 800/day; batch counts per symbol |
 | Yahoo | quote, history | yfinance | none | Unofficial; second opinion only; expect rate limits from GHA IPs |
 
@@ -329,7 +329,7 @@ sequenceDiagram
 ```
 deskbrief-data/
   raw/source={src}/dataset={ds}/date={YYYY-MM-DD}/{ingested_at:%Y%m%dT%H%M%S%fZ}_{sha256[:12]}.{ext}
-  raw/.../{same}.meta.json            # fetch_id, run_id, request (redacted), status, latency, sha256, bytes
+  raw/.../{raw key}.meta.json         # raw key + ".meta.json"; fetch_id, run_id, request (redacted), status, latency, sha256, bytes
   clean/_CURRENT                       # text: "v1"
   clean/v1/observations/date={as_of_date}/run={run_id}.parquet
   clean/v1/quarantine/date={…}/run={run_id}.parquet
@@ -346,6 +346,7 @@ deskbrief-data/
   reports/date={YYYY-MM-DD}/v{n}/brief.html|brief.xlsx|brief.xlsm|model.json
 ```
 
+- **Partition dates and `as_of`:** defined once in `src/deskbrief/store/backend.py` (module docstring). Raw uses the UTC date of `ingested_at`; observations use the ET date of `as_of`; run-scoped tables use `target_date`. `as_of` for `1d` = 00:00 ET on the reference date, for `1mo` = 00:00 ET on the 1st, for `1m` = bar start, for `tick` = the trade/quote instant.
 - **Small-files control:** `eod` compacts the day's `clean/.../run=*.parquet` into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
 - **Local backend** mirrors the same layout under `.data/` for tests and dev.
 - **Access:** DuckDB `httpfs` with `CREATE SECRET (TYPE r2, ...)`. Three R2 API tokens: `ci-writer` (GHA, read/write this bucket), `dashboard-reader` (read-only), `admin` (Allen only, never in CI).
@@ -388,7 +389,7 @@ erDiagram
 | interval | VARCHAR | tick, 1m, 1d, 1mo |
 | as_of | TIMESTAMP (UTC) | |
 | value | DOUBLE | in `unit` |
-| unit | VARCHAR | USD, pct, ratio, index_pts, shares |
+| unit | VARCHAR | USD, pct, fx_rate, index_pts, shares |
 | is_derived | BOOLEAN | e.g. ECB cross rates |
 | is_fallback | BOOLEAN | e.g. Yahoo standing in for Stooq |
 | fetch_id / run_id | VARCHAR | lineage |
@@ -407,7 +408,7 @@ erDiagram
 
 `result_id, run_id, check_name, group_id, target_date, at_time, left_instrument, left_source, left_value, right_instrument, right_source, right_value, relation, expected_value, diff_bps, warn_bps, fail_bps, status, details_json` (each row also emits a `consistency` row in dq_results)
 
-**revisions** — `instrument_id, source, field, interval, as_of, old_value, new_value, old_fetch_id, new_fetch_id, detected_at, run_id`
+**revisions** — `instrument_id, source, dataset, field, interval, as_of, old_value, new_value, old_fetch_id, new_fetch_id, detected_at, run_id`
 
 **alerts** — `alert_id, run_id, kind (zscore_move|volume_spike|crosscheck_fail|source_down|sla_miss|stale), severity (info|warn|crit), instrument_id, source, as_of, observed, threshold, message`
 
