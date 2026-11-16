@@ -1,6 +1,6 @@
 # Desk Brief — Implementation Plan
 
-Status: v1, 2026-11-15. Source of truth for task order. Spec: `docs/specs/2026-11-15-desk-brief-design.md` (cited as **§n**). Process: `docs/process/agent-workflow.md`.
+Status: v1, 2026-11-15; review follow-up cards added 2026-11-16. Source of truth for task order. Spec: `docs/specs/2026-11-15-desk-brief-design.md` (cited as **§n**). Process: `docs/process/agent-workflow.md`.
 
 Rules that apply to every card:
 - One card → one branch (`t{id}-{slug}`) → one PR. Target ≤ ~400 changed lines excluding fixtures/lockfile.
@@ -44,6 +44,16 @@ flowchart TD
   T20 --> T40[T40 Alerts]
   T02 --> T41[T41 Paper portfolio + reconciliation]
   T35 & T31 --> T42[T42 README, docs, screenshots]
+  T19 & T20 & T21 --> T06[T06 Wire checks into runner + runner safety]
+  T30 --> T09[T09 Brief-model follow-ups]
+  T09 --> T06
+  T06 --> T23
+  T20 --> T07[T07 Data-check follow-ups]
+  T03 --> T08B[T08B Budget units in HTTP client]
+  T05 & T08B --> T08[T08 Source + logging follow-ups]
+  T07 --> T09
+  T21 --> T17[T17 Cross-check follow-ups]
+  T18[T18 Sandbox-runnable tests]
 ```
 
 ### Parallel lanes (max concurrent implementers per window)
@@ -56,6 +66,8 @@ flowchart TD
 | W3 Tue PM/Wed | T05 → T24A (**ship asap**) | T20 | T21 → T22 | T30 | T34 | |
 | W4 Wed/Thu | T24B | T23 | T31 | T32 → T33 | T35 | T40 |
 | W5 Fri | T41 | T42 | fixes from run history | | | |
+
+Review follow-ups (T06–T09, T08B, T17, T18) fill free lanes from W3 on, within the ordering rules in their section. T09 lands before or with T06, and T06 before T23.
 
 Critical path: **T00 → T01 → T02/T03 → T05 + T19 + official sources → T24A** (scheduled runs start) → T20/T21 → T30 → T31 (email live). Everything else hangs off this.
 
@@ -180,6 +192,137 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - Acceptance: all of the above tested (except the dependency floor, see above); no contract file changes. The implementer may split the work by area (logging / calendars / storage) if the diff exceeds ~600 lines. If `part` is adopted later (P-008), compaction must accept `run=*-p{n}.parquet`.
 
 - Changelog: PR #6 rounds 1–2: card created from review findings on PRs #2, #3 and #5 (links in the PR #6 body).
+
+### Review follow-ups (from PRs #9–#21)
+
+These cards collect the non-blocking findings that reviewers deferred on PRs #9–#21. Each bullet links its source review. Finding numbers refer to the numbered list in the linked review; "confirmation list" means the second list in a round-2 review. As with T05, a follow-up card may own files of a card that has already merged.
+
+Order and shared files:
+- **T09 merges before T06, or in the same window.** Wiring checks into the runner (T06) makes `health_summary` double-count cross-checks until T09 fixes it.
+- **T09's anomaly-reuse bullet waits for T07's anomaly change.** The rest of T09 does not wait.
+- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving step and T31 only the morning step. Whichever merges later rebases on the earlier one.
+- Otherwise T07, T08, T08B, T17 and T18 are independent.
+
+#### T06 — Wire checks and cross-checks into the runner; runner safety
+- **Depends:** T19, T20, T21 merged; T09 merged first or in the same window · **Parallel with:** T07, T08, T17, T18 · **Blocks:** T23 (scorecard reads `dq_results`/`crosscheck_results` written by real runs)
+- **Owns:** `src/deskbrief/pipeline/{runner.py,clean.py,catchup.py,manifest.py}`, the checks hook in `src/deskbrief/pipeline/jobs.py` (shared file, see above), `src/deskbrief/cli.py`, `tests/unit/pipeline/*`, `tests/fault_injection/inj_runner_*.py`
+- **Spec:** §2.4, §5.5, §7.2, §8; P-008
+- Deliverables:
+  - Call `checks.run_checks` from the runner hook in `jobs.py`, after the observations flush, with a single `dq_results` append per (table, ET date) per run (P-008). Source: [PR #16 merge confirmation](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906878775).
+  - In the same hook, run the T21 cross-checks and write `revisions` and `crosscheck_results` under their §7.2 partition rules. Source: the T20 and T21 cards ("runner hook … writes `dq_results` and `revisions`"; "writes `crosscheck_results` + mirrored `consistency` dq rows"), which left the runner side to T19, where it is still a no-op.
+  - Count the check-written DQ rows in the `runs` row (`n_dq_fail`, `n_dq_warn`), not only the runner's own rows. Source: [PR #16 round 1, finding 8](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914480147).
+  - Rebuild flip guard: never flip `_CURRENT` to a version with no partitions written; re-check that the pointer has not moved immediately before the flip; two concurrent rebuilds must not both flip. Source: [PR #16 round 2, finding 1](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782).
+  - Chunk rebuild by month with a single final flip, so memory stays bounded as `raw/` grows. Source: [PR #16 round 1, finding 10](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914480147) and the [author's deferral](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315).
+  - An `EMPTY` fetch with no calendar reason writes a DQ `warn` row instead of passing silently. Use the per-dataset expectations from T20. Source: [author's deferral of round-1 finding 9](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315).
+- Acceptance:
+  - A runner test proves a single `dq_results` append per date per run with checks and cross-checks enabled.
+  - A rerun of the same date adds no duplicate check rows.
+  - A `source_log` flush failure and a `quarantine` flush failure each give `failed`; a `dq_results`-only loss gives `degraded`. Source: [PR #16 round 2, finding 2](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782).
+  - Rebuild with zero partitions leaves `_CURRENT` unchanged; a pointer move between write and flip aborts the flip.
+- Out of scope: month-chunked backfill (needs a `sources/base.py` contract change; separate `contract:` PR if ever wanted).
+
+- Changelog: card created from the PR #16 reviews linked above and the T20/T21 card text.
+
+#### T07 — Data-check follow-ups
+- **Depends:** T20 merged · **Parallel with:** T06, T08, T17, T18 · **Blocks:** T09's anomaly-reuse bullet
+- **Owns:** `src/deskbrief/checks/*`, `tests/unit/checks/*`, `tests/fault_injection/*inj_checks*.py`
+- **Spec:** §8.1; P-009
+- Deliverables (source: [PR #20 review](https://github.com/allenvarghese05/desk-brief/pull/20#pullrequestreview-5914719908) unless noted):
+  - Make freshness and completeness agree for a dataset that is due but still within grace: both `skip` with reason "waiting" (finding 1).
+  - Intraday freshness: age of the latest tick against the open session (spec §8.1) (finding 2). It needs a per-dataset intraday schedule. A new `config.yaml` value goes through the planner (P-004). A new field on a `config.py` model is a contract change: land a `contract:` PR first.
+  - Completeness for Yahoo and Twelve Data datasets, and intraday tick-age freshness. Source: [PR #16 merge confirmation](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906878775).
+  - FRED daily oil (DCOILWTICO, DCOILBRENTEU): do not fail completeness on days SIFMA is open but the oil market is closed (finding 4).
+  - Anomaly: score only a move that belongs to the expected data day. A series that stopped updating must not keep reporting its old move (finding 5).
+  - Docstring for the eod minute-completeness rule: the 22:30 UTC eod run judges the previous session's bars, per P-009 (finding 6).
+  - Rename the fault-injection test file to match the Owns glob, or record why it cannot (finding 7).
+- Acceptance: one table-driven test per bullet above; no change to the `dq_results` schema.
+- Owner decision first: the Good Friday SIFMA early-close rule tested in `test_checks_schedule.py` is not in spec §8.1 (finding 3). It needs a ratified ruling before this card adds it to acceptance. See "Decisions waiting on the owner" below.
+
+- Changelog: card created from the PR #20 review and the PR #16 merge confirmation.
+
+#### T08B — Budget units in the shared HTTP client
+- **Depends:** T03 merged · **Blocks:** T08's Twelve Data budget bullet
+- **Owns:** `src/deskbrief/sources/http.py`, `tests/unit/sources/test_http.py`
+- Deliverables: add a `units` argument (default 1) to `BudgetTracker.try_consume` and a matching cost argument to `HttpClient.get`. Existing callers do not change.
+- Acceptance: a test that a cost-5 call consumes 5 units and is refused when fewer remain; all existing source tests pass unchanged.
+- Why its own card: every source uses this API, so it lands and is reviewed alone. Source: [PR #17 round 2, finding 2](https://github.com/allenvarghese05/desk-brief/pull/17#pullrequestreview-5914845514).
+
+- Changelog: card created from the PR #17 round-2 review.
+
+#### T08 — Source and logging follow-ups
+- **Depends:** T05, T11, T13–T16 merged; T08B for the Twelve Data budget bullet · **Parallel with:** T06, T07, T17, T18
+- **Owns:** `src/deskbrief/sources/{alpaca.py,twelvedata.py,cboe.py,stooq.py,yahoo.py,fred.py}`, `src/deskbrief/logging.py`, `pyproject.toml` + `uv.lock` (only the `yfinance` floor), `docs/sources/*`, their tests
+- The implementer may split this card by area (one PR per source, plus one for logging) if the diff exceeds ~400 lines, as T05 allowed.
+- Deliverables:
+  - Twelve Data batch budget: after T08B, count a batch quote as one unit per symbol. Source: [PR #17 round 2, finding 2](https://github.com/allenvarghese05/desk-brief/pull/17#pullrequestreview-5914845514).
+  - Twelve Data: test one symbol missing from an otherwise good batch; inline `_new_fetch_id`. Source: [PR #17 round 2, confirmation list findings 1–2](https://github.com/allenvarghese05/desk-brief/pull/17#pullrequestreview-5914845514).
+  - Alpaca: when pagination hits the page cap or a repeated token, keep the pages already fetched in raw. Say in the docs that free-plan IEX prices and volume cover one exchange only. Optionally guard SIP windows in `fetch` as well as `plan`. Consider per-symbol quarantine after the live probe. Source: [PR #19 review, findings 1–4](https://github.com/allenvarghese05/desk-brief/pull/19#pullrequestreview-5914847211).
+  - Cboe: validate only rows inside the requested window, so one bad historical row does not break every daily run; detect a truncated download that ends mid-number; mark the unverified URL `# UNVERIFIED` in code. Source: [PR #11 review, findings 2–4](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201).
+  - Convert `csv.Error` in Stooq and `OverflowError` in Cboe to `ParseError`. Source: [PR #11 review, finding 5](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201).
+  - Yahoo: raise the `yfinance` floor to the 1.x API the code uses; document (or fix) that futures, indices and yields drop today's bar even after the session ends; make the "empty on a US business day means error" rule depend on the symbol set, not only the date. Source: [PR #13 round 2, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/13#pullrequestreview-5914461338).
+  - FRED: add a test that every configured FRED series has an entry in `SERIES_SPECS`, so a new config series fails CI; assert the warning in the skip test; consider logging the skip at error level. Source: [PR #14 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/14#pullrequestreview-5914397821).
+  - Logging: the weak tier must mask all-uppercase short-segment credential values, and the placeholder exemption must not keep short numeric values for strong names (passwords, secrets, API keys). Use the probes listed in the source review as MUST_MASK cases. Source: [PR #15 review, findings 1–2](https://github.com/allenvarghese05/desk-brief/pull/15#pullrequestreview-5914412921).
+- Acceptance: a test per bullet; no change to `sources/base.py`.
+- Out of scope: live probes (owner task; see "Live-probe gates" below).
+
+- Changelog: card created from the PR #11, #13, #14, #15, #17 and #19 reviews linked above.
+
+#### T09 — Brief-model follow-ups
+- **Depends:** T30 merged; T07 for the anomaly-reuse bullet · **Parallel with:** T08, T17, T18 · **Blocks:** T06 (or merges in the same window)
+- **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/*`, `tests/brief_synth.py`
+- Deliverables:
+  - `health_summary`: do not count a cross-check twice. T21 mirrors each cross-check as a `consistency` row in `dq_results`. Exclude those rows from the DQ count, or count only the mirror. Source: [PR #18 merge confirmation](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6907020326).
+  - Where the model shows cross-check rows, label them with `details.ref_date`, not the run's `target_date`. Source: [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053).
+  - Per-row qualifiers (fallback, IEX single exchange, delayed by N minutes) on each `Row`, not only as global known limits. Source: [PR #21 round 1, finding 2](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914850524).
+  - After T07: reuse T20's anomaly logic for notable moves instead of a separate z-score. Source: [PR #21 round 1, finding 6](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914850524).
+  - Cross-source note when a tick value (for example `UST_10Y` from Yahoo `^TNX`) is compared with an official baseline. Wording for a zero baseline that says the baseline was found and is zero. Source: [PR #21 round 2, confirmation list findings 1–2](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914901602).
+  - The golden test must not break on unrelated `config.yaml` edits: compare with `config_hash` masked, or build from a fixture config. Source: [PR #21 round 2, confirmation list finding 3](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914901602).
+  - Add baseline rows to the lineage table. Source: [PR #21 round 1, finding 9](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914850524).
+  - Add a 2s10s spread row (spec §9.1 sample). It must be derived from two official yields of the same ET date (never a `^TNX` tick minus an official 2Y), shown in bp, and labelled as derived. Source: [PR #21 round 1, deferred items](https://github.com/allenvarghese05/desk-brief/pull/21#pullrequestreview-5914850524).
+- Acceptance: a test with mirrored consistency rows proves `health_summary` counts each cross-check once; the golden test passes after a config-only edit; a 2s10s test rejects a tick leg; a test per remaining bullet.
+
+- Changelog: card created from the PR #18 and #21 reviews linked above.
+
+#### T17 — Cross-check follow-ups
+- **Depends:** T21 merged · **Parallel with:** T06–T09, T18 (T22 owns different files)
+- **Owns:** `src/deskbrief/crosschecks/{base.py,official_pair.py,yahoo_primary.py,close_official.py}`, their tests
+- Deliverables (source: [PR #18 round 2](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), confirmation list):
+  - Equity leg: exclude a Yahoo tick stamped exactly at the session close (filter `as_of < close`, not `<=`), so it cannot pair with the 15:59 bar and cause a spurious warn. Alternatively, keep it and document the effect in the module docstring (finding 2).
+  - Ignore ticks before the session open, and give a pre-market-specific skip reason when no in-session tick exists (finding 3).
+  - Add a test with the summer (CEST) fix-window layout. Today it proves the FX leg skips with its specific reason. If the owner adds a summer run, it proves the leg passes (finding 1).
+- Acceptance: tests for a tick at exactly the close, an early-close day, a pre-market-only day and the summer layout.
+
+- Changelog: card created from the PR #18 round-2 review.
+
+#### T18 — Make the test suite runnable in a sandbox
+- **Depends:** none · **Parallel with:** all
+- **Owns:** `tests/conftest.py`, the `[tool.pytest.ini_options]` table in `pyproject.toml`, test helpers that load `config.yaml`
+- Deliverables: find why pytest collection touches `.env.example` and stop it; resolve `config.yaml` from the repo root instead of the working directory; keep tests that build an `httpx` client from loading the system CA store when they use respx.
+- Acceptance: `pytest -m "not integration"` passes from the repo root under a sandbox that denies `.env*` and the system keychain; CI unchanged.
+- Why: reviewers on PRs #16–#21 could not run the suite locally and relied on CI alone. Source: the [PR #16 author response](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315) ("I could not run pytest locally").
+
+- Changelog: card created from the PR #16 author response.
+
+#### Live-probe gates (owner, before T24A's first scheduled run)
+Every source card merged with its live probe PENDING and synthetic fixtures only. These are the per-source probes that phase gate G1 calls for, listed so none is missed. Before T24A ships, the owner runs each with real keys and records the result in `docs/sources/<source>.md`:
+- Treasury: capture a real file and add the golden parse test the T10 card asks for. Source: [PR #10 round 2, finding 5](https://github.com/allenvarghese05/desk-brief/pull/10#pullrequestreview-5914408475).
+- ECB: verify the URL, series key and no-results behaviour, and record the real 404 body and content type. Source: [PR #9 round 2, nit 2](https://github.com/allenvarghese05/desk-brief/pull/9#pullrequestreview-5914469527).
+- Stooq: decide `enabled` from the probe. If blocked, set `enabled: false` (T13 card rule). Source: [PR #11 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201).
+- Cboe: verify the URL. Source: [PR #11 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201).
+- FRED, Alpaca, Twelve Data, Yahoo: one probe each. Sources: [PR #14](https://github.com/allenvarghese05/desk-brief/pull/14#pullrequestreview-5914397821), [PR #19, nit 5](https://github.com/allenvarghese05/desk-brief/pull/19#pullrequestreview-5914847211), [PR #17, nit 6](https://github.com/allenvarghese05/desk-brief/pull/17#pullrequestreview-5914845514), [PR #13](https://github.com/allenvarghese05/desk-brief/pull/13#pullrequestreview-5914461338).
+
+- Changelog: list created from the reviews linked above; it adds no new gate beyond G1.
+
+#### Decisions waiting on the owner
+These need a ratified ruling in `docs/plan/decisions.md` (P-010). This PR proposes none.
+
+| Topic | Question | Source |
+|---|---|---|
+| Early-close rule | Should freshness use the SIFMA early close (e.g. Good Friday) and cap due times at it? It is tested in T20 but not in spec §8.1. | [PR #20, finding 3](https://github.com/allenvarghese05/desk-brief/pull/20#pullrequestreview-5914719908) |
+| Summer FX run | Spec §7 crons have no run inside the summer (CEST) ECB fix window, 12:05–12:25 UTC, so the FX leg of `yahoo_vs_primary` skips from late March to late October. Add a run in that window? | [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) |
+| Morning cron form | Spec §7 and T24A use one cron with two fire times (`15 10,11 * * 1-5`). With one expression per fire time, `github.event.schedule` would name the exact fire, but that changes the spec §7 cron text. Split it? A run late past the next fire can be skipped by the gate either way, and `sla.yml` (T24B) is the safety net. | [PR #16 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/16#pullrequestreview-5914845782), [author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315) |
+| Agent-log location | Workflow §8.2 says `docs/agent-log.md`, but every card since T10 wrote `docs/agent-log/T{id}.md`. Which is right? Until ruled, follow-up cards update agent logs wherever the card's PR already keeps them. | [PR #11, finding 7](https://github.com/allenvarghese05/desk-brief/pull/11#pullrequestreview-5914386201), [PR #14, finding 3](https://github.com/allenvarghese05/desk-brief/pull/14#pullrequestreview-5914397821) |
+
 ### Phase 2 — Scheduling, quality, cross-checks
 
 #### T24A — `morning.yml` v0 (ship first)
@@ -213,13 +356,20 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 
 - Changelog: PR #6 round 2: P-009 line.
 #### T23 — Scorecard, serving snapshot, compaction
-- **Depends:** T20, T21 · **Owns:** `src/deskbrief/{scorecard.py}`, `pipeline/serving.py`, `store/compaction.py`, tests
+- **Depends:** T20, T21, T06 · **Owns:** `src/deskbrief/{scorecard.py}`, `pipeline/serving.py`, `store/compaction.py`, tests
 - Deliverables: `scorecard_daily` from source_log + crosscheck disagreements; serving files (§6) written at end of every job; compaction with row-count verification before delete.
 - Acceptance: scorecard numbers correct on synthetic log; compaction preserves all distinct versions; serving snapshot contains tier/as-of/source for every headline instrument.
+- Cross-check rows carry the run's `target_date`; label them with `details.ref_date`, the date actually compared.
+
+- Changelog: depends on T06 (real runs write the check tables it reads); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 
 #### T24B — Remaining workflows
 - **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`
 - Acceptance: each dispatches green; intraday exits early outside session; sla fails if report missing; backfill accepts inputs.
+- `sla.yml` must also catch a morning run that the gate skipped because its cron fired late, past the next fire time.
+- If the owner rules to add a summer ECB-fix run (see "Decisions waiting on the owner"), it lives in `intraday.yml` and the FX leg of `yahoo_vs_primary` passes on a CEST date in a dispatch test.
+
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053).
 
 ### Phase 3 — Outputs
 
@@ -233,8 +383,9 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - P-009: labels rendered from the model's field/unit labels, never a hard-coded "close".
 - **Depends:** T30 · **Owns:** `report/html.py`, `report/notify.py`, `report/templates/*`, tests; edits `pipeline/jobs.py` morning step (allowed)
 - Acceptance: email-safe HTML (inline CSS, table layout, no JS); tier glyphs + proxy labels present; footer honesty line; `Notifier` protocol with `SmtpNotifier` and `NullNotifier` (dry-run); email failure → run `degraded` + alert, report still archived.
+- Cross-check rows carry the run's `target_date`; label them with `details.ref_date`, the date actually compared.
 
-- Changelog: PR #6: P-009 line.
+- Changelog: PR #6: P-009 line; `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 #### T32 — Excel `.xlsx`
 - P-009: a `field`/`label` column in every data table; the About sheet explains close vs yield vs reference rate.
 - **Depends:** T30 · **Owns:** `report/excel.py`, `tests/contract/test_excel_tables.py`
@@ -258,8 +409,9 @@ Card format: **Depends** · **Parallel with** · **Owns** · **Spec** · Deliver
 - P-009: tooltips and drill-downs say "close", "yield" or "reference rate" per `field`.
 - **Depends:** T34, T23 · **Owns:** `app/pages/*`, tests
 - Acceptance: pages 1–6 per §10.3; AppTest smoke per page; follows `dataviz` + `minimalist-ui` skill guidance; screenshots attached to PR.
+- Cross-check rows carry the run's `target_date`; label them with `details.ref_date`, the date actually compared.
 
-- Changelog: PR #6: P-009 line.
+- Changelog: PR #6: P-009 line; `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 ### Phase 4 — Next
 
 #### T40 — Alerts
