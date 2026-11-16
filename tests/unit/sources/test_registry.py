@@ -118,3 +118,13 @@ def test_duplicate_registration_rejected() -> None:
     with pytest.raises(ValueError, match="already registered"):
         registry.register("fred", factory_for("fred"))
     assert registry.registered() == ["fred"]
+
+
+def test_name_mismatch_is_warned_but_kept(config: Config) -> None:
+    stream = io.StringIO()
+    configure_logging(stream=stream)
+    registry.register("fred", factory_for("not_fred"))
+    assert [s.name for s in registry.get_sources(config)] == ["not_fred"]
+    events = [e for e in log_events(stream) if e["event"] == "registry.name_mismatch"]
+    assert events[0]["config_key"] == "fred"
+    assert events[0]["source_name"] == "not_fred"

@@ -15,7 +15,8 @@ Disabled sources (``enabled: false``): no ``FetchStatus`` describes "disabled", 
 (``sources/registry.py``) never builds them and no request is ever planned. As a backstop the
 client refuses to send for a disabled source and returns an ``ERROR`` response saying so.
 
-Redirects are not followed: a redirect target could receive secret query params.
+Redirects are never followed (``follow_redirects=False`` on every request, injected clients
+included): a redirect target could receive secret query params.
 
 Budget persistence (wired by the runner, card T19)
 --------------------------------------------------
@@ -43,18 +44,18 @@ from __future__ import annotations
 import random
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Protocol
-from urllib.parse import urlencode
+from urllib.parse import quote, quote_plus, urlencode
 
 import httpx
 
 from deskbrief.config import SourceSettings
 from deskbrief.ids import new_id
-from deskbrief.logging import get_logger, redact
+from deskbrief.logging import MASK, get_logger, redact
 from deskbrief.models import FetchRequest, FetchStatus, RawResponse
 from deskbrief.timeutil import ensure_utc, utc_now
 
@@ -197,6 +198,39 @@ def parse_retry_after(value: str | None, now: datetime) -> float | None:
     return seconds if 0 <= seconds < float("inf") else None
 
 
+MIN_SECRET_LEN = 3  # shorter values would mangle ordinary text; real keys are far longer
+
+
+def secret_forms(value: str) -> list[str]:
+    """Every textual shape a secret value can take inside an error message.
+
+    Raw, stripped (pasted secrets often carry a newline), ``repr()``-escaped (h11 prints
+    ``b'abc\\n'``; the inner text has literal backslash-n), as bytes repr, URL-quoted and
+    quote_plus. Longest first so a long form is masked before its prefix.
+    """
+    forms: set[str] = set()
+    for v in {value, value.strip()}:
+        if len(v) < MIN_SECRET_LEN:
+            continue
+        forms |= {
+            v,
+            repr(v)[1:-1],
+            repr(v.encode())[2:-1],
+            quote(v, safe=""),
+            quote(v),
+            quote_plus(v),
+        }
+    return sorted((f for f in forms if f), key=len, reverse=True)
+
+
+def mask_secrets(text: str, secrets: Iterable[str]) -> str:
+    """Replace every form of every secret value in ``text`` with ``***``, then apply redact()."""
+    for secret in secrets:
+        for form in secret_forms(secret):
+            text = text.replace(form, MASK)
+    return redact(text)
+
+
 @dataclass(frozen=True)
 class _Outcome:
     """What the last attempt produced (becomes the RawResponse fields)."""
@@ -249,8 +283,9 @@ class DefaultHttpClient:
     # -- helpers --------------------------------------------------------------------------
 
     def _backoff(self, retry_number: int) -> float:
-        exp = min(self._max_backoff, self._base * 2.0 ** (retry_number - 1))
-        return exp * (1.0 + 0.25 * self._rng())
+        """Exponential backoff with up to 25% jitter; the cap applies after jitter."""
+        raw = self._base * 2.0 ** (retry_number - 1) * (1.0 + 0.25 * self._rng())
+        return min(self._max_backoff, raw)
 
     @staticmethod
     def _url_redacted(url: str, params: Mapping[str, str] | None) -> str:
@@ -271,10 +306,17 @@ class DefaultHttpClient:
         secret_headers: Mapping[str, str] | None = None,
     ) -> RawResponse:
         log = get_logger(source=req.source, dataset=req.dataset)
-        url_redacted = self._url_redacted(url, params)
+        secrets = [*(secret_params or {}).values(), *(secret_headers or {}).values()]
+        url_redacted = mask_secrets(self._url_redacted(url, params), secrets)
         requested_at = self._now()
 
+        def error_text(exc: Exception) -> str:
+            """Error message with every secret value masked (before outcome, logs, response)."""
+            return mask_secrets(f"{type(exc).__name__}: {exc}", secrets)
+
         def finish(attempts: int, out: _Outcome, status: FetchStatus | None = None) -> RawResponse:
+            """``attempts`` counts HTTP attempts, except that it is at least 1 (model invariant):
+            a budget-exhausted or disabled/unknown-source response with no HTTP call reports 1."""
             raw = RawResponse(
                 request=req,
                 fetch_id=new_id(),
@@ -313,24 +355,31 @@ class DefaultHttpClient:
         bucket = self._buckets[req.source]
         max_attempts = settings.retries + 1
 
+        def reserve() -> bool:
+            """Take one unit of the daily budget (UTC day of now). True if no budget applies."""
+            if self._budget is None:
+                return True
+            return self._budget.try_consume(req.source, ensure_utc(self._now()).date())
+
+        def exhausted(made: int, last: _Outcome) -> RawResponse:
+            log.warning("http.budget_exhausted", url=url_redacted, attempts_made=made)
+            detail = "no request made" if made == 0 else "gave up retrying"
+            return finish(
+                max(1, made),  # attempts >= 1 by contract; 0 HTTP calls is told by `error`
+                _Outcome(
+                    last.http_status,
+                    last.content_type,
+                    last.body,
+                    f"daily request budget exhausted; {detail}",
+                ),
+                FetchStatus.BUDGET_EXHAUSTED,
+            )
+
         attempt = 0
         out = _Outcome()
-        while attempt < max_attempts:
-            day = ensure_utc(self._now()).date()
-            if self._budget is not None and not self._budget.try_consume(req.source, day):
-                log.warning("http.budget_exhausted", url=url_redacted, attempts_made=attempt)
-                when = "before the first request" if attempt == 0 else "during retries"
-                return finish(
-                    max(1, attempt),
-                    _Outcome(
-                        out.http_status,
-                        out.content_type,
-                        out.body,
-                        f"daily request budget exhausted {when}; "
-                        + ("no request made" if attempt == 0 else "gave up retrying"),
-                    ),
-                    FetchStatus.BUDGET_EXHAUSTED,
-                )
+        if not reserve():
+            return exhausted(0, out)
+        while True:
             attempt += 1
             bucket.acquire()
             started = self._now()
@@ -341,15 +390,17 @@ class DefaultHttpClient:
                     params=send_params or None,
                     headers=send_headers,
                     timeout=settings.timeout_s,
+                    follow_redirects=False,  # also for an injected client: secrets must not follow
                 )
-            except httpx.UnsupportedProtocol as exc:  # bad scheme/relative URL: retry is futile
-                out = _Outcome(error=f"{type(exc).__name__}: {exc}")
+            except (httpx.UnsupportedProtocol, httpx.LocalProtocolError) as exc:
+                # deterministic (bad scheme, illegal header value): retrying cannot help
+                out = _Outcome(error=error_text(exc))
                 log.warning("http.attempt", attempt=attempt, url=url_redacted, error=out.error)
                 return finish(attempt, out)
             except httpx.TransportError as exc:  # timeouts, connect/read errors: retryable
-                out = _Outcome(error=f"{type(exc).__name__}: {exc}")
+                out = _Outcome(error=error_text(exc))
             except (httpx.HTTPError, httpx.InvalidURL) as exc:  # malformed request: final
-                out = _Outcome(error=f"{type(exc).__name__}: {exc}")
+                out = _Outcome(error=error_text(exc))
                 log.warning("http.attempt", attempt=attempt, url=url_redacted, error=out.error)
                 return finish(attempt, out)
             else:
@@ -383,9 +434,8 @@ class DefaultHttpClient:
                 error=out.error,
                 retry_in_s=round(delay, 3) if will_retry else None,
             )
-            if will_retry:
-                self._sleep(delay)
-            else:
-                break
-
-        return finish(attempt, out)
+            if not will_retry:
+                return finish(attempt, out)
+            if not reserve():  # check the budget before sleeping, not after
+                return exhausted(attempt, out)
+            self._sleep(delay)

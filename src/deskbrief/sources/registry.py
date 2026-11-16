@@ -9,7 +9,8 @@ that are both configured and enabled::
 Real sources are registered by their own cards (``register`` is called at import time of the
 source module or from the runner's wiring). Unknown (no factory) and disabled sources are
 skipped with a log line; a factory that raises is logged and skipped so one broken source
-cannot take the run down.
+cannot take the run down. A source whose ``name`` differs from its config key is kept but
+warned about. ``_FACTORIES`` is module-level state; tests reset it with ``clear()``.
 """
 
 from __future__ import annotations
@@ -50,7 +51,12 @@ def get_sources(config: Config) -> list[Source]:
             log.warning("registry.skip", source=name, reason="no factory registered")
             continue
         try:
-            sources.append(factory(config))
+            source = factory(config)
         except Exception as exc:  # isolate a broken source from the others
             log.error("registry.skip", source=name, reason="factory failed", error=str(exc))
+            continue
+        if source.name != name:
+            # budget and rate-limit lookups are keyed by FetchRequest.source == config key
+            log.warning("registry.name_mismatch", config_key=name, source_name=source.name)
+        sources.append(source)
     return sources
