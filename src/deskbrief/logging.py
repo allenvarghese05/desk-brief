@@ -42,22 +42,40 @@ SECRET_ENV_VARS: tuple[str, ...] = (
     "HEALTHCHECK_URL_EOD",
 )
 
+# Structured-field keys whose (string) values are always masked.
 _SECRET_KEY_RE = re.compile(
-    r"(api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie|key[_-]?id"
-    r"|access[_-]?key)",
+    r"(api[_-]?key|apikey|secret|password|passwd|authorization|cookie|access[_-]?key"
+    r"|key[_-]?id|signature|credential)",
     re.IGNORECASE,
 )
-_NAMES = (
-    r"api[_-]?key|apikey|token|secret|password|passwd|key[_-]?id|access[_-]?key|key|auth"
-    r"|signature|sig|x-amz-signature|x-amz-credential|x-amz-security-token"
-    r"|APCA-API-KEY-ID|APCA-API-SECRET-KEY"
+_TOKEN_KEY_RE = re.compile(r"(^|[_-])token$", re.IGNORECASE)  # token, access_token; not token_state
+
+# Free text. Two tiers so we neither leak nor mangle ordinary diagnostics:
+#  * strong names: masked after "=" or ":" whatever the value looks like
+#  * weak names (key, auth, sig, token): masked only after "=" and only if the value looks
+#    like a credential (>= 8 chars with a digit, or >= 16 chars), so "cache key=SPY:1m",
+#    "token: expired" and "missing key: EURUSD" stay readable.
+# The look-behind forbids only letters/digits, so prefixed names (client_secret,
+# x-api-key, refresh-token) still match while "monkey=3" does not.
+_STRONG = (
+    r"api[_-]?key|apikey|[a-z]*secret|password|passwd|access[_-]?key|key[_-]?id"
+    r"|access[_-]?token|refresh[_-]?token|id[_-]?token|signature|credential|security[_-]?token"
+    r"|x-amz-signature|x-amz-credential|x-amz-security-token|APCA-API-KEY-ID|APCA-API-SECRET-KEY"
 )
-_INLINE_RE = re.compile(
-    rf"(?<![A-Za-z0-9_\-])(?P<name>{_NAMES})(?P<q1>[\"']?)(?P<sep>\s*[=:]\s*)(?P<q2>[\"']?)(?P<val>[^&\s,;\"'}}]+)",
+_STRONG_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<name>{_STRONG})(?P<q1>[\"'])?(?P<sep>\s*[=:]\s*)(?P<q2>[\"'])?"
+    rf"(?P<val>(?(q2)[^\"']+|[^&\s,;\"'}}]+))",
+    re.IGNORECASE,
+)
+_WEAK_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<name>key|auth|sig|token)(?P<sep>\s*=\s*)"
+    r"(?P<val>(?=[^&\s,;\"'}]*[0-9])[^&\s,;\"'}]{8,}|[^&\s,;\"'}]{16,})",
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(
-    r"\b(bearer)\s+[A-Za-z0-9._~+/=\-]{6,}|\b(basic)\s+[A-Za-z0-9+/]{12,}={0,2}", re.IGNORECASE
+    r"\b(bearer)\s+[A-Za-z0-9._~+/=\-]{6,}"
+    r"|\b(basic)\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{12,}={0,2}",
+    re.IGNORECASE,
 )
 _HEADER_LINE_RE = re.compile(r"\b(authorization|cookie|set-cookie)(\s*:\s*)[^\r\n]+", re.I)
 _USERINFO_RE = re.compile(r"([a-z][a-z0-9+.\-]*://)[^/\s@]+@", re.IGNORECASE)
@@ -83,9 +101,13 @@ def redact_text(text: str, env_secrets: Iterable[str] = ()) -> str:
         t = _USERINFO_RE.sub(lambda m: f"{m.group(1)}{MASK}@", t)
         t = _HEADER_LINE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", t)
         t = _BEARER_RE.sub(lambda m: f"{m.group(1) or m.group(2)} {MASK}", t)
-        t = _INLINE_RE.sub(
-            lambda m: f"{m.group('name')}{m.group('q1')}{m.group('sep')}{m.group('q2')}{MASK}", t
+        t = _STRONG_RE.sub(
+            lambda m: (
+                f"{m.group('name')}{m.group('q1') or ''}{m.group('sep')}{m.group('q2') or ''}{MASK}"
+            ),
+            t,
         )
+        t = _WEAK_RE.sub(lambda m: f"{m.group('name')}{m.group('sep')}{MASK}", t)
         for secret in secrets:
             for form in (secret, quote(secret, safe=""), quote_plus(secret)):
                 t = t.replace(form, MASK)
@@ -109,7 +131,11 @@ def redact_value(value: Any, env_secrets: Iterable[str] = (), key: str | None = 
     secrets = list(env_secrets)
     if value is None or isinstance(value, bool | int | float):
         return value  # numbers are never secrets (e.g. requests_per_token=1)
-    if key is not None and _SECRET_KEY_RE.search(key) and value != "":
+    if (
+        key is not None
+        and value != ""
+        and (_SECRET_KEY_RE.search(key) or _TOKEN_KEY_RE.search(key))
+    ):
         return MASK
     if isinstance(value, str):
         return redact_text(value, secrets)

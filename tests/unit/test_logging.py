@@ -60,7 +60,7 @@ def test_short_env_values_not_used_as_masks(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_redact_helpers() -> None:
     assert redact_text("api_key: XYZ987", []) == f"api_key: {MASK}"
-    assert redact_text("token=abc&x=1") == f"token={MASK}&x=1"
+    assert redact_text("token=abc12345XYZ&x=1") == f"token={MASK}&x=1"
     assert redact_value(["key_id=zzz", 5]) == [f"key_id={MASK}", 5]
     assert redact_value(("a",)) == ["a"]
     assert redact_value({"password": ""}, key=None) == {"password": ""}
@@ -167,3 +167,48 @@ def test_numbers_under_secretish_keys_kept() -> None:
 )
 def test_round2_bypasses_closed(text: str, leak: str) -> None:
     assert leak not in redact_text(text)
+
+
+# --- review round 3: one table of everything that must be masked / must stay readable -----
+MUST_MASK = [
+    ("client_secret=abc123", "abc123"),
+    ("access_token=abc123456", "abc123456"),
+    ("https://x/cb?access_token=abc123456&state=1", "abc123456"),
+    ("refresh-token=rt0987654", "rt0987654"),
+    ("my-apikey=MYKEY12345", "MYKEY12345"),
+    ("X-Api-Key: abcdef123", "abcdef123"),
+    ("x-api-key=abcdef123", "abcdef123"),
+    ("APCA-API-SECRET-KEY: s3cr3tvalue", "s3cr3tvalue"),
+    ('password: "pw with space"', "with space"),
+    ("password='hunter two'", "hunter two"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"),
+    ("https://x/q?key=BAREKEY123", "BAREKEY123"),
+    ("https://x/q?sig=abcdefghijklmnopqrst", "abcdefghijklmnopqrst"),
+]
+MUST_KEEP = [
+    "missing key: EURUSD",
+    "cache key=SPY:1m",
+    "dedup natural key: (SPY, yahoo, 1d)",
+    "auth: failed with 401",
+    "token: expired",
+    "primary key: id",
+    "Basic authentication is not required",
+    "token bucket empty, waiting 2.5s",
+    "monkey=3",
+    "keyboard=qwerty",
+]
+
+
+@pytest.mark.parametrize(("text", "leak"), MUST_MASK)
+def test_must_mask(text: str, leak: str) -> None:
+    assert leak not in redact_text(text)
+
+
+@pytest.mark.parametrize("text", MUST_KEEP)
+def test_must_keep(text: str) -> None:
+    assert redact_text(text) == text
+
+
+def test_key_based_masking_is_precise() -> None:
+    out = redact_value({"token_state": "fresh", "access_token": "abc", "token": "t0k3n"})
+    assert out == {"token_state": "fresh", "access_token": MASK, "token": MASK}
