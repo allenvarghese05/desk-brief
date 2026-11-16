@@ -1,0 +1,6 @@
+{
+  "_synthetic": "SYNTHETIC FIXTURE: invented values",
+  "EUR/USD": {"symbol": "EUR/USD", "name": "EUR/USD", "exchange": "", "datetime": "2026-11-13", "timestamp": 1794575700, "open": "1.08300", "high": "1.08600", "low": "1.08200", "close": "1.08420", "previous_close": "1.08210", "bid": "1.08418", "ask": "1.08422", "is_market_open": true},
+  "GBP/USD": {"symbol": "GBP/USD", "name": "GBP/USD", "exchange": "", "datetime": "2026-11-13", "timestamp": 1794575701, "open": "1.26500", "high": "1.26900", "low": "1.26400", "close": "1.26710", "previous_close": "1.26480", "is_market_open": true},
+  "USD/JPY": {"symbol": "USD/JPY", "name": "USD/JPY", "exchange": "", "datetime": "2026-11-13", "timestamp": 1794575702, "open": "154.100", "high": "154.800", "low": "153.900", "close": "154.520", "previous_close": "154.050", "is_market_open": true}
+}
