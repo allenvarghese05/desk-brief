@@ -19,7 +19,6 @@ import ssl
 from collections.abc import Iterator
 from pathlib import Path
 
-import httpx
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
