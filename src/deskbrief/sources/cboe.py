@@ -30,7 +30,7 @@ from deskbrief.timeutil import et_to_utc
 NAME = "cboe"
 DATASET = "vix_history"
 SYMBOL = "VIX"
-URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"  # UNVERIFIED
 LOOKBACK_DAYS = 10
 HEADER = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE"]
 _PREAMBLE_LINES = 5
@@ -101,36 +101,49 @@ class CboeSource:
                 lo = req.target_date - timedelta(days=int(lookback))
             except ValueError:
                 raise ParseError(f"cboe: bad lookback_days {lookback!r}") from None
+            except OverflowError:
+                raise ParseError(f"cboe: lookback_days out of range {lookback!r}") from None
             hi = req.target_date
         rows: list[dict[str, object]] = []
-        for rec in csv.reader(io.StringIO("\n".join(lines[start + 1 :]))):
-            if len(rec) != len(HEADER):
-                raise ParseError(f"cboe: row has {len(rec)} columns: {rec!r}")
-            day = _parse_date(rec[0])
-            try:
-                close = float(rec[4])
-            except ValueError:
-                raise ParseError(f"cboe: bad CLOSE {rec[4]!r}") from None
-            if not math.isfinite(close):
-                raise ParseError(f"cboe: non-finite CLOSE {rec[4]!r}")
-            if lo is not None and hi is not None and not lo <= day <= hi:
-                continue
-            rows.append(
-                {
-                    "instrument_id": inst.id,
-                    "source": NAME,
-                    "dataset": DATASET,
-                    "symbol": SYMBOL,
-                    "tier": feed.tier,
-                    "field": "close",
-                    "interval": "1d",
-                    "as_of": et_to_utc(day, "00:00"),
-                    "value": close * feed.scale,
-                    "unit": inst.unit,
-                    "is_derived": False,
-                    "is_fallback": False,
-                }
-            )
+        last_kept: list[str] | None = None
+        try:
+            for rec in csv.reader(io.StringIO("\n".join(lines[start + 1 :]))):
+                day = _parse_date(rec[0]) if rec else None
+                if day is not None and lo is not None and hi is not None and not lo <= day <= hi:
+                    last_kept = None
+                    continue  # outside the window: not validated, so old bad rows cannot hurt
+                if len(rec) != len(HEADER):
+                    raise ParseError(f"cboe: row has {len(rec)} columns: {rec!r}")
+                assert day is not None
+                try:
+                    close = float(rec[4])
+                except ValueError:
+                    raise ParseError(f"cboe: bad CLOSE {rec[4]!r}") from None
+                if not math.isfinite(close):
+                    raise ParseError(f"cboe: non-finite CLOSE {rec[4]!r}")
+                last_kept = rec
+                rows.append(
+                    {
+                        "instrument_id": inst.id,
+                        "source": NAME,
+                        "dataset": DATASET,
+                        "symbol": SYMBOL,
+                        "tier": feed.tier,
+                        "field": "close",
+                        "interval": "1d",
+                        "as_of": et_to_utc(day, "00:00"),
+                        "value": close * feed.scale,
+                        "unit": inst.unit,
+                        "is_derived": False,
+                        "is_fallback": False,
+                    }
+                )
+        except csv.Error as exc:
+            raise ParseError(f"cboe: unreadable CSV ({exc})") from None
+        if last_kept is not None and not text.endswith(("\n", "\r")):
+            # The file is a static CSV that ends with a newline; a missing one means the download
+            # was cut, possibly mid-number ("16." would parse as 16.0).
+            raise ParseError(f"cboe: download looks truncated (last row {last_kept!r})")
         if not rows:
             return empty_frame("parsed_observations")
         return to_frame("parsed_observations", rows)

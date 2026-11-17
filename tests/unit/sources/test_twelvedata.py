@@ -270,6 +270,24 @@ def test_parse_quote_partial_batch_keeps_good_symbols(
     assert "twelvedata.parse.symbol_error" in logged and "GBP/USD" in logged
 
 
+@pytest.mark.parametrize("dataset", ["fx_quote", "fx_series_1m"])
+def test_parse_one_requested_symbol_missing_from_good_batch(
+    src: TwelveDataSource, dataset: str
+) -> None:
+    """T08: a requested symbol absent from an otherwise good batch is dropped and logged."""
+    stream = io.StringIO()
+    configure_logging(stream=stream)
+    full = quote_raw() if dataset == "fx_quote" else series_raw()
+    doc = json.loads(full.body)
+    del doc["GBP/USD"]
+    df = src.parse(raw_for(dataset, json.dumps(doc).encode()))
+    validate("parsed_observations", df)
+    assert set(df["symbol"]) == {"EUR/USD", "USD/JPY"}
+    logged = stream.getvalue()
+    assert "twelvedata.parse.symbol_error" in logged
+    assert "GBP/USD" in logged and "missing in response" in logged
+
+
 @pytest.mark.parametrize(
     "bad",
     [
