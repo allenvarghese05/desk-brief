@@ -6,8 +6,12 @@ INJECTED FAULT: the SMTP fakes below raise errors whose text contains the passwo
 
 from __future__ import annotations
 
+import base64
 import smtplib
+import threading
+from datetime import date
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,7 +24,10 @@ from deskbrief.report.notify import (
     NullNotifier,
     SmtpNotifier,
     SmtpSettings,
+    archive_report,
 )
+from deskbrief.store.backend import KeyExistsError
+from deskbrief.store.local import LocalBackend
 
 PASSWORD = "hunter2-synthetic-app-password"
 ENV = {
@@ -50,6 +57,14 @@ class FakeSmtp:
         self.logins.append((user, password))
 
     def send_message(self, msg: EmailMessage) -> dict[str, Any]:
+        if self.fail_at == "value":
+            raise ValueError(f"header rejected for {self.logins[-1][1]}")
+        if self.fail_at == "b64":
+            plain = base64.b64encode(f"\0sender@mail.test\0{PASSWORD}".encode()).decode()
+            raise smtplib.SMTPException(f"C: AUTH PLAIN {plain}")
+        if self.fail_at == "b64_alone":
+            alone = base64.b64encode(PASSWORD.encode()).decode()
+            raise smtplib.SMTPException(f"C: {alone}")
         if self.fail_at == "send":
             raise smtplib.SMTPServerDisconnected(f"connection lost after login of {PASSWORD}")
         self.sent.append(msg)
@@ -135,3 +150,98 @@ def test_null_notifier_sends_nothing_and_remembers_the_message() -> None:
 def test_both_notifiers_satisfy_the_protocol() -> None:
     assert isinstance(NullNotifier(), Notifier)
     assert isinstance(notifier(FakeSmtp()), Notifier)
+
+
+def test_non_smtp_exceptions_are_redacted_into_a_notify_error() -> None:
+    """A ``ValueError`` (say, a rejected header) used to escape ``send`` with the password in it."""
+    with pytest.raises(NotifyError) as err:
+        notifier(FakeSmtp("value")).send("s", "<p>x</p>", "x")
+    assert PASSWORD not in str(err.value)
+    assert "ValueError" in str(err.value)
+    assert err.value.__cause__ is None
+    assert err.value.__suppress_context__
+
+
+@pytest.mark.parametrize("fail_at", ["b64", "b64_alone"])
+def test_base64_forms_of_the_credentials_are_masked(fail_at: str) -> None:
+    forms = [
+        base64.b64encode(f"\0sender@mail.test\0{PASSWORD}".encode()).decode(),
+        base64.b64encode(PASSWORD.encode()).decode(),
+    ]
+    with pytest.raises(NotifyError) as err:
+        notifier(FakeSmtp(fail_at)).send("s", "<p>x</p>", "x")
+    for leaked in (PASSWORD, *forms, *(f.rstrip("=") for f in forms)):
+        assert leaked not in str(err.value)
+    assert "SMTPException" in str(err.value)
+
+
+# ---------------------------------------------------------------------------------------------
+# archive_report
+# ---------------------------------------------------------------------------------------------
+
+DAY = date(2026, 11, 16)
+
+
+class RacingStore(LocalBackend):
+    """Both archivers list before either writes (a barrier in ``list``): the real race."""
+
+    def __init__(self, root: Path, parties: int) -> None:
+        super().__init__(root)
+        self._gate = threading.Barrier(parties, timeout=10)
+        self._first_listing = {}
+        self.overwrite_flags: list[bool] = []
+
+    def list(self, prefix: str) -> list[str]:
+        keys = super().list(prefix)
+        me = threading.get_ident()
+        if me not in self._first_listing:  # only each thread's first listing waits
+            self._first_listing[me] = True
+            self._gate.wait()
+        return keys
+
+    def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+        self.overwrite_flags.append(overwrite)
+        super().put_bytes(key, data, overwrite=overwrite)
+
+
+def test_concurrent_archives_both_land_on_distinct_versions(tmp_path: Path) -> None:
+    store = RacingStore(tmp_path, parties=2)
+    keys: list[str] = []
+    errors: list[BaseException] = []
+
+    def run(tag: bytes) -> None:
+        try:
+            keys.append(archive_report(store, DAY, {"brief.html": tag, "model.json": tag + b"{}"}))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(t,)) for t in (b"one", b"two")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert not errors
+    assert sorted(keys) == [
+        "reports/date=2026-11-16/v1/brief.html",
+        "reports/date=2026-11-16/v2/brief.html",
+    ]
+    assert {store.get_bytes(k) for k in keys} == {b"one", b"two"}
+    for k in keys:  # each version holds one archiver's whole set, never a mix
+        tag = store.get_bytes(k)
+        assert store.get_bytes(k.replace("brief.html", "model.json")) == tag + b"{}"
+    assert store.overwrite_flags
+    assert not any(store.overwrite_flags)
+
+
+def test_archive_gives_up_after_bounded_attempts(tmp_path: Path) -> None:
+    class AlwaysTaken(LocalBackend):
+        puts = 0
+
+        def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+            self.puts += 1
+            raise KeyExistsError(key)
+
+    store = AlwaysTaken(tmp_path)
+    with pytest.raises(KeyExistsError):
+        archive_report(store, DAY, {"brief.html": b"x"})
+    assert store.puts == 5
