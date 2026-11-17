@@ -20,7 +20,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any
 
@@ -43,6 +43,7 @@ from deskbrief.store.backend import (
     CLEAN_CURRENT_KEY,
     CLEAN_PREFIX,
     RAW_PREFIX,
+    KeyExistsError,
     StorageBackend,
     StorageError,
 )
@@ -89,15 +90,16 @@ def runner_dq(
     source: str,
     at: datetime,
     details: dict[str, Any],
+    status: DQStatus = DQStatus.FAIL,
 ) -> DQResult:
-    """A runner-originated DQ ``fail`` (fetch, parse or plan failure)."""
+    """A runner-originated DQ row: a ``fail`` (fetch/parse/plan failure) or an empty ``warn``."""
     return DQResult(
         run_id=ctx.run_id,
         check_name=name,
         check_type=check_type,
         target_date=ctx.target_date,
         evaluated_at=at,
-        status=DQStatus.FAIL,
+        status=status,
         source=source,
         details=details,
     )
@@ -324,6 +326,8 @@ class RebuildResult:
     quarantined: int = 0
     no_target_date: int = 0  # raw whose request context could not be recovered
     flip_done: bool = False
+    partitions: int = 0  # clean partition files written or carried over into the new version
+    abort_reason: str | None = None  # why the flip was refused (nothing written, pointer moved...)
     errors: list[str] = field(default_factory=list)
 
 
@@ -403,6 +407,10 @@ def _raw_from_sidecar(
     )
 
 
+def _flip_claim_key(previous: str) -> str:
+    return f"{CLEAN_PREFIX}/_flips/from-{previous}"
+
+
 def rebuild(
     store: StorageBackend,
     ctx: RunContext,
@@ -416,16 +424,35 @@ def rebuild(
     With ``from_date``, only raw ingested (ET date) on or after it is re-parsed; clean
     partitions dated before it are copied unchanged from the previous version, so nothing
     older is lost (duplicates from re-parsed raw are removed by the ``obs_latest`` view).
+
+    Raw is processed one UTC month at a time and each month is flushed before the next is read,
+    so memory is bounded by a month of raw, not by all of ``raw/``. A month's files are named
+    ``run={run_id}-{YYYY-MM}`` because the same (table, date) can occur in two months (P-008
+    allows one file per run id; the suffix keeps each file write-once).
+
+    Flip guard: nothing is flipped when a flush failed, when no partition was written, or when
+    ``_CURRENT`` is not where the rebuild found it. The version is claimed with an exclusive
+    marker (``clean/{new}/_CLAIM``) and the flip itself with another (``clean/_flips/from-{prev}``),
+    so two concurrent rebuilds cannot both flip away from the same version. An operator who rolls
+    ``_CURRENT`` back by hand must delete that flip marker before rebuilding from it again.
     """
     log = get_logger(run_id=ctx.run_id, job=JobKind.REBUILD.value)
     previous = current_clean_version(store)
     new = next_clean_version(store)
     result = RebuildResult(new_version=new, previous_version=previous)
+    try:
+        store.put_bytes(f"{CLEAN_PREFIX}/{new}/_CLAIM", ctx.run_id.encode(), overwrite=False)
+    except KeyExistsError:
+        result.abort_reason = f"clean/{new} is claimed by another rebuild"
+        return result
+    except Exception as exc:  # cannot even write the marker: the new version is not writable
+        result.abort_reason = f"could not claim clean/{new}: {type(exc).__name__}: {exc}"
+        return result
     datasets = _VersionedDatasets(store, new, previous)
     by_name = {s.name: s for s in sources}
-    buf = RunBuffer()
     by_fetch, by_run = recover_request_info(store)
 
+    months: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for key in store.list(f"{RAW_PREFIX}/"):
         if not key.endswith(".meta.json"):
             continue
@@ -437,35 +464,66 @@ def rebuild(
         if source is None or meta.get("fetch_status") != "ok":
             result.skipped += 1
             continue
-        raw_key = key.removesuffix(".meta.json")
-        info = by_fetch.get(meta["fetch_id"])
-        if info is None or info.target_date is None:
-            fallback = by_run.get(str(meta.get("run_id")))
-            info = RequestInfo(fallback, info.window if info else None)
-        if info.target_date is None:
-            result.no_target_date += 1
-        raw = _raw_from_sidecar(meta, raw_key, store.get_bytes(raw_key), info)
-        result.fetches += 1
-        cleaned = clean_response(source, raw, ctx.run_id)
-        if cleaned.ok:
-            buf.add_observations(cleaned.observations)
-            result.rows += len(cleaned.observations)
-        else:
-            result.quarantined += 1
-            buf.add(
-                "quarantine",
-                quarantine_row(
-                    ctx, raw, cleaned.reason or "unknown", cleaned.detail, raw_key, now()
-                ),
-            )
-            log.warning("rebuild.quarantined", fetch_id=raw.fetch_id, reason=cleaned.reason)
+        months[f"{responded:%Y-%m}"].append((key, meta))
 
-    report = buf.flush(datasets, ctx)
-    result.errors.extend(report.errors)
-    if report.errors:  # never flip to a partial version
+    for month in sorted(months):
+        buf = RunBuffer()
+        for key, meta in months[month]:
+            raw_key = key.removesuffix(".meta.json")
+            info = by_fetch.get(meta["fetch_id"])
+            if info is None or info.target_date is None:
+                fallback = by_run.get(str(meta.get("run_id")))
+                info = RequestInfo(fallback, info.window if info else None)
+            if info.target_date is None:
+                result.no_target_date += 1
+            raw = _raw_from_sidecar(meta, raw_key, store.get_bytes(raw_key), info)
+            result.fetches += 1
+            cleaned = clean_response(by_name[meta["source"]], raw, ctx.run_id)
+            if cleaned.ok:
+                buf.add_observations(cleaned.observations)
+                result.rows += len(cleaned.observations)
+            else:
+                result.quarantined += 1
+                buf.add(
+                    "quarantine",
+                    quarantine_row(
+                        ctx, raw, cleaned.reason or "unknown", cleaned.detail, raw_key, now()
+                    ),
+                )
+                log.warning("rebuild.quarantined", fetch_id=raw.fetch_id, reason=cleaned.reason)
+        report = buf.flush(datasets, replace(ctx, run_id=f"{ctx.run_id}-{month}"))
+        result.partitions += report.written
+        result.errors.extend(report.errors)
+        if report.errors:  # never flip to a partial version
+            return result
+
+    result.partitions += _carry_over(store, previous, new, from_date)
+    return _flip(store, ctx, result)
+
+
+def _flip(store: StorageBackend, ctx: RunContext, result: RebuildResult) -> RebuildResult:
+    """Point ``_CURRENT`` at the new version if, and only if, it is safe to."""
+    previous, new = result.previous_version, result.new_version
+    if result.partitions == 0:
+        result.abort_reason = (
+            f"no partitions were written to clean/{new}; _CURRENT left on {previous}"
+        )
         return result
-    _carry_over(store, previous, new, from_date)
-    store.put_bytes(CLEAN_CURRENT_KEY, new.encode(), overwrite=True)
+    now_current = current_clean_version(store)
+    if now_current != previous:
+        result.abort_reason = f"clean/_CURRENT moved from {previous!r} to {now_current!r}"
+        return result
+    claim = _flip_claim_key(previous)
+    try:
+        store.put_bytes(claim, f"{new} {ctx.run_id}".encode(), overwrite=False)
+    except KeyExistsError:
+        result.abort_reason = f"another rebuild already flipped away from {previous!r}"
+        return result
+    try:
+        store.put_bytes(CLEAN_CURRENT_KEY, new.encode(), overwrite=True)
+    except Exception:
+        store.delete(claim)  # nothing flipped, so release the claim for a retry
+        raise
     result.flip_done = True
     return result
 
@@ -473,10 +531,13 @@ def rebuild(
 _PART_DATE = re.compile(r"/date=(\d{4}-\d{2}-\d{2})/")
 
 
-def _carry_over(store: StorageBackend, old: str, new: str, from_date: date | None) -> None:
-    """Copy older clean partitions (``date < from_date``) from ``old`` into ``new`` unchanged."""
+def _carry_over(store: StorageBackend, old: str, new: str, from_date: date | None) -> int:
+    """Copy older clean partitions (``date < from_date``) from ``old`` into ``new`` unchanged.
+
+    Returns how many partition files were copied."""
     if from_date is None:
-        return
+        return 0
+    copied = 0
     prefix = f"{CLEAN_PREFIX}/{old}/"
     for key in store.list(prefix):
         m = _PART_DATE.search(key)
@@ -484,3 +545,5 @@ def _carry_over(store: StorageBackend, old: str, new: str, from_date: date | Non
             dest = f"{CLEAN_PREFIX}/{new}/{key[len(prefix) :]}"
             if not store.exists(dest):
                 store.put_bytes(dest, store.get_bytes(key))
+                copied += 1
+    return copied
