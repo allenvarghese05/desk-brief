@@ -5,7 +5,9 @@ business day before today (P-009, reading ``obs_pit``), both with the ECB side a
 
 * ``twelvedata``: the ``fx_series_1m`` ``close`` of the bar *ending* at the fix
   (``fix_time_cet`` in Europe/Berlin, DST-aware: 14:15 CET is 13:15Z in winter, 12:15Z in
-  summer). ``as_of`` is the bar start (P-006), so that bar starts one minute earlier (14:14 CET);
+  summer). ``as_of`` is the bar start (P-006), so that bar starts one minute earlier (14:14 CET).
+  That bar-start convention is unverified until the Twelve Data live probe; if ``datetime``
+  turns out to be the bar end, ``BAR_LENGTH`` becomes 0 and the bar at the fix itself is used;
   the bar starting at 14:15 closes at about 14:16, after the fix, so its close is a price from
   after the ECB reference rate was set. Twelve Data emits ``close`` (never ``mid``); bars exist
   only around the fix (T15, fix +-10 min, which covers the 14:14 bar). The row's ``at_time`` is
@@ -44,7 +46,9 @@ NAME = "fx_vs_ecb"
 ECB_LABEL = "ECB reference rate"
 FIX_WINDOW = timedelta(minutes=10)  # the window T15 fetches around the fix
 TICK_TOLERANCE = timedelta(minutes=1)  # inclusive: ticks at exactly +-60 s count, +-61 s do not
-BAR_LENGTH = timedelta(minutes=1)  # the 1m bar ending at the fix starts BAR_LENGTH before it
+# the 1m bar ending at the fix starts BAR_LENGTH before it. Bar-start convention unverified until
+# the Twelve Data live probe: BAR_LENGTH becomes 0 if `datetime` turns out to be the bar end.
+BAR_LENGTH = timedelta(minutes=1)
 
 
 class FxVsEcb:
@@ -84,6 +88,8 @@ class FxVsEcb:
             near = min(close_ticks, key=lambda o: abs(o.as_of - fix), default=None)
             yahoo_skip = _yahoo_skip_reason(pair, fix, mine_ticks) if near is None else None
             derived = _is_derived(ctx, duck, e_obs)  # once per pair, not once per source
+            # n_yahoo_ticks counts ticks in the +-10 minute window around the fix, unlike
+            # `yahoo_vs_primary`, where it counts the ET day's ticks.
             for source, dataset, found, n_key, n, skip in (
                 ("twelvedata", "fx_series_1m", at_fix[0] if at_fix else None,
                  "n_twelvedata_bars", len(mine_bars), None),
@@ -119,8 +125,8 @@ def _yahoo_skip_reason(pair: str, fix: datetime, ticks: list[Obs]) -> str:
     if not ticks:
         return f"no Yahoo ticks around the fix ({pair})"
     gap = min(abs((o.as_of - fix).total_seconds()) for o in ticks)
-    tol_min = int(TICK_TOLERANCE.total_seconds() // 60)
-    return f"no Yahoo tick within +-{tol_min}m of the fix ({pair}; nearest {gap:.0f} s away)"
+    tol_s = TICK_TOLERANCE.total_seconds()
+    return f"no Yahoo tick within +-{tol_s:g} s of the fix ({pair}; nearest {gap:.0f} s away)"
 
 
 def _is_derived(ctx: RunContext, duck: duckdb.DuckDBPyConnection, o: Obs | None) -> bool | None:
