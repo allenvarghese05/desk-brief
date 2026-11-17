@@ -6,8 +6,10 @@ SYNTHETIC FIXTURE: all data comes from ``brief_synth`` (made-up values, labelled
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from html import escape
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -51,6 +53,10 @@ def test_email_safe_markup(model: BriefModel) -> None:
     for banned in ("<script", "<style", "<link", "onclick", "javascript:", "<iframe", "@import"):
         assert banned not in low
     assert html.count("<table") == html.count("</table>")
+    # no external resources: nothing the mail client would fetch
+    assert not re.search(r"""=\s*["'][^"']*https?://""", low)  # no URL in any attribute
+    for banned in ("http://", "https://", "<img", "url(", "<form", "src=", "<base"):
+        assert banned not in low
 
 
 def test_tier_glyphs_and_proxy_labels_come_from_the_model(model: BriefModel) -> None:
@@ -128,3 +134,55 @@ def test_plain_text_alternative(model: BriefModel) -> None:
     assert model.headline.text in text
     assert FOOTER_LINE in text
     assert "<" not in text
+
+
+def _with_row(model: BriefModel, iid: str, **changes: Any) -> BriefModel:
+    """A copy of ``model`` whose row ``iid`` has fields replaced (the model is frozen)."""
+    sections = tuple(
+        replace(
+            s,
+            rows=tuple(replace(r, **changes) if r.instrument_id == iid else r for r in s.rows),
+        )
+        for s in model.sections
+    )
+    return replace(model, sections=sections)
+
+
+def test_unavailable_change_uses_the_models_wording_not_a_basis_caption(
+    model: BriefModel,
+) -> None:
+    row = next(r for r in model.rows() if r.instrument_id == "SPY")
+    tail = "change unavailable (previous NYSE close not found)"
+    broken = _with_row(
+        model,
+        "SPY",
+        change_text="n/a",
+        description=f"{row.label}, {tail}",
+        basis="previous NYSE close",
+    )
+    cell = row_html(render_html(broken), row.label)
+    assert tail in cell
+    assert "chg since" not in cell
+    assert tail in render_text(broken)
+    assert "n/a since" not in render_text(broken)
+
+
+def test_data_health_says_no_fetches_recorded_when_there_were_none(tmp_path: Path) -> None:
+    empty = World(tmp_path / "empty")
+    model = BriefModel.from_store(empty.connect(), empty.config, MON, MON_0700)
+    zero = [h for h in model.health.summary.sources if h.n_fetches == 0 and h.status != "ok"]
+    assert zero
+    html, text = render_html(model), render_text(model)
+    for h in zero:
+        assert f"{h.source}: {h.status} (no fetches recorded)" in html
+        assert f"{h.source}: {h.status} (no fetches recorded)" in text
+    assert "0 of 0" not in html
+    assert "0 of 0" not in text
+
+
+def test_plain_text_lists_per_source_health(model: BriefModel) -> None:
+    text = render_text(model)
+    bad = [h for h in model.health.summary.sources if h.status != "ok" and h.n_fetches]
+    assert bad
+    for h in bad:
+        assert f"{h.source}: {h.status} ({h.n_failed} of {h.n_fetches} fetches failed)" in text

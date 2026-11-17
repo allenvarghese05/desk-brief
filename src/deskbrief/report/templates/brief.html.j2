@@ -30,7 +30,8 @@
 {% for r in s.rows %}
 <tr>
 <td style="padding:6px 16px;border-top:1px solid #eef0f3;">{{ r.label }}
-{%- if r.available and r.basis %}<br><span style="font-size:11px;color:#5b6470;">chg since {{ r.basis }}</span>{% endif %}
+{%- set note = change_note(r) %}
+{%- if note %}<br><span style="font-size:11px;color:#5b6470;">{{ note }}</span>{% endif %}
 {%- for q in r.qualifiers %}<br><span style="font-size:11px;color:#8a5a00;">{{ q }}</span>{% endfor %}</td>
 {% if r.available %}
 <td align="right" style="padding:6px;border-top:1px solid #eef0f3;white-space:nowrap;">{{ r.value_text }}</td>
@@ -56,7 +57,7 @@
 <tr style="background:#eef0f3;"><th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">DATA HEALTH</th></tr>
 <tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;color:{{ health_color }};">{{ m.health.text }}</td></tr>
 {% for h in m.health.summary.sources if h.status != "ok" %}
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">{{ h.source }}: {{ h.status }} ({{ h.n_failed }} of {{ h.n_fetches }} fetches failed)</td></tr>
+<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">{{ health_line(h) }}</td></tr>
 {% endfor %}
 <tr style="background:#eef0f3;"><th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">KNOWN LIMITS TODAY</th></tr>
 {% for k in m.known_limits %}
