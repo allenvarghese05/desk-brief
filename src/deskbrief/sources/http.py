@@ -315,6 +315,7 @@ class DefaultHttpClient:
         headers: Mapping[str, str] | None = None,
         secret_params: Mapping[str, str] | None = None,
         secret_headers: Mapping[str, str] | None = None,
+        units: int = 1,  # accepted, not yet used: T08B wires it to BudgetTracker
     ) -> RawResponse:
         log = get_logger(source=req.source, dataset=req.dataset)
         secrets = [*(secret_params or {}).values(), *(secret_headers or {}).values()]
