@@ -201,7 +201,7 @@ These cards collect the non-blocking findings that reviewers deferred on PRs #9�
 Order and shared files:
 - **T09 merges before T06, or in the same window.** Wiring checks into the runner (T06) makes `health_summary` double-count cross-checks until T09 fixes it.
 - **T09's anomaly-reuse bullet waits for T07's anomaly change.** The rest of T09 does not wait.
-- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving hook (`steps_for`), T31 only the morning row of `steps_for`, and T24B only the intraday branch of `evaluate_gate`. Whichever merges later rebases on the earlier one.
+- `pipeline/jobs.py` is shared. T06 edits only the checks hook, T23 only the serving hook (`steps_for`), T31 only the morning row of `steps_for`, and T24B only the intraday branch of `evaluate_gate`. T24B may also need a small `runner.py` edit; it starts that only after T06 has merged. Whichever merges later rebases on the earlier one.
 - T18 runs last, after T06–T09 and T17, because it touches test files those cards own.
 - T08's Twelve Data budget bullet waits for T08B, which waits for the T08A `contract:` PR. The rest of T08 does not wait.
 - Otherwise T07, T08, T08A/T08B and T17 are independent.
@@ -341,10 +341,11 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - **Depends:** T19, T10, T11, T12, T13, T16, T05 · **Parallel with:** T20–T22, T30, T34
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
 - Deliverables: two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013; DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
+- The job sets `GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}` in its environment, so the morning gate's `scheduled_for` sees the exact fire (P-013). Test or dispatch evidence: a scheduled run's step summary shows the fire time it gated on.
 - **Depends also on T05** (R2 checksum config). Gate: the owner runs `tests/integration/test_r2.py` with real keys **on `main` at or after the T05 merge**, and the commit SHA plus the pass output are pasted into the T24A PR description.
 - Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
-- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review; two morning crons from P-013.
+- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review; two morning crons from P-013; `GITHUB_EVENT_SCHEDULE` mapping from [PR #23 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588).
 #### T20 — DQ framework + single-source checks
 - P-009: checks needing reproducible daily values read `obs_pit`, never `daily_close`, and exclude the current unfinished ET date.
 - **Depends:** T02, T04 · **Parallel with:** T21, T30, T34
@@ -376,18 +377,24 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
 
 #### T24B — Remaining workflows
-- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the intraday branch of `evaluate_gate` in `pipeline/jobs.py` (allowed; shared file, see Review follow-ups)
+- **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the intraday branch of `evaluate_gate` in `pipeline/jobs.py` (allowed; shared file, see Review follow-ups); only if needed for Yahoo-only enforcement, a small edit in `pipeline/runner.py` after T06 merges
 - Acceptance: each dispatches green; intraday exits early outside session; sla fails if report missing; backfill accepts inputs.
 - `sla.yml` catches a missing report for any cause, such as a morning run that never starts.
 - ECB-fix FX fetch (P-012):
   - `intraday.yml` adds cron `15 12 * * 1-5`.
-  - When a trigger falls within ±10 min of 14:15 Europe/Berlin on a TARGET business day, the workflow runs `deskbrief run intraday --sources yahoo`. That is the existing CLI option, and Yahoo's intraday `quote` dataset includes `EURUSD=X`.
-  - The intraday branch of `evaluate_gate` lets that run proceed outside the NYSE session.
+  - The fix-window rule lives in one place, the intraday branch of `evaluate_gate`: a run proceeds outside the NYSE session when its `scheduled_for` time (wall clock if unknown, as for the morning gate) is within ±10 min of 14:15 Europe/Berlin on a TARGET business day. This check comes before the "not an XNYS business day" check, so it also covers US holidays when TARGET is open (Thanksgiving, July 4 and similar).
+  - An exempted run fetches Yahoo only. The workflow passes `--sources yahoo` on the 12:15 trigger and on any trigger the gate exempts. If the gate also has to enforce Yahoo-only (it takes no `sources` argument today), the small `runner.py` change goes in this card with a note in the PR, merged after T06 or rebased on it. Yahoo's intraday `quote` dataset includes `EURUSD=X`.
   - Any other trigger outside the session exits `skipped` as today, including the 12:15 trigger in winter and on TARGET holidays.
   - No Twelve Data request is added: the leg reads the `fx_series_1m` bars from eod.
-  - Tests: a CEST date at 12:15 UTC and a CET date at 13:15 UTC each proceed with Yahoo only; a CET date at 12:15 UTC and a TARGET holiday are `skipped`; a 13:45 UTC CET run outside the session is still `skipped`.
+  - The exempted run passes through the T06 checks hook and the T23 serving hook. It must not raise a false freshness failure for the sources it did not fetch, and must not replace the latest serving view with a Yahoo-only one.
+  - Tests:
+    - a CEST date at 12:15 UTC and a CET date at 13:15 UTC each proceed and plan Yahoo requests only;
+    - Thanksgiving (XNYS closed, TARGET open) at 13:15 UTC proceeds Yahoo-only;
+    - a CET date at 12:15 UTC and a TARGET holiday are `skipped`;
+    - a 13:45 UTC CET run outside the session is still `skipped`;
+    - an exempted run leaves freshness results for other sources unchanged and the serving view intact.
 
-- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; single window rule, US-holiday order, `scheduled_for` gating, Yahoo-only planning and hook safety from [PR #23 round 2, findings 1, 2, 4 and 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588); `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
 
 ### Phase 3 — Outputs
 
