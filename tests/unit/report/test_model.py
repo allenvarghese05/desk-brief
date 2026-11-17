@@ -519,3 +519,60 @@ def test_notable_window_excludes_the_scored_official_move(tmp_path: Path) -> Non
     assert move.text.endswith("vs prior 30 daily moves")
     z = float(move.text.split(" is ")[1].split("σ")[0])
     assert z > 20  # 15bp against ~1.5bp +/- 0.5; with itself in the window it would be ~5
+
+
+# ---------------------------------------------------------------------------
+# T09C: Row.as_of, the one-date spread tail, from_store(exclude_tiers=), limits text
+# ---------------------------------------------------------------------------
+
+_TSY = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+
+
+def test_rows_carry_the_timestamp_of_their_value_and_the_spread_its_date_stamp(
+    world: World,
+) -> None:
+    m = build(world)
+    assert row(m, "UST_2S10S").as_of == et(FRI)  # shared date of the two legs, midnight ET
+    assert row(m, "ES_F").as_of == et(MON, "06:59")
+    assert row(m, "QQQ").as_of is None  # unavailable: no value, no stamp
+    assert BriefModel.from_json(m.to_json()) == m
+
+
+def test_spread_with_one_common_date_says_the_change_is_unavailable(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations([daily("UST_10Y", FRI, 4.40, **_TSY), daily("UST_2Y", FRI, 4.18, **_TSY)])
+    r = row(build(w), "UST_2S10S")
+    assert r.available
+    assert r.change_text == "n/a"
+    assert r.description.endswith("+22bp on 13 Nov, change unavailable (no earlier common date)")
+    assert r.as_of == et(FRI)
+
+
+def test_from_store_exclude_tiers_falls_back_to_the_next_tier(world: World) -> None:
+    default = BriefModel.from_store(world.connect(), world.config, MON, MON_0700)
+    assert row(default, "SPY").tier == 1
+    assert default == BriefModel.from_store(
+        world.connect(), world.config, MON, MON_0700, exclude_tiers=()
+    )
+    hosted = BriefModel.from_store(world.connect(), world.config, MON, MON_0700, exclude_tiers=(1,))
+    spy = row(hosted, "SPY")
+    assert (spy.tier, spy.value, spy.as_of) == (3, 598.5, et(FRI))  # the Friday close
+    assert row(hosted, "ES_F").tier == 2  # untouched rows keep their value
+    assert 1 not in {r.tier for r in hosted.rows()}
+
+
+def test_from_store_takes_exclude_tiers_by_keyword_only(world: World) -> None:
+    with pytest.raises(TypeError):
+        BriefModel.from_store(world.connect(), world.config, MON, MON_0700, (1,))  # type: ignore[misc]
+
+
+def test_known_limits_say_a_partial_rerun_supersedes_both_check_tables(
+    world: World, tmp_path: Path
+) -> None:
+    world.dq(MON, [("fresh", "pass", "yahoo", None)])
+    text = next(k.text for k in build(world).known_limits if k.kind == "checks_scope")
+    assert "latest run" in text
+    assert "partial re-run" in text
+    assert "both check tables" in text
+    kinds = {k.kind for k in build(World(tmp_path / "none")).known_limits}
+    assert "checks_scope" not in kinds  # no results, nothing to scope (dq_missing says so)

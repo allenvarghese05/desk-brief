@@ -189,7 +189,7 @@ class RacingStore(LocalBackend):
         super().__init__(root)
         self._gate = threading.Barrier(parties, timeout=10)
         self._first_listing = {}
-        self.overwrite_flags: list[bool] = []
+        self.overwrite_flags: list[bool | None] = []
 
     def list(self, prefix: str) -> list[str]:
         keys = super().list(prefix)
@@ -199,9 +199,10 @@ class RacingStore(LocalBackend):
             self._gate.wait()
         return keys
 
-    def put_bytes(self, key: str, data: bytes, *, overwrite: bool = False) -> None:
+    def put_bytes(self, key: str, data: bytes, *, overwrite: bool | None = None) -> None:
+        # ``None`` = the caller left the flag out: write-once must be asked for explicitly
         self.overwrite_flags.append(overwrite)
-        super().put_bytes(key, data, overwrite=overwrite)
+        super().put_bytes(key, data, overwrite=bool(overwrite))
 
 
 def test_concurrent_archives_both_land_on_distinct_versions(tmp_path: Path) -> None:
@@ -230,7 +231,7 @@ def test_concurrent_archives_both_land_on_distinct_versions(tmp_path: Path) -> N
         tag = store.get_bytes(k)
         assert store.get_bytes(k.replace("brief.html", "model.json")) == tag + b"{}"
     assert store.overwrite_flags
-    assert not any(store.overwrite_flags)
+    assert all(flag is False for flag in store.overwrite_flags)  # never True, never omitted
 
 
 def test_archive_gives_up_after_bounded_attempts(tmp_path: Path) -> None:
@@ -245,3 +246,12 @@ def test_archive_gives_up_after_bounded_attempts(tmp_path: Path) -> None:
     with pytest.raises(KeyExistsError):
         archive_report(store, DAY, {"brief.html": b"x"})
     assert store.puts == 5
+
+
+def test_scrubbed_notify_error_holds_no_raw_exception_anywhere() -> None:
+    """The password lives in the original exception: neither cause nor context may keep it."""
+    with pytest.raises(NotifyError) as err:
+        notifier(FakeSmtp("value")).send("s", "<p>x</p>", "x")
+    assert err.value.__cause__ is None
+    assert err.value.__context__ is None
+    assert err.value.__suppress_context__
