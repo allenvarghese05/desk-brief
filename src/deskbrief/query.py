@@ -8,6 +8,7 @@ Functions
 ``latest_snapshot(duck, at)``                  latest value per instrument as of ``at``
 ``overnight_changes(duck, report_date, t)``    last value vs its baseline, labelled per P-009
 ``health_summary(duck, target_date)``          DQ / cross-check counts, issues, source status
+                                               (mirrored ``consistency`` rows count once)
 ``series(duck, instrument_id, days, at)``      one official daily value per ET date
 ``series_all(duck, days, at)``                 the same for every instrument in one query
 ``lineage(duck, instrument_id, at)``           provenance of the latest value
@@ -24,14 +25,16 @@ Overnight change (P-009)
   index points) versus the **previous NYSE close** (``field = close``, 1d, on the previous XNYS
   business day: Monday -> Friday, holidays skipped).
 * yields: change in **bp** versus the **previous official value**.
+  A tick compared with an official baseline carries a note saying so (different sources).
 * reference rates (``field = rate``, e.g. the ECB fix) and macro series: change versus the
   **previous official value** (% for FX rates, percentage points / points otherwise).
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -121,6 +124,7 @@ class Lineage:
     raw_key: str | None
     sha256: str | None
     rows_parsed: int | None
+    role: str = "value"  # value | baseline: which side of a change this fetch backs
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,7 @@ class CheckItem:
     group_id: str | None
     observed: float | None
     threshold: float | None
+    ref_date: date | None = None  # cross-checks: the data date compared (details.ref_date)
 
 
 @dataclass(frozen=True)
@@ -327,11 +332,9 @@ def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
         earlier = same or earlier
     previous = earlier[0] if earlier else None  # history is newest first, best tier first
     note = None
-    if (
-        previous is not None
-        and last.interval in OFFICIAL_INTERVALS
-        and previous.source != last.source
-    ):
+    if previous is not None and last.interval not in OFFICIAL_INTERVALS:
+        note = f"{last.source} {last.interval} value against an official {previous.source} baseline"
+    elif previous is not None and previous.source != last.source:
         note = f"baseline from {previous.source}, not {last.source}"
     return _change(last, previous, BASIS_OFFICIAL, "ok" if previous else "no_baseline", note)
 
@@ -387,8 +390,14 @@ def _series(
 # ---------------------------------------------------------------------------
 
 
-def lineages(duck: duckdb.DuckDBPyConnection, rows: Sequence[ValueRow]) -> tuple[Lineage, ...]:
-    """Provenance of ``rows`` (same order), joined to ``source_log`` by ``fetch_id``."""
+def lineages(
+    duck: duckdb.DuckDBPyConnection, rows: Sequence[ValueRow], role: str = "value"
+) -> tuple[Lineage, ...]:
+    """Provenance of ``rows`` (same order), joined to ``source_log`` by ``fetch_id``.
+
+    ``role`` tags every result: ``value`` for a reported value, ``baseline`` for the value a
+    change was measured against.
+    """
     ids = sorted({r.fetch_id for r in rows})
     logs: dict[str, tuple[Any, ...]] = {}
     if ids:
@@ -400,7 +409,7 @@ def lineages(duck: duckdb.DuckDBPyConnection, rows: Sequence[ValueRow]) -> tuple
         )
         logs = {r[0]: r[1:] for r in duck.execute(sql, ids).fetchall()}
     empty: tuple[Any, ...] = (None,) * 8
-    return tuple(Lineage(r, *logs.get(r.fetch_id, empty)) for r in rows)
+    return tuple(replace(Lineage(r, *logs.get(r.fetch_id, empty)), role=role) for r in rows)
 
 
 def lineage(duck: duckdb.DuckDBPyConnection, instrument_id: str, at: datetime) -> Lineage | None:
@@ -425,19 +434,22 @@ def health_summary(
 ) -> HealthSummary:
     """Quality-check and source status for ``target_date`` (empty tables give zero counts).
 
-    Re-evaluated checks count once (the latest evaluation). ``expected_sources`` defaults to
+    Re-evaluated checks count once (the latest evaluation). Each cross-check is mirrored into
+    ``dq_results`` as a ``consistency`` row (spec §7.2); those rows are left out of the DQ counts
+    so a cross-check counts once, from ``crosscheck_results``. ``expected_sources`` defaults to
     every source with a feed in the config; a source with no fetch that day is ``missing``.
     """
     dq = duck.execute(
         "SELECT check_name, check_type, source, instrument_id, status, observed, threshold "
-        "FROM dq WHERE target_date = ? QUALIFY row_number() OVER (PARTITION BY check_name, "
+        "FROM dq WHERE target_date = ? AND check_type <> 'consistency' "
+        "QUALIFY row_number() OVER (PARTITION BY check_name, "
         "coalesce(source, ''), coalesce(instrument_id, '') ORDER BY evaluated_at DESC, "
         "result_id DESC) = 1",
         [target_date],
     ).fetchall()
     xc = duck.execute(
         "SELECT check_name, group_id, left_source, right_source, status, diff_bps, "
-        "warn_bps, fail_bps, left_instrument FROM xchecks WHERE target_date = ? "
+        "warn_bps, fail_bps, left_instrument, details_json FROM xchecks WHERE target_date = ? "
         "QUALIFY row_number() OVER (PARTITION BY check_name, coalesce(group_id, ''), "
         "left_instrument, right_instrument, left_source, right_source "
         "ORDER BY at_time DESC, result_id DESC) = 1",
@@ -450,9 +462,18 @@ def health_summary(
     ]
     issues += [
         CheckItem(
-            "crosscheck", n, st, None, f"{ls}/{rs}", li, grp, diff, warn if st == "warn" else fail
+            "crosscheck",
+            n,
+            st,
+            None,
+            f"{ls}/{rs}",
+            li,
+            grp,
+            diff,
+            warn if st == "warn" else fail,
+            _ref_date(details),
         )
-        for n, grp, ls, rs, st, diff, warn, fail, li in xc
+        for n, grp, ls, rs, st, diff, warn, fail, li, details in xc
         if st in _STATUS_RANK
     ]
     issues.sort(
@@ -487,6 +508,15 @@ def health_summary(
         issues=tuple(issues),
         sources=_source_health(duck, target_date, expected_sources),
     )
+
+
+def _ref_date(details_json: str | None) -> date | None:
+    """``details.ref_date`` of a cross-check row (None when absent or malformed)."""
+    try:
+        ref = json.loads(details_json or "{}").get("ref_date")
+        return date.fromisoformat(ref) if isinstance(ref, str) else None
+    except (ValueError, AttributeError):
+        return None
 
 
 def _source_health(
