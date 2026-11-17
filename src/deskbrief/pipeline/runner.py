@@ -53,6 +53,7 @@ from deskbrief.pipeline.clean import (
     runner_dq,
 )
 from deskbrief.pipeline.jobs import (
+    CheckOutputs,
     JobSteps,
     evaluate_gate,
     schedule_delay_s,
@@ -71,6 +72,9 @@ from deskbrief.timeutil import Clock, et_date, utc_now
 #: A failed flush of one of these loses data (raw may still hold it): the run is ``failed`` so
 #: catch-up treats the date as missed (spec §2.4 item 5). A lost dq_results partition degrades.
 _DATA_TABLES = frozenset({"observations", "source_log", "quarantine"})
+_DATA_FLUSH = frozenset({"observations", "source_log", "quarantine"})
+#: flushed after the checks hook, so the runner's own DQ rows and the hook's rows share one file
+_CHECK_FLUSH = frozenset({"dq_results", "revisions", "crosscheck_results"})
 _FAILED_FETCH = frozenset(
     {FetchStatus.ERROR, FetchStatus.RATE_LIMITED, FetchStatus.BUDGET_EXHAUSTED}
 )
@@ -141,10 +145,13 @@ def execute_run(env: RunEnv, ctx: RunContext) -> RunManifest:
     degraded: list[str] = []
     try:
         try:
-            _fetch_all(env, ctx, buf, manifest)
-        finally:
-            _flush(buf, datasets, ctx, manifest)
-        degraded += _run_steps(env, ctx, manifest)
+            try:
+                _fetch_all(env, ctx, buf, manifest)
+            finally:
+                _flush(buf, datasets, ctx, manifest, _DATA_FLUSH)
+            degraded += _run_steps(env, ctx, manifest, buf)
+        finally:  # the one dq_results/revisions/crosscheck_results append of the run (P-008)
+            _flush(buf, datasets, ctx, manifest, _CHECK_FLUSH)
         manifest.status = _decide(env, manifest, degraded)
     finally:
         manifest.finished_at = env.clock()
@@ -355,20 +362,26 @@ def _source_log_row(
     }
 
 
-def _flush(buf: RunBuffer, datasets: Datasets, ctx: RunContext, manifest: RunManifest) -> None:
-    """Write the run's buffered partitions once (P-008). Never raises."""
-    report = buf.flush(datasets, ctx)
+def _flush(
+    buf: RunBuffer,
+    datasets: Datasets,
+    ctx: RunContext,
+    manifest: RunManifest,
+    tables: frozenset[str],
+) -> None:
+    """Write the run's buffered partitions of ``tables`` once (P-008). Never raises."""
+    report = buf.flush(datasets, ctx, only=tables)
     manifest.storage_ok += report.written
     manifest.storage_failed += len(report.errors)
-    manifest.flush_data_lost = bool(report.failed_tables & _DATA_TABLES)
-    manifest.n_obs = report.rows_by_table.get("observations", 0)
-    dq = buf.rows("dq_results")
-    manifest.n_dq_fail = sum(1 for r in dq if r["status"] == "fail")
-    manifest.n_dq_warn = sum(1 for r in dq if r["status"] == "warn")
+    manifest.flush_data_lost = manifest.flush_data_lost or bool(report.failed_tables & _DATA_TABLES)
+    manifest.n_obs += report.rows_by_table.get("observations", 0)
+    if "dq_results" in tables:  # counts cover the runner's rows and the checks' rows
+        dq = buf.dq_status_counts()
+        manifest.n_dq_fail, manifest.n_dq_warn = dq.get("fail", 0), dq.get("warn", 0)
     manifest.notes.extend(f"flush failed: {e}" for e in report.errors)
 
 
-def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest) -> list[str]:
+def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest, buf: RunBuffer) -> list[str]:
     """Checks, serving, report, notify. Each is isolated; failures degrade the run."""
     steps = env.steps_for(ctx.job)
     failures: list[str] = []
@@ -382,7 +395,11 @@ def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest) -> list[str]
             log.error("step.failed", step=name, error=redact(str(exc)))
             return None
 
-    call("run_checks", steps.run_checks)
+    outputs = call("run_checks", steps.run_checks)
+    if isinstance(outputs, CheckOutputs):  # buffered, flushed once after the hooks
+        buf.add_frame("dq_results", outputs.dq_results)
+        buf.add_frame("revisions", outputs.revisions)
+        buf.add_frame("crosscheck_results", outputs.crosscheck_results)
     call("build_serving", steps.build_serving)
     key = call("build_report", steps.build_report)
     if isinstance(key, str):

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -46,7 +46,7 @@ from deskbrief.store.backend import (
     StorageBackend,
     StorageError,
 )
-from deskbrief.store.datasets import Datasets, current_clean_version
+from deskbrief.store.datasets import PARTITION_RULES, Datasets, current_clean_version
 from deskbrief.timeutil import ET, ensure_utc, et_date
 
 _DETAIL_MAX = 2000
@@ -177,12 +177,10 @@ def clean_response(source: Source, raw: RawResponse, run_id: str) -> CleanResult
 # buffer + single flush
 # ---------------------------------------------------------------------------------------------
 
-_PartDate = Callable[[dict[str, Any]], date]
-_ROW_PARTITIONS: dict[str, _PartDate] = {
-    "quarantine": lambda r: et_date(r["detected_at"]),
-    "source_log": lambda r: et_date(r["requested_at"]),
-    "dq_results": lambda r: r["target_date"],
-}
+#: tables the runner buffers row by row; partition dates come from ``PARTITION_RULES`` (P-006)
+_ROW_TABLES = ("quarantine", "source_log", "dq_results")
+#: tables a check hook hands over as frames (dq_results also takes the runner's own rows)
+_FRAME_TABLES = ("dq_results", "revisions", "crosscheck_results")
 
 
 @dataclass
@@ -199,6 +197,7 @@ class RunBuffer:
     def __init__(self) -> None:
         self._obs: list[pd.DataFrame] = []
         self._rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
         #: collapse key -> (buffered dq row, its details); see ``runner._dq_fail``
         self.dq_index: dict[tuple[str, str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
 
@@ -207,9 +206,16 @@ class RunBuffer:
             self._obs.append(df)
 
     def add(self, table: str, row: dict[str, Any]) -> None:
-        if table not in _ROW_PARTITIONS:
+        if table not in _ROW_TABLES:
             raise ValueError(f"buffer has no partition rule for table {table!r}")
         self._rows[table].append(row)
+
+    def add_frame(self, table: str, df: pd.DataFrame) -> None:
+        """Buffer a whole validated frame (check output); split by the P-006 partition rule."""
+        if table not in _FRAME_TABLES:
+            raise ValueError(f"buffer takes no frames for table {table!r}")
+        if not df.empty:
+            self._frames[table].append(df)
 
     @property
     def n_obs(self) -> int:
@@ -218,11 +224,27 @@ class RunBuffer:
     def rows(self, table: str) -> list[dict[str, Any]]:
         return list(self._rows[table])
 
-    def flush(self, datasets: Datasets, ctx: RunContext) -> FlushReport:
-        """Write every buffered partition once. Per-partition failures are collected, not raised."""
+    def dq_status_counts(self) -> dict[str, int]:
+        """``status -> n`` over every buffered ``dq_results`` row: runner rows and check frames."""
+        counts: dict[str, int] = defaultdict(int)
+        for row in self._rows["dq_results"]:
+            counts[str(row["status"])] += 1
+        for frame in self._frames["dq_results"]:
+            for status, n in frame["status"].value_counts().items():
+                counts[str(status)] += int(n)
+        return dict(counts)
+
+    def flush(
+        self, datasets: Datasets, ctx: RunContext, *, only: Collection[str] | None = None
+    ) -> FlushReport:
+        """Write every buffered partition once. Per-partition failures are collected, not raised.
+
+        ``only`` limits the flush to those tables: the runner flushes the data tables right away
+        and the check tables after the checks hook, so each (table, date) is still written once.
+        """
         report = FlushReport()
         log = get_logger(run_id=ctx.run_id)
-        for table, part_date, frame in self._partitions():
+        for table, part_date, frame in self._partitions(only):
             try:
                 datasets.append(table, frame, ctx, part_date)
             except (
@@ -236,20 +258,34 @@ class RunBuffer:
                 report.rows_by_table[table] = report.rows_by_table.get(table, 0) + len(frame)
         return report
 
-    def _partitions(self) -> list[tuple[str, date, pd.DataFrame]]:
+    def _partitions(
+        self, only: Collection[str] | None = None
+    ) -> list[tuple[str, date, pd.DataFrame]]:
         parts: list[tuple[str, date, pd.DataFrame]] = []
-        if self._obs:
+        if self._obs and (only is None or "observations" in only):
             obs = pd.concat(self._obs, ignore_index=True)
             days = obs["as_of"].dt.tz_convert(ET).dt.date
             for day, grp in obs.groupby(days, sort=True):
                 parts.append(("observations", day, grp.reset_index(drop=True)))
-        for table, rule in _ROW_PARTITIONS.items():
-            by_day: dict[date, list[dict[str, Any]]] = defaultdict(list)
-            for row in self._rows[table]:
-                by_day[rule(row)].append(row)
-            for day in sorted(by_day):
-                parts.append((table, day, to_frame(table, by_day[day])))
+        for table in dict.fromkeys([*_ROW_TABLES, *_FRAME_TABLES]):
+            if only is not None and table not in only:
+                continue
+            parts.extend(self._table_partitions(table))
         return parts
+
+    def _table_partitions(self, table: str) -> list[tuple[str, date, pd.DataFrame]]:
+        """Runner rows and hook frames of ``table``, grouped by its P-006 partition date."""
+        pieces = [f for f in self._frames[table] if not f.empty]
+        if self._rows[table]:
+            pieces.insert(0, to_frame(table, self._rows[table]))
+        if not pieces:
+            return []
+        frame = pd.concat(pieces, ignore_index=True) if len(pieces) > 1 else pieces[0]
+        column, to_date = PARTITION_RULES[table]
+        days = pd.Series([to_date(v) for v in frame[column]], index=frame.index)
+        return [
+            (table, day, grp.reset_index(drop=True)) for day, grp in frame.groupby(days, sort=True)
+        ]
 
 
 # ---------------------------------------------------------------------------------------------
