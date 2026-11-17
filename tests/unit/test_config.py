@@ -249,3 +249,57 @@ def test_spec_universe_details() -> None:
     for sym in cfg.crosschecks.iex_vs_sip.symbols:
         datasets = {f.dataset for f in cfg.instrument(sym).feeds}
         assert {"iex_bars_1m", "sip_bars_1m"} <= datasets
+
+
+# -- T07A: per-dataset intraday schedule ---------------------------------------------------
+
+
+def test_real_config_intraday_schedule() -> None:
+    cfg = load_config(REAL)
+    assert {(s.source, s.dataset) for s in cfg.intraday} == {
+        ("alpaca", "iex_latest"),
+        ("yahoo", "quote"),
+        ("twelvedata", "fx_quote"),
+    }
+    assert all(s.calendar == "XNYS" and s.grace_minutes == 30 for s in cfg.intraday)
+
+
+def test_intraday_defaults_to_empty_so_old_configs_load(tmp_path: Path) -> None:
+    data = _raw()
+    del data["intraday"]
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.intraday == ()
+
+
+def test_intraday_entry_defaults(tmp_path: Path) -> None:
+    data = _raw()
+    data["intraday"] = [{"source": "yahoo", "dataset": "quote"}]
+    (entry,) = load_config(_write(tmp_path, data)).intraday
+    assert (entry.calendar, entry.grace_minutes) == ("XNYS", 30)
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"source": "bloomberg", "dataset": "quote"}, "intraday bloomberg/quote: source not"),
+        ({"source": "yahoo", "dataset": "nothing"}, "intraday yahoo/nothing: no instrument"),
+        ({"source": "yahoo", "dataset": "quote", "grace_minutes": 0}, "grace_minutes"),
+        ({"source": "yahoo", "dataset": "quote", "grace_minutes": -5}, "grace_minutes"),
+        ({"source": "yahoo", "dataset": "quote", "calendar": "LSE"}, "calendar"),
+        ({"source": "yahoo", "dataset": "quote", "surprise": 1}, "surprise"),
+    ],
+)
+def test_invalid_intraday_entries_rejected(
+    tmp_path: Path, entry: dict[str, Any], message: str
+) -> None:
+    data = _raw()
+    data["intraday"] = [entry]
+    with pytest.raises(ValueError, match=message):
+        load_config(_write(tmp_path, data))
+
+
+def test_duplicate_intraday_entries_rejected(tmp_path: Path) -> None:
+    data = _raw()
+    data["intraday"] = [data["intraday"][0], data["intraday"][0]]
+    with pytest.raises(ValueError, match="duplicate intraday"):
+        load_config(_write(tmp_path, data))

@@ -371,6 +371,11 @@ datasets:   # expected publish times drive freshness; before expected_by the che
   - {source: stooq, dataset: daily, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
   - {source: cboe, dataset: vix_history, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
 
+intraday:   # polled every 15 min in session; newest tick older than grace_minutes is stale (2 missed polls)
+  - {source: alpaca, dataset: iex_latest, calendar: XNYS, grace_minutes: 30}
+  - {source: yahoo, dataset: quote, calendar: XNYS, grace_minutes: 30}
+  - {source: twelvedata, dataset: fx_quote, calendar: XNYS, grace_minutes: 30}
+
 checks:
   anomaly: {window_days: 30, z_warn: 3.0, z_fail: 5.0}
   validity:

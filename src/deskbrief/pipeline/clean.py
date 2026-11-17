@@ -434,7 +434,9 @@ def rebuild(
     ``_CURRENT`` is not where the rebuild found it. The version is claimed with an exclusive
     marker (``clean/{new}/_CLAIM``) and the flip itself with another (``clean/_flips/from-{prev}``),
     so two concurrent rebuilds cannot both flip away from the same version. An operator who rolls
-    ``_CURRENT`` back by hand must delete that flip marker before rebuilding from it again.
+    ``_CURRENT`` back by hand must delete that flip marker before rebuilding from it again; the
+    abort reason names the key. The marker body is JSON: ``flipped_at`` (UTC ISO 8601),
+    ``new_version`` and ``run_id``.
     """
     log = get_logger(run_id=ctx.run_id, job=JobKind.REBUILD.value)
     previous = current_clean_version(store)
@@ -498,10 +500,12 @@ def rebuild(
             return result
 
     result.partitions += _carry_over(store, previous, new, from_date)
-    return _flip(store, ctx, result)
+    return _flip(store, ctx, result, now())
 
 
-def _flip(store: StorageBackend, ctx: RunContext, result: RebuildResult) -> RebuildResult:
+def _flip(
+    store: StorageBackend, ctx: RunContext, result: RebuildResult, flipped_at: datetime
+) -> RebuildResult:
     """Point ``_CURRENT`` at the new version if, and only if, it is safe to."""
     previous, new = result.previous_version, result.new_version
     if result.partitions == 0:
@@ -515,9 +519,17 @@ def _flip(store: StorageBackend, ctx: RunContext, result: RebuildResult) -> Rebu
         return result
     claim = _flip_claim_key(previous)
     try:
-        store.put_bytes(claim, f"{new} {ctx.run_id}".encode(), overwrite=False)
+        body = {
+            "flipped_at": ensure_utc(flipped_at).isoformat(),
+            "new_version": new,
+            "run_id": ctx.run_id,
+        }
+        store.put_bytes(claim, json.dumps(body).encode(), overwrite=False)
     except KeyExistsError:
-        result.abort_reason = f"another rebuild already flipped away from {previous!r}"
+        result.abort_reason = (
+            f"another rebuild already flipped away from {previous!r}: marker {claim} exists. "
+            f"After rolling back _CURRENT by hand, delete {claim} to rebuild from {previous} again"
+        )
         return result
     try:
         store.put_bytes(CLEAN_CURRENT_KEY, new.encode(), overwrite=True)
