@@ -1,12 +1,15 @@
-"""Completeness for the Yahoo and Twelve Data feeds, which have no ``config.datasets`` schedule.
+"""Completeness for the Yahoo, Twelve Data and Alpaca feeds (no ``config.datasets`` schedule).
 
 Each rule judges the last finished session (P-009), like the Alpaca minute-bar rule. The eod run
 (22:30 UTC) therefore judges the previous session for XNYS-based rules; see the note in
 :mod:`deskbrief.checks.completeness`. Early closes (P-011) shorten the tick window.
 
 * ``yahoo/history``: one ``close`` bar for the session day. Missing -> fail.
-* ``yahoo/quote`` and ``twelvedata/fx_quote``: at least one tick inside the XNYS session (the
-  intraday job only runs then; an early close ends the window early). None -> fail.
+* ``yahoo/quote``, ``twelvedata/fx_quote`` and ``alpaca/iex_latest``: at least one tick inside
+  the XNYS session (the intraday job only runs then; an early close ends the window early). None
+  -> fail. Presence only, not recency: Alpaca's ``as_of`` is the last-trade time, so an illiquid
+  ETF whose only tick is early in the session passes; ``freshness_intraday`` judges the feed as
+  a whole.
 * ``twelvedata/fx_series_1m`` (eod job only, like its fetch; other jobs ``skip``): the
   ``2 * FIX_WINDOW_MIN + 1`` bars around the ECB fix on the last TARGET day whose window has
   closed; 100% pass, [95%, 100%) warn, below fail.
@@ -94,13 +97,18 @@ def _ticks(ctx: RunContext, check: Check, duck: duckdb.DuckDBPyConnection) -> li
         df = query(
             duck,
             "SELECT instrument_id, source, dataset, count(*) AS n FROM obs_pit(?) "
-            "WHERE interval = 'tick' AND field = 'last' AND source IN ('yahoo', 'twelvedata') "
+            "WHERE interval = 'tick' AND field = 'last' "
+            "AND source IN ('yahoo', 'twelvedata', 'alpaca') "
             "AND as_of >= ? AND as_of <= ? GROUP BY ALL",
             [ctx.now_utc, bounds[0], bounds[1]],
         )
         counts = {(r["instrument_id"], r["source"], r["dataset"]): int(r["n"]) for r in records(df)}
     out: list[DQResult] = []
-    for source, dataset in (("yahoo", "quote"), ("twelvedata", "fx_quote")):
+    for source, dataset in (
+        ("yahoo", "quote"),
+        ("twelvedata", "fx_quote"),
+        ("alpaca", "iex_latest"),
+    ):
         for inst, feed in _feeds(ctx, source, dataset):
             info = {"session_day": day.isoformat(), "early_close": is_early_close(day)}
             if inst.asset_class == "index":

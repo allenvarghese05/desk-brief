@@ -23,10 +23,9 @@ not move the dashboard's view. Written under ``serving/``:
 :func:`serving_step` is the ``build_serving`` hook. In every job it first (re)writes the
 scorecard of ``ctx.target_date`` (an idempotent overwrite of that date's partition; spec §5.4:
 "scorecard → compaction → serving"), so a morning run rescores the day it targets including its
-own fetches. At ``eod`` it then compacts the clean files of the last 7 days (``store.compaction``).
-Each part
-is isolated: a failing one is reported by raising after the others ran, so the run is
-``degraded`` and the dashboard still gets fresh files.
+own fetches. At ``eod`` it then compacts the clean files of the last 7 days
+(``store.compaction``). Each part is isolated: a failing one is reported by raising after the
+others ran, so the run is ``degraded`` and the dashboard still gets fresh files.
 """
 
 from __future__ import annotations
@@ -182,9 +181,16 @@ def _series(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> pa.Table:
     return pa.Table.from_pylist(rows, schema=_SERIES)
 
 
-def build_serving_files(ctx: RunContext) -> list[str]:
-    """(Over)write every serving file from the store; returns the keys written."""
-    duck = connect(ctx.store, ctx.config)  # after the scorecard write, so it sees that file
+def build_serving_files(
+    ctx: RunContext, duck: duckdb.DuckDBPyConnection | None = None
+) -> list[str]:
+    """(Over)write every serving file from the store; returns the keys written.
+
+    ``duck`` is the connection shared with the scorecard step (see :func:`serving_step`); without
+    it one is opened and closed here, after any scorecard write, so it sees that file.
+    """
+    own = duck is None
+    duck = connect(ctx.store, ctx.config) if duck is None else duck
     try:
         snapshot, missing = _snapshot_table(duck, ctx)
         parts = {
@@ -200,23 +206,45 @@ def build_serving_files(ctx: RunContext) -> list[str]:
             ),
         }
     finally:
-        duck.close()
+        if own:
+            duck.close()
     return [_put(ctx.store, name, data) for name, data in parts.items()]
 
 
 def serving_step(ctx: RunContext) -> None:
-    """``build_serving`` hook: (eod) the day's scorecard, then every serving file."""
-    parts: list[tuple[str, Callable[[], object]]] = []
-    parts.append(("scorecard", lambda: write_scorecard(ctx)))
-    if ctx.job is JobKind.EOD:  # spec §5.4: scorecard -> compaction -> serving
-        parts.append(("compaction", lambda: compact_recent(ctx.store, et_date(ctx.now_utc))))
-    parts.append(("serving", lambda: build_serving_files(ctx)))
+    """``build_serving`` hook: the day's scorecard, (eod) compaction, then every serving file.
+
+    The scorecard and the serving build share one DuckDB connection, opened on first use, so the
+    store's views are set up once per job; the scorecard step re-points its view at the file it
+    wrote. Compaction runs between them and only moves rows between files of the same table, which
+    the views glob again on every query.
+    """
+    shared: list[duckdb.DuckDBPyConnection] = []
+
+    def duck() -> duckdb.DuckDBPyConnection:
+        if not shared:
+            shared.append(connect(ctx.store, ctx.config))
+        return shared[0]
+
+    parts: list[tuple[str, Callable[[], object]]] = [
+        ("scorecard", lambda: write_scorecard(ctx, duck())),
+        *(
+            [("compaction", lambda: compact_recent(ctx.store, et_date(ctx.now_utc)))]
+            if ctx.job is JobKind.EOD  # spec §5.4: scorecard -> compaction -> serving
+            else []
+        ),
+        ("serving", lambda: build_serving_files(ctx, duck())),
+    ]
     errors = []
-    for name, part in parts:
-        try:
-            part()
-        except Exception as exc:  # one failing part must not stop the others
-            errors.append(f"{name}: {type(exc).__name__}: {redact(str(exc))}")
+    try:
+        for name, part in parts:
+            try:
+                part()
+            except Exception as exc:  # one failing part must not stop the others
+                errors.append(f"{name}: {type(exc).__name__}: {redact(str(exc))}")
+    finally:
+        for conn in shared:
+            conn.close()
     if errors:
         raise RuntimeError("; ".join(errors))
 

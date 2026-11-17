@@ -138,3 +138,21 @@ def test_registered_and_run_by_run_checks(store, config) -> None:  # type: ignor
     ctx = ctx_at(config, store, ET_NOW(WED, "11:00"), job=JobKind.INTRADAY)
     dq, _ = run_checks(ctx, duck_for(store, config))
     assert "freshness_intraday" in set(dq["check_name"])
+
+
+def test_future_dated_tick_is_ignored_by_the_as_of_guard(store, config) -> None:  # type: ignore[no-untyped-def]
+    """``as_of <= now`` in ``newest_tick``: ``ingested_at`` alone would let this tick through."""
+    now = ET_NOW(WED, "11:00")
+    future = tick(now + timedelta(minutes=5), ingested_at=now - timedelta(minutes=1))
+    res, _ = run(store, config, WED, "11:00", [future])
+    assert [r.status for r in res] == [S.FAIL]
+    assert res[0].details["state"] == "no_ticks"
+
+
+def test_future_dated_tick_does_not_hide_an_older_one(store, config) -> None:  # type: ignore[no-untyped-def]
+    now = ET_NOW(WED, "11:00")
+    future = tick(now + timedelta(minutes=5), ingested_at=now - timedelta(minutes=1))
+    older = tick(now - timedelta(minutes=10), ingested_at=now - timedelta(minutes=1))
+    res, _ = run(store, config, WED, "11:00", [future, older])
+    assert [r.status for r in res] == [S.PASS]
+    assert res[0].observed == pytest.approx(10.0)

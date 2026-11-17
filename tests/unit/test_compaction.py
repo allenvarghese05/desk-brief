@@ -16,6 +16,7 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
 from t23_synth import D, ctx_for, obs_row, put
 
+from deskbrief.store import compaction
 from deskbrief.store.compaction import (
     CompactionError,
     compact_day,
@@ -241,7 +242,7 @@ def test_recent_days_are_recompacted_when_a_later_run_adds_a_file(tmp_path: Path
 
 def test_recent_window_is_seven_days_and_isolates_each_date(tmp_path: Path) -> None:
     store = LocalBackend(tmp_path / "data")
-    for back in (0, 1, 7):  # today, yesterday, and one day outside the window
+    for back in (0, 1, 6, 7):  # today, yesterday, the oldest day inside, one day outside
         day = D - timedelta(days=back)
         for n in (1, 2):
             row = obs_row("SPY", float(n), et_to_utc(day, "00:00"), f"R{back}{n}", f"F{back}{n}")
@@ -253,4 +254,23 @@ def test_recent_window_is_seven_days_and_isolates_each_date(tmp_path: Path) -> N
 
     with pytest.raises(CompactionError, match=f"observations {D.isoformat()}"):
         compact_recent(Truncating(store.root), D)  # the first compaction (today's) fails
-    assert (files(0), files(1), files(7)) == (2, 1, 2)  # yesterday still compacted; day 7 left
+    # yesterday and day 6 (the oldest included date) still compacted; day 7 left alone
+    assert (files(0), files(1), files(6), files(7)) == (2, 1, 1, 2)
+
+
+def test_the_clean_version_is_resolved_once_for_the_whole_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = world(tmp_path)
+    calls: list[int] = []
+    real = compaction.current_clean_version
+
+    def counting(s: LocalBackend) -> str:
+        calls.append(1)
+        return real(s)
+
+    monkeypatch.setattr(compaction, "current_clean_version", counting)
+    compact_recent(store, D)  # 7 days x 2 tables = 14 partitions
+    assert len(calls) == 1
+    compact_partition(store, "observations", D)  # a direct call still resolves its own
+    assert len(calls) == 2
