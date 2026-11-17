@@ -64,6 +64,26 @@ def test_due_but_within_grace_skips_waiting_in_both(  # type: ignore[no-untyped-
     assert {s for i, s in by.items() if i != "SPY"} == {comp_other}
 
 
+@pytest.mark.parametrize(
+    ("offset_s", "fresh", "comp_missing"),
+    [
+        (-1, S.SKIP, S.SKIP),  # 1 s before due + grace
+        (0, S.SKIP, S.SKIP),  # exactly grace late: grace is inclusive (base.within_grace)
+        (1, S.WARN, S.FAIL),  # 1 s after: late for both
+    ],
+)
+def test_grace_boundary_is_the_same_for_freshness_and_completeness(  # type: ignore[no-untyped-def]
+    store, config, offset_s, fresh, comp_missing
+) -> None:
+    now = ET_NOW(WED, "21:00") + timedelta(seconds=offset_s)  # stooq due 20:00 + 60 min grace
+    ctx = ctx_at(config, store, now)
+    duck = duck_for(store, config)
+    f = find(FreshnessCheck().evaluate(ctx, duck), source="stooq")
+    c = find(CompletenessCheck().evaluate(ctx, duck), source="stooq")
+    assert [r.status for r in f] == [fresh]
+    assert {r.status for r in c} == {comp_missing}
+
+
 # -- bullet 4: FRED oil on days SIFMA is open but the oil market is closed --------------------
 
 
@@ -142,6 +162,7 @@ def test_anomaly_scores_only_the_expected_data_day(  # type: ignore[no-untyped-d
 # -- bullet 3: Yahoo and Twelve Data completeness ----------------------------------------------
 
 DAY = date(2026, 11, 17)  # ordinary Tuesday; session 14:30-21:00 UTC
+SUMMER = date(2026, 7, 14)  # Tuesday under CEST (UTC+2): the fix window centres on 12:15 UTC
 EARLY = date(2026, 11, 27)  # day after Thanksgiving: XNYS closes 13:00 ET = 18:00 UTC
 
 
@@ -212,6 +233,10 @@ def test_twelvedata_quote_completeness_per_pair(store, config) -> None:  # type:
         (DAY, datetime(2026, 11, 17, 13, 5, tzinfo=UTC), 20, S.WARN),  # 95.2%
         (DAY, datetime(2026, 11, 17, 13, 5, tzinfo=UTC), 19, S.FAIL),  # 90.5%
         (EARLY, datetime(2026, 11, 27, 13, 5, tzinfo=UTC), 21, S.PASS),  # XNYS early close: n/a
+        # summer: 14:15 CEST = 12:15 UTC, so a fixed UTC+1 offset would look in the wrong hour
+        (SUMMER, datetime(2026, 7, 14, 12, 5, tzinfo=UTC), 21, S.PASS),
+        (SUMMER, datetime(2026, 7, 14, 12, 5, tzinfo=UTC), 20, S.WARN),
+        (SUMMER, datetime(2026, 7, 14, 13, 5, tzinfo=UTC), 21, S.FAIL),  # winter hour: wrong
     ],
 )
 def test_twelvedata_fix_window_completeness(store, config, day, fix_utc, bars, status) -> None:  # type: ignore[no-untyped-def]
@@ -242,3 +267,32 @@ def test_twelvedata_fix_day(store, config, target, hhmm, fix_day) -> None:  # ty
     res = CompletenessCheck().evaluate(ctx, duck_for(store, config))
     got = {r.details["fix_day"] for r in find(res, source="twelvedata", dataset="fx_series_1m")}
     assert got == {fix_day}
+
+
+@pytest.mark.parametrize(
+    ("target", "now", "fix_day"),
+    [
+        # window = fix +/- 10 min, closed 11 min after the fix (bar starts are inclusive)
+        (DAY, datetime(2026, 11, 17, 13, 26, tzinfo=UTC), "2026-11-17"),  # winter: 13:15 + 11
+        (DAY, datetime(2026, 11, 17, 13, 25, 59, tzinfo=UTC), "2026-11-16"),
+        (SUMMER, datetime(2026, 7, 14, 12, 26, tzinfo=UTC), "2026-07-14"),  # summer: 12:15 + 11
+        (SUMMER, datetime(2026, 7, 14, 12, 25, 59, tzinfo=UTC), "2026-07-13"),
+    ],
+)
+def test_twelvedata_fix_day_boundary_is_dst_aware(store, config, target, now, fix_day) -> None:  # type: ignore[no-untyped-def]
+    ctx = ctx_at(config, store, now, target=target)
+    res = CompletenessCheck().evaluate(ctx, duck_for(store, config))
+    got = {r.details["fix_day"] for r in find(res, source="twelvedata", dataset="fx_series_1m")}
+    assert got == {fix_day}
+
+
+@pytest.mark.parametrize("job", [JobKind.INTRADAY, JobKind.MORNING])
+def test_twelvedata_fix_window_only_judged_for_the_eod_job(store, config, job) -> None:  # type: ignore[no-untyped-def]
+    ctx = ctx_at(config, store, ET_NOW(WED, "17:30"), job=job)
+    res = find(
+        CompletenessCheck().evaluate(ctx, duck_for(store, config)),
+        source="twelvedata",
+        dataset="fx_series_1m",
+    )
+    assert {r.status for r in res} == {S.SKIP}
+    assert {r.details["reason"] for r in res} == {"fx_series_1m is fetched by the eod job only"}

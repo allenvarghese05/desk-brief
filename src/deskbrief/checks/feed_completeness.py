@@ -7,8 +7,9 @@ Each rule judges the last finished session (P-009), like the Alpaca minute-bar r
 * ``yahoo/history``: one ``close`` bar for the session day. Missing -> fail.
 * ``yahoo/quote`` and ``twelvedata/fx_quote``: at least one tick inside the XNYS session (the
   intraday job only runs then; an early close ends the window early). None -> fail.
-* ``twelvedata/fx_series_1m``: the ``2 * FIX_WINDOW_MIN + 1`` bars around the ECB fix on the
-  last TARGET day whose window has closed; 100% pass, [95%, 100%) warn, below fail.
+* ``twelvedata/fx_series_1m`` (eod job only, like its fetch; other jobs ``skip``): the
+  ``2 * FIX_WINDOW_MIN + 1`` bars around the ECB fix on the last TARGET day whose window has
+  closed; 100% pass, [95%, 100%) warn, below fail.
 * Instruments with ``asset_class == "index"`` (Nikkei, FTSE, DAX) trade on exchanges whose
   calendars are not modelled, so they are ``skip`` with a reason, never ``fail``.
 """
@@ -31,7 +32,7 @@ from deskbrief.checks.base import (
     records,
 )
 from deskbrief.config import Feed, Instrument
-from deskbrief.models import DQResult, DQStatus, RunContext
+from deskbrief.models import DQResult, DQStatus, JobKind, RunContext
 from deskbrief.sources.twelvedata import FIX_WINDOW_MIN
 from deskbrief.timeutil import CET, local_to_utc
 
@@ -127,12 +128,18 @@ def _fix_day(ctx: RunContext) -> date:
         if closed_reason("TARGET", day) is None and window_end <= ctx.now_utc:
             return day
         day = prev_business_day("TARGET", day)
-        if day < ctx.target_date - timedelta(days=10):  # pragma: no cover - defensive
-            return day
+        if day < ctx.target_date - timedelta(days=10):
+            # Unreachable on real input: TARGET closures last at most a few days.
+            raise RuntimeError(f"no closed ECB fix window within 10 days of {ctx.target_date}")
 
 
 def _fx_series(ctx: RunContext, check: Check, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
     feeds = _feeds(ctx, "twelvedata", "fx_series_1m")
+    if ctx.job is not JobKind.EOD:  # TwelveDataSource.plan fetches fx_series_1m in eod only
+        return [
+            _skip(ctx, check, inst, feed, "fx_series_1m is fetched by the eod job only")
+            for inst, feed in feeds
+        ]
     day = _fix_day(ctx)
     fix = local_to_utc(day, ctx.config.crosschecks.fx_vs_ecb.fix_time_cet, CET)
     first, end = (

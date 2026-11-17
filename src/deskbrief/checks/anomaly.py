@@ -11,7 +11,9 @@ older than :func:`expected_last_day` (the latest business day on the dataset's c
 the cutoff, less ``lag_bdays``; series with no schedule use XNYS). A series that stopped updating
 gives ``skip`` ("stale series") instead of re-reporting its old move. The expected day steps back
 over days the series may legitimately lack (P-011: a SIFMA recommended early close for SIFMA
-datasets; oil-market closures for FRED oil).
+datasets; oil-market closures for FRED oil). The XNYS fallback also covers index history on
+foreign exchanges (Nikkei, FTSE, DAX): on a holiday there but not in the US their newest bar is
+older than the XNYS expectation, giving a harmless "stale series" skip, never a fail.
 
 P-009: reads ``obs_pit(now)`` and ignores ET dates on or after today (the unfinished day) and
 after the target date, so a run is reproducible.

@@ -19,7 +19,6 @@ run. The same ``finished_session_date`` rule applies to the Yahoo and Twelve Dat
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Any
 
 import duckdb
@@ -35,6 +34,7 @@ from deskbrief.checks.base import (
     query,
     records,
     register,
+    within_grace,
 )
 from deskbrief.checks.feed_completeness import evaluate_feeds
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
@@ -61,9 +61,7 @@ class CompletenessCheck:
         out: list[DQResult] = []
         for sched in ctx.config.datasets:
             exp = expected_for(ctx, sched)
-            waiting = exp.skip_reason is None and ctx.now_utc < exp.due_utc + timedelta(
-                minutes=exp.grace_minutes
-            )
+            waiting = exp.skip_reason is None and within_grace(ctx, exp)
             feeds = [
                 (inst, feed)
                 for inst, feed in ctx.config.feeds_for(sched.source, sched.dataset)

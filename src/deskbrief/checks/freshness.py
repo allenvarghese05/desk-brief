@@ -24,6 +24,7 @@ from deskbrief.checks.base import (
     minutes_late,
     query,
     register,
+    within_grace,
 )
 from deskbrief.config import DatasetSchedule
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
@@ -77,7 +78,7 @@ class FreshnessCheck:
             else:
                 late = minutes_late(ctx, exp)
                 status = late_status(late, exp.grace_minutes)
-                if status is DQStatus.PASS:  # due but within grace: same answer as completeness
+                if within_grace(ctx, exp):  # due but within grace: same answer as completeness
                     out.append(
                         make_result(
                             ctx, self, DQStatus.SKIP, source=sched.source, observed=late,

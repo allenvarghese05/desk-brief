@@ -158,6 +158,16 @@ def minutes_late(ctx: RunContext, exp: Expected) -> float:
     return max(0.0, (ctx.now_utc - exp.due_utc).total_seconds() / 60.0)
 
 
+def within_grace(ctx: RunContext, exp: Expected) -> bool:
+    """True while a due dataset is still inside its grace period.
+
+    One convention for freshness and completeness: the grace is inclusive, so a dataset exactly
+    ``grace_minutes`` late is still "waiting"; the first instant after is late (warn/fail). This
+    matches the freshness ladder (warn only when ``late > grace``).
+    """
+    return minutes_late(ctx, exp) <= exp.grace_minutes
+
+
 def finished_session_date(ctx: RunContext, cal: CalendarName = "XNYS") -> date:
     """Latest ET date whose data is complete (P-009): the target, or the business day before
     it when the target is still today (or later) in ET."""
