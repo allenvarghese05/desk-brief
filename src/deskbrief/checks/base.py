@@ -8,6 +8,8 @@ Which view each check reads (P-009: reproducible values come from ``obs_pit``, n
 
 =============  =======================================================================
 freshness      ``obs_pit(now)``; gated by the dataset's due time instead of the date rule
+freshness_      ``obs_pit(now)`` ``interval = 'tick'`` rows per ``Config.intraday`` entry; intraday
+intraday       job only, inside the session and one grace after the open
 completeness   ``obs_pit(now)``; daily feeds gated by due time + grace, minute bars, Yahoo and
                Twelve Data feeds use the last finished session (``feed_completeness``)
 calendar       calendars only, no data read
