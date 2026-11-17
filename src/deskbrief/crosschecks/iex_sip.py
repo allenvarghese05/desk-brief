@@ -5,6 +5,10 @@ only for those symbols, in ``eod``/``backfill``). Evaluated on the last complete
 before today (P-009, reading ``obs_pit``); the session is ``session_bounds_utc(ref)`` so early
 closes count only minutes up to the early close (P-011).
 
+The two sides are not the same market: IEX is a single venue, SIP is the consolidated tape of
+all venues. A gap therefore mixes data errors with real venue differences, and the details label
+the sides (``left_label``, ``right_label``) so no consumer presents IEX as the market price.
+
 Bars pair on their start minute (``as_of`` = bar start, P-006). A minute present on only one
 side, or with no bar at all, is excluded from the statistics and counted in the details
 (``n_missing_iex``, ``n_missing_sip``, ``n_missing_both``); a zero SIP close cannot be a
@@ -40,6 +44,8 @@ from deskbrief.crosschecks.base import (
 from deskbrief.models import DQStatus, RunContext, XResult
 
 NAME = "iex_vs_sip"
+IEX_LABEL = "IEX 1m close (single venue)"
+SIP_LABEL = "SIP 1m close (consolidated, all venues)"
 
 
 class IexVsSip:
@@ -77,6 +83,8 @@ class IexVsSip:
                 "ref_date": ref.isoformat(),
                 "left": _side(sym, "iex_bars_1m", cfg.instrument(sym).unit).detail(),
                 "right": _side(sym, "sip_bars_1m", cfg.instrument(sym).unit).detail(),
+                "left_label": IEX_LABEL,
+                "right_label": SIP_LABEL,
                 "basis": "relative",
                 "session_open_utc": open_utc.isoformat(),
                 "session_close_utc": close_utc.isoformat(),
@@ -87,7 +95,10 @@ class IexVsSip:
                 "n_zero_reference": len(both) - len(usable),
                 "n_missing_sip": len(iex.keys() - sip.keys()),
                 "n_missing_iex": len(sip.keys() - iex.keys()),
-                "n_missing_both": n_session - len(iex.keys() | sip.keys()),
+                # Minute-grid estimate: assumes every bar starts on a whole minute inside the
+                # session (query_obs bounds them to it). An off-grid start would make the union
+                # exceed n_session, so clamp rather than report a negative count.
+                "n_missing_both": max(0, n_session - len(iex.keys() | sip.keys())),
                 "max_fail_minutes_pct": tol.max_fail_minutes_pct,
             }
             diff: float | None = None
