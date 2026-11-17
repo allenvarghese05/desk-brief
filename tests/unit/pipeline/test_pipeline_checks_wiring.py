@@ -68,9 +68,8 @@ def test_check_written_rows_are_counted_in_the_runs_row(tmp_path: Path) -> None:
     assert m.n_dq_warn == (dq["status"] == "warn").sum() == run["n_dq_warn"]
     runner_only = dq[dq["check_name"].str.startswith("runner.")]
     assert m.n_dq_fail + m.n_dq_warn > 0
-    assert len(dq) > len(
-        runner_only
-    )  # check rows are in the file and counted, not only the runner's
+    # check rows are in the file and counted, not only the runner's
+    assert len(dq) > len(runner_only)
 
 
 def test_rerun_adds_no_duplicate_check_rows(tmp_path: Path) -> None:
@@ -88,17 +87,22 @@ def test_rerun_adds_no_duplicate_check_rows(tmp_path: Path) -> None:
 
 
 def test_revisions_partition_by_et_date_of_detected_at(tmp_path: Path) -> None:
+    """Two detections on different ET days; the first is 22:00 ET on 11-16 = 03:00 UTC on 11-17,
+    so a UTC-date rule would put both rows in the 11-17 partition."""
     env = make_env(tmp_path, [FakeSource("stooq")])
-    detected = datetime(2026, 11, 16, 11, 21, tzinfo=UTC)
+    detections = (
+        datetime(2026, 11, 17, 3, 0, tzinfo=UTC),
+        datetime(2026, 11, 17, 15, 0, tzinfo=UTC),
+    )
     rev = to_frame(
         "revisions",
         [
             {
                 "instrument_id": "SPY", "source": "stooq", "dataset": "daily", "field": "close",
                 "interval": "1d", "as_of": FRI_CLOSE[0], "old_value": 1.0, "new_value": 2.0,
-                "old_fetch_id": "a", "new_fetch_id": "b", "detected_at": detected,
-                "run_id": "r",
+                "old_fetch_id": "a", "new_fetch_id": "b", "detected_at": at, "run_id": "r",
             }
+            for at in detections
         ],
     )  # fmt: skip
 
@@ -107,8 +111,9 @@ def test_revisions_partition_by_et_date_of_detected_at(tmp_path: Path) -> None:
 
     env.steps_for = lambda job: JobSteps(run_checks=hook)
     assert go(env).status is RunStatus.OK
-    assert len(files(env, "revisions", MONDAY)) == 1
-    assert len(rows(env, "revisions")) == 1
+    assert len(files(env, "revisions", MONDAY)) == 1  # 22:00 ET on the 16th
+    assert len(files(env, "revisions", date(2026, 11, 17))) == 1
+    assert len(rows(env, "revisions")) == 2
 
 
 def test_a_crashing_checks_hook_still_flushes_the_runner_rows_once(tmp_path: Path) -> None:
