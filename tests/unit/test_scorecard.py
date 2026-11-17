@@ -14,6 +14,7 @@ import pytest
 from t23_synth import NOON, D, ctx_for, fetch, put, run_row, xcheck
 
 from deskbrief import scorecard
+from deskbrief.models import JobKind
 from deskbrief.store.datasets import Datasets
 from deskbrief.store.duck import connect
 from deskbrief.store.local import LocalBackend
@@ -154,3 +155,25 @@ def test_a_full_eod_rerun_replaces_every_eod_source(tmp_path: Path) -> None:
     assert df.loc["stooq"]["median_latency_ms"] == 800
     assert df.loc["yahoo"]["fetches"] == 2  # morning's run plus RUNE2; RUNE is gone
     assert df.loc["yahoo"]["median_latency_ms"] == 500  # median(100, 900)
+
+
+def test_every_intraday_poll_counts_but_other_jobs_keep_only_the_latest(tmp_path: Path) -> None:
+    store = LocalBackend(tmp_path / "data")
+    for n, ms in enumerate((100, 300, 500), start=1):  # three 15-minute polls, distinct runs
+        run_id = f"RUNI{n}"
+        row = run_row(run_id, D, NOON + timedelta(minutes=15 * n), "intraday")
+        put(store, "runs", [row], run_id, D)
+        put(store, "source_log", [fetch(run_id, "alpaca", "ok", ms, n)], run_id, D)
+    df = card(store).set_index("source")
+    assert df.loc["alpaca"]["fetches"] == 3
+    assert df.loc["alpaca"]["median_latency_ms"] == 300  # pooled over the three polls
+
+
+def test_a_morning_run_rescores_a_day_after_its_eod_with_its_own_fetches(tmp_path: Path) -> None:
+    store = LocalBackend(tmp_path / "data")
+    put(store, "runs", [run_row("RUNE", D, NOON)], "RUNE", D)  # D's eod, long finished
+    put(store, "source_log", [fetch("RUNE", "stooq", "ok", 400, 1)], "RUNE", D)
+    morning = ctx_for(store, "RUNM", D, JobKind.MORNING)  # next morning, no runs row yet
+    put(store, "source_log", [fetch("RUNM", "ecb", "ok", 50, 2)], "RUNM", D)
+    assert scorecard.write_scorecard(morning) is not None
+    assert set(Datasets(store).read("scorecard_daily")["source"]) == {"ecb", "stooq"}

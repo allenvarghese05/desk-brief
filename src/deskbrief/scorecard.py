@@ -4,17 +4,20 @@ Built from ``source_log`` and the cross-check results, on a DuckDB connection fr
 ``store.duck.connect``. Re-runs of a date keep every run's rows (P-008), so counting every run
 would score a re-run as extra fetches. The rule, for each ``(target_date, source)``:
 
-* take the **latest run of each job** (newest ``started_at``) that fetched that source on that
-  date; within one job and date the newest run wins, so a re-run replaces the earlier one;
-* **combine across jobs**: a source fetched by morning, intraday and eod is scored on all three
-  latest runs, and one fetched only by morning is still scored.
+* for ``morning``, ``eod`` and ``backfill``, take the **latest run of that job** (newest
+  ``started_at``) that fetched that source on that date; the newest run wins, so a re-run replaces
+  the earlier one;
+* for ``intraday``, take **every run** of that job and date: it polls every 15 minutes and each
+  poll is a distinct scheduled run, not a re-run, so all of them are pooled;
+* **combine across jobs**: a source fetched by morning, intraday and eod is scored on all of
+  those runs, and one fetched only by morning is still scored.
 
 A partial re-run (one source) therefore replaces only that source for its job and date; the other
 sources keep the numbers of their earlier run. The date scored is ``target_date`` (P-006).
 
 Per source, over the chosen runs' fetch attempts (``fetches`` and ``n_crosschecks`` are sums across
-the chosen runs, and the rates and percentiles are pooled over all of those attempts, not averaged
-per job):
+the chosen runs, intraday polls included; the rates and percentiles are pooled over all of those
+attempts, not averaged per job):
 
 * ``skipped_calendar`` rows are not attempts and are left out; a source with no attempt gets no row.
 * ``ok_rate`` share with status ``ok`` or ``empty`` (the ``query`` rule); ``error_rate`` share with
@@ -48,7 +51,7 @@ WITH r AS (
   UNION ALL SELECT $2, $3, $4
 ), pick AS (
   SELECT l.*, r.job FROM source_log l JOIN r USING (run_id) WHERE l.status <> 'skipped_calendar'
-  QUALIFY dense_rank() OVER (
+  QUALIFY r.job = 'intraday' OR dense_rank() OVER (
     PARTITION BY r.job, l.source ORDER BY r.started_at DESC, l.run_id DESC) = 1
 ), f AS (
   SELECT source, count(*) AS n,

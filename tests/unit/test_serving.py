@@ -101,14 +101,24 @@ def test_crosschecks_are_labelled_by_ref_date_and_limited_to_seven_days(tmp_path
     assert xc["target_date"].iloc[0].isoformat() == MON.isoformat()  # the run's date
 
 
-def test_eod_scores_before_serving_other_jobs_do_not(tmp_path: Path) -> None:
+def test_every_job_rescores_its_target_date_before_serving(tmp_path: Path) -> None:
     w = build(tmp_path)
-    serving.serving_step(ctx(w, JobKind.MORNING))
-    assert not w.store.exists("derived/scorecard_daily/date=2026-11-16.parquet")
-    assert len(frame(w, "scorecard_30d.parquet")) == 0
-    serving.serving_step(ctx(w, JobKind.EOD))
+    serving.serving_step(ctx(w, JobKind.MORNING))  # the morning job also writes the scorecard
     assert w.store.exists("derived/scorecard_daily/date=2026-11-16.parquet")
     assert frame(w, "scorecard_30d.parquet")["source"].tolist() == ["yahoo"]
+    serving.serving_step(ctx(w, JobKind.EOD))  # idempotent overwrite, no KeyExistsError
+    assert len(frame(w, "scorecard_30d.parquet")) == 1
+
+
+def test_a_backfill_of_an_old_date_still_serves_todays_window(tmp_path: Path) -> None:
+    w = build(tmp_path)
+    old = replace(ctx(w, JobKind.BACKFILL), target_date=MON - timedelta(days=20))
+    serving.serving_step(old)
+    health = json.loads(w.store.get_bytes("serving/health.json"))
+    assert health["target_date"] == "2026-11-16"  # today's ET date, not the backfilled date
+    assert len(frame(w, "runs_14d.parquet")) == 1  # today's run is still in the window
+    assert len(frame(w, "crosschecks_7d.parquet")) == 1
+    assert health["n_checks"] >= 2
 
 
 def test_a_failing_scorecard_does_not_stop_serving_but_is_reported(

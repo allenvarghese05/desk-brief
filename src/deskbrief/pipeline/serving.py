@@ -2,26 +2,30 @@
 
 The dashboard (T34/T35) reads only these small files; they are rebuilt from the whole store at the
 end of each job (overwritten, never appended), so they always describe the newest state of every
-source, whatever job ran last. Written under ``serving/``:
+source, whatever job ran last. Every window and summary is anchored on **today's ET date**
+(``et_date(ctx.now_utc)``), never on ``ctx.target_date``: a backfill of a date 20 days back must
+not move the dashboard's view. Written under ``serving/``:
 
 ``latest_snapshot.parquet``  latest value per instrument at ``ctx.now_utc``
                              (``query.latest_snapshot``):
                              ``tier``, ``as_of`` (the observation instant), ``source``, ``field``,
                              ``unit``, ``is_proxy``, lineage ids, plus ``label`` (P-009 wording),
                              ``is_headline`` and ``snapshot_at``
-``health.json``              ``query.health_summary`` for ``target_date`` plus ``headline_missing``:
+``health.json``              ``query.health_summary`` for today plus ``headline_missing``:
                              headline instruments with no value (named, never silently dropped)
 ``scorecard_30d.parquet``    ``scorecard_daily`` rows of the last 30 days
-``crosschecks_7d.parquet``   cross-check rows of the last 7 ``target_date``s, latest evaluation of
+``crosschecks_7d.parquet``   cross-check rows of the last 7 days, latest evaluation of
                              each check, with ``ref_date`` (``details.ref_date``): the date compared
 ``series_30d.parquet``       one official daily value per instrument and ET date (``series_all``)
 ``runs_14d.parquet``         ``runs`` of the last 14 days (the run in progress is not in it yet:
                              the runner writes its row after the hooks)
 
-:func:`serving_step` is the ``build_serving`` hook. At ``eod`` it first writes the day's scorecard
-(spec §5.4: "scorecard → compaction → serving"; compaction is card T23B and goes between the
-two). Each part is isolated: a failing one is reported by raising after the others ran, so the
-run is ``degraded`` and the dashboard still gets fresh files.
+:func:`serving_step` is the ``build_serving`` hook. In every job it first (re)writes the
+scorecard of ``ctx.target_date`` (an idempotent overwrite of that date's partition; spec §5.4:
+"scorecard → compaction → serving", compaction being card T23B), so a morning run rescores the
+day it targets including its own fetches. Each part is isolated: a failing one is reported by
+raising after the others ran, so the run is ``degraded`` and the dashboard still gets fresh
+files.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from deskbrief.logging import redact
-from deskbrief.models import JobKind, RunContext
+from deskbrief.models import RunContext
 from deskbrief.query import ValueRow, health_summary, latest_snapshot, series_all, value_label
 from deskbrief.schemas import columns
 from deskbrief.scorecard import write_scorecard
@@ -127,7 +131,7 @@ def _snapshot_table(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> tuple[p
 
 
 def _health(duck: duckdb.DuckDBPyConnection, ctx: RunContext, missing: list[str]) -> bytes:
-    summary = health_summary(duck, ctx.target_date)
+    summary = health_summary(duck, et_date(ctx.now_utc))
     body = dataclasses.asdict(summary) | {
         "n_checks": summary.n_checks,
         "headline_missing": missing,
@@ -139,6 +143,7 @@ def _health(duck: duckdb.DuckDBPyConnection, ctx: RunContext, missing: list[str]
 
 
 def _crosschecks(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> pa.Table:
+    today = et_date(ctx.now_utc)
     cols = ", ".join(f'"{c}"' for c in columns("crosscheck_results"))
     table = _sql_table(
         duck,
@@ -146,7 +151,7 @@ def _crosschecks(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> pa.Table:
         "QUALIFY row_number() OVER (PARTITION BY check_name, coalesce(group_id, ''), "
         "left_instrument, left_source, right_instrument, right_source, target_date "
         "ORDER BY at_time DESC, result_id DESC) = 1 ORDER BY target_date, check_name",
-        [ctx.target_date - timedelta(days=CROSSCHECK_DAYS), ctx.target_date],
+        [today - timedelta(days=CROSSCHECK_DAYS), today],
         arrow_schema("crosscheck_results"),
     )
     refs = pa.array([_ref_date(d) for d in table["details_json"].to_pylist()], pa.date32())
@@ -155,11 +160,12 @@ def _crosschecks(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> pa.Table:
 
 def _windowed(duck: duckdb.DuckDBPyConnection, ctx: RunContext, table: str, view: str, col: str,
               days: int) -> pa.Table:  # fmt: skip
+    today = et_date(ctx.now_utc)
     cols = ", ".join(f'"{c}"' for c in columns(table))
     return _sql_table(
         duck,
         f"SELECT {cols} FROM {view} WHERE {col} > ? AND {col} <= ? ORDER BY {col}",  # noqa: S608
-        [ctx.target_date - timedelta(days=days), ctx.target_date],
+        [today - timedelta(days=days), today],
         arrow_schema(table),
     )
 
@@ -199,10 +205,7 @@ def build_serving_files(ctx: RunContext) -> list[str]:
 def serving_step(ctx: RunContext) -> None:
     """``build_serving`` hook: (eod) the day's scorecard, then every serving file."""
     parts: list[tuple[str, Callable[[], object]]] = []
-    if ctx.job is JobKind.EOD:
-        parts += [
-            ("scorecard", lambda: write_scorecard(ctx)),
-        ]
+    parts.append(("scorecard", lambda: write_scorecard(ctx)))
     parts.append(("serving", lambda: build_serving_files(ctx)))
     errors = []
     for name, part in parts:
