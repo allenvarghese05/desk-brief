@@ -74,7 +74,8 @@ from deskbrief.timeutil import Clock, et_date, utc_now
 #: A failed flush of one of these loses data (raw may still hold it): the run is ``failed`` so
 #: catch-up treats the date as missed (spec §2.4 item 5). A lost dq_results partition degrades.
 _DATA_TABLES = frozenset({"observations", "source_log", "quarantine"})
-#: flushed after the checks hook, so the runner's own DQ rows and the hook's rows share one file
+#: flushed right after the checks hook (before serving/report/notify), so the runner's own DQ
+#: rows and the hook's rows share one file and later hooks can read them
 _CHECK_FLUSH = frozenset({"dq_results", "revisions", "crosscheck_results"})
 _FAILED_FETCH = frozenset(
     {FetchStatus.ERROR, FetchStatus.RATE_LIMITED, FetchStatus.BUDGET_EXHAUSTED}
@@ -144,15 +145,17 @@ def execute_run(env: RunEnv, ctx: RunContext) -> RunManifest:
     buf = RunBuffer()
     datasets = Datasets(env.store)
     degraded: list[str] = []
+    check_flush = _CheckFlush()
     try:
         try:
             try:
                 _fetch_all(env, ctx, buf, manifest)
             finally:
                 _flush(buf, datasets, ctx, manifest, _DATA_TABLES)
-            degraded += _run_steps(env, ctx, manifest, buf)
+            degraded += _run_steps(env, ctx, manifest, buf, datasets, check_flush)
         finally:  # the one dq_results/revisions/crosscheck_results append of the run (P-008)
-            _flush(buf, datasets, ctx, manifest, _CHECK_FLUSH)
+            if not check_flush.done:  # not yet written: _run_steps raised before its flush
+                _flush(buf, datasets, ctx, manifest, _CHECK_FLUSH)
         manifest.status = _decide(env, manifest, degraded)
     finally:
         manifest.finished_at = env.clock()
@@ -412,7 +415,22 @@ def _flush(
     manifest.notes.extend(f"flush failed: {e}" for e in report.errors)
 
 
-def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest, buf: RunBuffer) -> list[str]:
+@dataclass
+class _CheckFlush:
+    """Whether the check tables were written already: they are flushed once, right after the
+    checks hook, so serving/report/notify can read this run's results (P-008: never twice)."""
+
+    done: bool = False
+
+
+def _run_steps(
+    env: RunEnv,
+    ctx: RunContext,
+    manifest: RunManifest,
+    buf: RunBuffer,
+    datasets: Datasets,
+    check_flush: _CheckFlush,
+) -> list[str]:
     """Checks, serving, report, notify. Each is isolated; failures degrade the run."""
     steps = env.steps_for(ctx.job)
     failures: list[str] = []
@@ -427,10 +445,12 @@ def _run_steps(env: RunEnv, ctx: RunContext, manifest: RunManifest, buf: RunBuff
             return None
 
     outputs = call("run_checks", steps.run_checks)
-    if isinstance(outputs, CheckOutputs):  # buffered, flushed once after the hooks
+    if isinstance(outputs, CheckOutputs):  # buffered, flushed once right after
         buf.add_frame("dq_results", outputs.dq_results)
         buf.add_frame("revisions", outputs.revisions)
         buf.add_frame("crosscheck_results", outputs.crosscheck_results)
+    check_flush.done = True  # set first: a flush never raises and must never run a second time
+    _flush(buf, datasets, ctx, manifest, _CHECK_FLUSH)
     call("build_serving", steps.build_serving)
     key = call("build_report", steps.build_report)
     if isinstance(key, str):
