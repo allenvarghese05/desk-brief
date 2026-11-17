@@ -8,12 +8,13 @@ Which view each check reads (P-009: reproducible values come from ``obs_pit``, n
 
 =============  =======================================================================
 freshness      ``obs_pit(now)``; gated by the dataset's due time instead of the date rule
-completeness   ``obs_pit(now)``; daily feeds gated by due time + grace, minute bars use
-               the last finished ET session
+completeness   ``obs_pit(now)``; daily feeds gated by due time + grace, minute bars, Yahoo and
+               Twelve Data feeds use the last finished session (``feed_completeness``)
 calendar       calendars only, no data read
 validity       ``obs_pit(now)`` restricted to this run's rows
 uniqueness     ``obs_all`` (the dedupe views would hide duplicates) for this run's fetches
-anomaly        ``obs_pit(now)``, ET dates strictly before today and not after the target
+anomaly        ``obs_pit(now)``, ET dates strictly before today and not after the target;
+               skipped when the newest day is older than the expected data day
 revision       ``obs_all`` up to ``now`` (needs every version of a key)
 =============  =======================================================================
 """
@@ -119,6 +120,21 @@ def closed_reason(cal: CalendarName, d: date) -> str | None:
     return "weekend" if d.weekday() >= 5 else "holiday"
 
 
+#: Calendars that must all be open for a FRED oil series to have a value. SIFMA is open on days
+#: the oil market is shut (Good Friday), so the dataset calendar alone over-expects. XNYS stands
+#: in for NYMEX (WTI); Brent also needs TARGET (Easter Monday, 1 May, 26 Dec). UK bank holidays
+#: beyond those are not modelled (approximation; see docs/agent-log/T07.md).
+OIL_CALENDARS: dict[str, tuple[CalendarName, ...]] = {
+    "DCOILWTICO": ("XNYS",),
+    "DCOILBRENTEU": ("XNYS", "TARGET"),
+}
+
+
+def market_closed(symbol: str, d: date) -> bool:
+    """True when the oil market behind a FRED oil series is shut on ``d`` (else False)."""
+    return any(closed_reason(cal, d) for cal in OIL_CALENDARS.get(symbol, ()))
+
+
 def expected_for(ctx: RunContext, sched: DatasetSchedule) -> Expected:
     """Publication day, data day and due time of ``sched`` for this run.
 
@@ -140,6 +156,16 @@ def expected_for(ctx: RunContext, sched: DatasetSchedule) -> Expected:
 
 def minutes_late(ctx: RunContext, exp: Expected) -> float:
     return max(0.0, (ctx.now_utc - exp.due_utc).total_seconds() / 60.0)
+
+
+def within_grace(ctx: RunContext, exp: Expected) -> bool:
+    """True while a due dataset is still inside its grace period.
+
+    One convention for freshness and completeness: the grace is inclusive, so a dataset exactly
+    ``grace_minutes`` late is still "waiting"; the first instant after is late (warn/fail). This
+    matches the freshness ladder (warn only when ``late > grace``).
+    """
+    return minutes_late(ctx, exp) <= exp.grace_minutes
 
 
 def finished_session_date(ctx: RunContext, cal: CalendarName = "XNYS") -> date:
