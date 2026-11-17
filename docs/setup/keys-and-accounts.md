@@ -45,6 +45,7 @@ Time needed: ~30–40 minutes. Do them in this order; 1–4 unblock the first sc
 1. Google Account → **Security** → turn on **2-Step Verification** (required for app passwords).
 2. Search "App passwords" in the account settings → create one named `deskbrief` → copy the 16-character password (no spaces) → `SMTP_APP_PASSWORD`.
 3. `SMTP_USER` = your Gmail address. `REPORT_RECIPIENTS` = comma-separated list (start with just yourself).
+4. Optional: `SMTP_HOST` and `SMTP_PORT` (default `smtp.gmail.com` and `465`, implicit TLS; any other port uses STARTTLS). Leave them unset for Gmail.
 
 ---
 
