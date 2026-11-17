@@ -367,7 +367,7 @@ def test_only_a_tick_at_the_close_is_skip_with_close_reason(
     put(store, config, [yahoo_tick("SPY", "SPY", CLOSE_FRI, 150.0), sip_bar("SPY", MIN, 100.0)])
     r = run(store, config)["SPY"]
     assert r.status is DQStatus.SKIP
-    assert "before the session close" in r.details["reason"]
+    assert "inside the regular session" in r.details["reason"]
     assert r.left_value is None
 
 
@@ -390,20 +390,42 @@ def test_early_close_tick_exactly_at_13_00_et_is_excluded(
     assert r.details["session_close_utc"] == "2026-11-27T18:00:00+00:00"
 
 
-def test_pre_market_ticks_are_ignored(store: LocalBackend, config: Config) -> None:
+def test_pre_market_tick_is_not_picked_when_it_is_the_only_candidate(
+    store: LocalBackend, config: Config
+) -> None:
+    # Pre-market and after-close ticks, none in-session. Without the open bound the pre-market
+    # tick (with a matching bar) would be paired and pass; it must be skipped instead.
     pre = datetime(2026, 11, 13, 13, 0, 5, tzinfo=UTC)  # 08:00 ET
+    after = datetime(2026, 11, 13, 21, 5, tzinfo=UTC)
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", pre, 100.0),
+            yahoo_tick("SPY", "SPY", after, 150.0),
+            sip_bar("SPY", datetime(2026, 11, 13, 13, 0, tzinfo=UTC), 100.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.status is DQStatus.SKIP
+    assert r.left_value is None
+    assert "inside the regular session" in r.details["reason"]
+
+
+def test_tick_exactly_at_the_open_is_in_session(store: LocalBackend, config: Config) -> None:
+    pre = datetime(2026, 11, 13, 13, 0, 5, tzinfo=UTC)
+    open_ = datetime(2026, 11, 13, 14, 30, tzinfo=UTC)
     put(
         store,
         config,
         [
             yahoo_tick("SPY", "SPY", pre, 90.0),
-            sip_bar("SPY", datetime(2026, 11, 13, 13, 0, tzinfo=UTC), 100.0),
-            yahoo_tick("SPY", "SPY", datetime(2026, 11, 13, 14, 30, tzinfo=UTC), 100.0),  # open
-            sip_bar("SPY", datetime(2026, 11, 13, 14, 30, tzinfo=UTC), 100.0),
+            yahoo_tick("SPY", "SPY", open_, 100.0),
+            sip_bar("SPY", open_, 100.0),
         ],
     )
     r = run(store, config)["SPY"]
-    assert r.left_value == pytest.approx(100.0)  # the tick exactly at the open is in-session
+    assert r.left_value == pytest.approx(100.0)
     assert r.status is DQStatus.PASS
 
 

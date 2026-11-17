@@ -109,7 +109,7 @@ class YahooVsPrimary:
                         f"open on {ref}"
                     )
                 else:
-                    skip = f"missing side: no yahoo quote tick before the session close on {ref}"
+                    skip = f"missing side: no yahoo quote tick inside the regular session on {ref}"
             else:
                 by_start = {b.as_of: b for b in bars if b.instrument_id == inst.id}
                 m = _minute(y_obs.as_of)
