@@ -10,6 +10,12 @@ Labelling rules (P-009): a value is labelled by its ``field``/``unit``. "since p
 close" is used only for price-family ``close`` instruments; yields, ECB reference rates and macro
 series say "since previous official value". Nothing outside ``field = close`` is called a close.
 
+Per-row qualifiers (fallback source, IEX single exchange, delayed quote, derived) sit on each
+``Row``, so a value never loses its caveat when a renderer drops the known-limits block.
+Cross-check items are labelled with the data date they compared (``details.ref_date``), never
+the run's ``target_date``. The 2s10s spread is derived from two *official* yields of one ET
+date (never a tick) and says so.
+
 Empty or partial stores are normal (checks and sources land at different times): missing data
 becomes a "data unavailable" row plus a known limit, never an exception. The model is
 deterministic: no wall-clock reads, stable ordering, ``to_json`` output is byte-stable.
@@ -31,6 +37,7 @@ import duckdb
 
 from deskbrief.config import Config, Instrument, config_hash
 from deskbrief.query import (
+    BASIS_OFFICIAL,
     ChangeRow,
     CheckItem,
     HealthSummary,
@@ -41,10 +48,11 @@ from deskbrief.query import (
     lineages,
     measure,
     overnight_changes,
+    series,
     series_all,
     value_label,
 )
-from deskbrief.timeutil import ensure_utc, to_et
+from deskbrief.timeutil import ensure_utc, et_date, to_et
 
 SCHEMA_VERSION = 1
 
@@ -63,7 +71,9 @@ TIER_NAME = {1: "live", 2: "delayed", 3: "official"}
 #: short names for the one-line headline; any other instrument falls back to its id
 SHORT_LABELS = {"ES_F": "S&P fut", "UST_10Y": "10Y", "UST_2Y": "2Y"}
 UNAVAILABLE = "data unavailable"
+SPREAD_ID = "UST_2S10S"
 MIN_MOVES_FOR_Z = 10
+SPREAD_LOOKBACK_DAYS = 14  # enough official days to find the latest date both legs share
 
 _MINUS = "−"
 _UNIT_SUFFIX = {"pct": "%", "bp": "bp", "pts": " pts", "pp": "pp"}
@@ -95,6 +105,7 @@ class Row:
     tier_glyph: str
     tier_name: str
     change: ChangeRow | None
+    qualifiers: tuple[str, ...] = ()  # per-row caveats: fallback, IEX, delayed, derived
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,7 @@ class Notable:
     kind: str  # move | crosscheck
     text: str
     instrument_id: str | None
+    ref_label: str | None = None  # crosscheck: the data date compared, e.g. "13 Nov"
 
 
 @dataclass(frozen=True)
@@ -168,15 +180,26 @@ class BriefModel:
             c.last.instrument_id: c for c in overnight_changes(duck, report_date, report_time)
         }
         snapshot = tuple(c.last for c in changes.values())  # ordered by instrument_id
+        baselines = tuple(c.previous for c in changes.values() if c.previous is not None)
         enabled = [s for s, st in config.sources.items() if st.enabled]
         summary = health_summary(duck, report_date, expected_sources=enabled)
 
-        rows = {i.id: _row(i, changes.get(i.id), report_date) for i in config.instruments}
+        rows = {
+            i.id: _row(i, changes.get(i.id), report_date, report_time) for i in config.instruments
+        }
+        spread = _spread_row(duck, config, report_time)
         sections = tuple(
-            Section(ac, title, tuple(rows[i.id] for i in config.instruments if i.asset_class == ac))
+            Section(
+                ac,
+                title,
+                tuple(rows[i.id] for i in config.instruments if i.asset_class == ac)
+                + ((spread,) if spread and ac == "rates" else ()),
+            )
             for ac, title in SECTIONS
             if any(i.asset_class == ac for i in config.instruments)
         )
+        if spread:
+            rows[SPREAD_ID] = spread
         headline = _headline(config, rows)
         health = _health(summary)
         return cls(
@@ -190,7 +213,7 @@ class BriefModel:
             notable=_notable(duck, config, list(changes.values()), summary, report_time),
             health=health,
             known_limits=_known_limits(config, rows, snapshot, summary),
-            lineage=lineages(duck, snapshot),
+            lineage=lineages(duck, snapshot) + lineages(duck, baselines, role="baseline"),
         )
 
     # -- serialisation ------------------------------------------------------
@@ -276,7 +299,36 @@ def _short(instrument_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _row(inst: Instrument, change: ChangeRow | None, report_date: date) -> Row:
+def _qualifiers(last: ValueRow, report_time: datetime) -> tuple[str, ...]:
+    """Caveats that belong to this one value (not to the instrument in general)."""
+    out: list[str] = []
+    if last.is_fallback:
+        out.append(f"fallback source: {last.source}")
+    if last.dataset.startswith("iex"):
+        out.append("IEX: single exchange, not the consolidated tape")
+    if last.tier == 2 and last.interval in ("tick", "1m"):
+        minutes = max(0, int((report_time - last.as_of).total_seconds() // 60))
+        out.append(f"delayed quote, {minutes} min old")
+    return tuple(out)
+
+
+def _tail(change: ChangeRow) -> str:
+    if change.status == "ok":
+        return f"{change_text(change)} since {_basis_text(change)}"
+    if change.status == "no_move_yet":
+        return f"no move to report since {change.basis}"
+    if change.previous is not None:  # found, but a percentage of zero is undefined
+        prev = to_et(change.previous.as_of)
+        return (
+            f"change unavailable ({change.basis} of {value_text(change.previous)} on "
+            f"{prev.day} {prev:%b} was found and is zero)"
+        )
+    return f"change unavailable ({change.basis} not found)"
+
+
+def _row(
+    inst: Instrument, change: ChangeRow | None, report_date: date, report_time: datetime
+) -> Row:
     if change is None:
         return Row(
             instrument_id=inst.id,
@@ -300,12 +352,6 @@ def _row(inst: Instrument, change: ChangeRow | None, report_date: date) -> Row:
     label = value_label(last)
     if last.is_proxy and last.proxy_label:
         label = f"{label} — {last.proxy_label}"
-    if change.status == "ok":
-        tail = f"{change_text(change)} since {_basis_text(change)}"
-    elif change.status == "no_move_yet":
-        tail = f"no move to report since {change.basis}"
-    else:
-        tail = f"change unavailable ({change.basis} not found)"
     return Row(
         instrument_id=last.instrument_id,
         name=last.name,
@@ -316,13 +362,82 @@ def _row(inst: Instrument, change: ChangeRow | None, report_date: date) -> Row:
         available=True,
         value_text=value_text(last),
         change_text=change_text(change),
-        description=f"{label}, {tail}",
+        description=f"{label}, {_tail(change)}",
         basis=change.basis,
         as_of_text=_as_of_text(last, report_date),
         tier=last.tier,
         tier_glyph=TIER_GLYPH.get(last.tier, ""),
         tier_name=TIER_NAME.get(last.tier, ""),
         change=change,
+        qualifiers=_qualifiers(last, report_time),
+    )
+
+
+def _official_yields(duck: duckdb.DuckDBPyConnection, iid: str, at: datetime) -> dict[date, float]:
+    """Official (tier 3) yields by ET date: a tick or a delayed history row is never a leg."""
+    return {
+        et_date(r.as_of): r.value
+        for r in series(duck, iid, SPREAD_LOOKBACK_DAYS, at)
+        if r.tier == 3 and r.field == "yield"
+    }
+
+
+def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -> Row | None:
+    """2s10s in bp from the official 10Y and 2Y yields of one ET date (spec §9.1 sample).
+
+    None when the config has no 10Y/2Y pair. The change compares the latest date both legs
+    share with the one before it; no common date gives a "data unavailable" row.
+    """
+    ids = {i.id for i in config.instruments}
+    if not {"UST_10Y", "UST_2Y"} <= ids:
+        return None
+    ten, two = (_official_yields(duck, i, at) for i in ("UST_10Y", "UST_2Y"))
+    common = sorted(ten.keys() & two.keys())
+    name = "US 2s10s spread"
+    base: dict[str, Any] = {
+        "instrument_id": SPREAD_ID,
+        "name": name,
+        "asset_class": "rates",
+        "is_proxy": False,
+        "proxy_label": None,
+        "tier": 3,
+        "tier_glyph": TIER_GLYPH[3],
+        "tier_name": TIER_NAME[3],
+        "change": None,
+    }
+    if not common:
+        return Row(
+            **base,
+            label=f"{name} (derived)",
+            available=False,
+            value_text=UNAVAILABLE,
+            change_text="n/a",
+            description=f"{name}: {UNAVAILABLE}",
+            basis=None,
+            as_of_text="n/a",
+            qualifiers=(),
+        )
+    d = common[-1]
+    spread = (ten[d] - two[d]) * 100.0
+    d_text = f"{d.day} {d:%b}"
+    label = f"{name} (derived: 10-year minus 2-year official yield)"
+    tail = f"{signed(spread, 0)}bp on {d_text}"
+    change = "n/a"
+    if len(common) > 1:
+        prev = common[-2]
+        move = spread - (ten[prev] - two[prev]) * 100.0
+        change = signed(move, 0) + "bp"
+        tail += f", {change} since previous official value ({prev.day} {prev:%b})"
+    return Row(
+        **base,
+        label=label,
+        available=True,
+        value_text=signed(spread, 0) + "bp",
+        change_text=change,
+        description=f"{label}, {tail}",
+        basis=BASIS_OFFICIAL,
+        as_of_text=d_text,
+        qualifiers=(f"derived from official 10Y and 2Y yields of {d_text}",),
     )
 
 
@@ -400,15 +515,23 @@ def _notable(
             moves.append((abs(z), Notable("move", text, ch.last.instrument_id)))
     ordered = [n for _, n in sorted(moves, key=lambda m: (-m[0], m[1].instrument_id or ""))]
     crosschecks = [
-        Notable("crosscheck", _crosscheck_text(i), i.instrument_id)
+        Notable("crosscheck", _crosscheck_text(i), i.instrument_id, _ref_label(i))
         for i in summary.issues
         if i.kind == "crosscheck"
     ]
     return tuple(ordered + crosschecks)
 
 
+def _ref_label(i: CheckItem) -> str | None:
+    """The data date a cross-check compared (``details.ref_date``), never the run's date."""
+    return f"{i.ref_date.day} {i.ref_date:%b}" if i.ref_date else None
+
+
 def _crosscheck_text(i: CheckItem) -> str:
-    where = f" ({i.group_id})" if i.group_id else ""
+    where = ", ".join(
+        p for p in (i.group_id, f"data of {_ref_label(i)}" if i.ref_date else None) if p
+    )
+    where = f" ({where})" if where else ""
     gap = f"gap {i.observed:.1f}bp" if i.observed is not None else "no gap recorded"
     limit = f", limit {i.threshold:g}bp" if i.threshold is not None else ""
     return f"Cross-check {i.name}{where} {i.status.upper()}: {gap}{limit}"
@@ -440,7 +563,10 @@ def _known_limits(
     fallbacks = sorted({f"{r.instrument_id} ({r.source})" for r in snapshot if r.is_fallback})
     if fallbacks:
         out.append(KnownLimit("fallback", "Fallback source standing in: " + ", ".join(fallbacks)))
-    derived = sorted(r.instrument_id for r in snapshot if r.is_derived)
+    derived = sorted(
+        {r.instrument_id for r in snapshot if r.is_derived}
+        | ({SPREAD_ID} if (sp := rows.get(SPREAD_ID)) and sp.available else set())
+    )
     if derived:
         out.append(
             KnownLimit("derived", "Derived values, not published directly: " + ", ".join(derived))
@@ -454,6 +580,8 @@ def _known_limits(
         )
     for i in s.issues:
         where = i.instrument_id or i.source or i.group_id or "all"
+        if i.ref_date:
+            where += f", data of {_ref_label(i)}"
         out.append(
             KnownLimit(
                 f"{'dq' if i.kind == 'dq' else 'crosscheck'}_{i.status}",

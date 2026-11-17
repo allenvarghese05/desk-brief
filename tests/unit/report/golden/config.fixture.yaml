@@ -1,0 +1,110 @@
+# SYNTHETIC FIXTURE: a small, frozen config for the BriefModel golden test. It is deliberately
+# NOT a copy of the repo's config.yaml, so tuning thresholds or instruments there never breaks
+# tests/unit/report/golden/brief_model.json. It must still validate against deskbrief.config.
+version: 1
+timezone_report: America/New_York
+
+sources:
+  alpaca:   {rate_per_min: 180, timeout_s: 10, retries: 3}
+  fred:     {rate_per_min: 100, timeout_s: 15, retries: 3}
+  treasury: {rate_per_min: 30, timeout_s: 20, retries: 3}
+  ecb:      {rate_per_min: 30, timeout_s: 15, retries: 3}
+  stooq:    {rate_per_min: 20, timeout_s: 15, retries: 2}
+  yahoo:    {rate_per_min: 30, timeout_s: 15, retries: 2}
+  cboe:     {rate_per_min: 10, timeout_s: 15, retries: 2}
+
+instruments:
+  - id: UST_10Y
+    name: US 10-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^TNX, tier: 2}
+      - {source: fred, dataset: series, symbol: DGS10, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 10 Yr, tier: 3}
+  - id: UST_2Y
+    name: US 2-year Treasury yield
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: DGS2, tier: 3}
+      - {source: treasury, dataset: par_curve, symbol: 2 Yr, tier: 3}
+  - id: EURUSD
+    name: Euro / US dollar
+    asset_class: fx
+    kind: fx
+    unit: fx_rate
+    feeds:
+      - {source: ecb, dataset: eurofxref, symbol: EURUSD, tier: 3}
+  - id: WTI
+    name: WTI crude oil
+    asset_class: commodity
+    kind: future
+    unit: USD
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: CL=F, tier: 2}
+      - {source: yahoo, dataset: history, symbol: CL=F, tier: 2}
+  - id: ES_F
+    name: E-mini S&P 500 futures (front month)
+    asset_class: equity
+    kind: future
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ES=F, tier: 2}
+      - {source: yahoo, dataset: history, symbol: ES=F, tier: 2}
+  - id: SPY
+    name: SPDR S&P 500 ETF
+    asset_class: equity
+    kind: etf
+    unit: USD
+    is_proxy: true
+    label: proxy for the S&P 500
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: SPY, tier: 1}
+      - {source: alpaca, dataset: iex_bars_1m, symbol: SPY, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: SPY, tier: 2}
+      - {source: stooq, dataset: daily, symbol: spy.us, tier: 3}
+  - id: QQQ
+    name: Invesco QQQ (Nasdaq-100)
+    asset_class: equity
+    kind: etf
+    unit: USD
+    feeds:
+      - {source: alpaca, dataset: iex_latest, symbol: QQQ, tier: 1}
+      - {source: alpaca, dataset: iex_bars_1m, symbol: QQQ, tier: 1}
+      - {source: alpaca, dataset: sip_bars_1m, symbol: QQQ, tier: 2}
+  - id: VIX
+    name: Cboe Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VIX, tier: 2}
+      - {source: cboe, dataset: vix_history, symbol: VIX, tier: 3}
+
+groups:
+  - {id: sp500, label: S&P 500, proxy: SPY, exact: ES_F, relation: return,
+     tolerance: {warn_bps: 30, fail_bps: 100}}
+
+datasets:
+  - {source: treasury, dataset: par_curve, expected_by_et: "18:00", lag_bdays: 0, calendar: SIFMA_US}
+
+checks:
+  anomaly: {window_days: 30, z_warn: 3.0, z_fail: 5.0}
+  validity:
+    pct: [-2, 25]
+    fx_rate: [0.0001, 100000]
+    USD: [0.01, 1000000]
+    index_pts: [0.01, 1000000]
+
+crosschecks:
+  iex_vs_sip: {symbols: [SPY, QQQ], warn_bps: 5, fail_bps: 20, max_fail_minutes_pct: 5}
+  fx_vs_ecb: {pairs: [EURUSD], fix_time_cet: "14:15", warn_bps: 5, fail_bps: 15}
+  official_pair: {pairs: [[DGS2, 2 Yr], [DGS10, 10 Yr]], warn_bps: 0.5, fail_bps: 2}
+  yahoo_vs_primary: {warn_bps: 10, fail_bps: 50}
+  close_vs_official: {warn_bps: 5, fail_bps: 25}
+
+report:
+  headline_instruments: [ES_F, UST_10Y, EURUSD, WTI, VIX]
