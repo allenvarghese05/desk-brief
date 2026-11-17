@@ -53,6 +53,10 @@ class HttpClient(Protocol):
     Secrets go in ``secret_params`` / ``secret_headers`` and are never logged or stored;
     the URL recorded in ``RawResponse.url_redacted`` has them masked.
     Transport/HTTP failures are returned as ``RawResponse.error``, not raised.
+
+    ``units`` is the number of daily-budget units one request costs (default 1; for example a
+    batch quote that the provider counts once per symbol). Implementations that track a budget
+    reserve that many units before the call.
     """
 
     def get(
@@ -64,6 +68,7 @@ class HttpClient(Protocol):
         headers: Mapping[str, str] | None = None,
         secret_params: Mapping[str, str] | None = None,
         secret_headers: Mapping[str, str] | None = None,
+        units: int = 1,
     ) -> RawResponse: ...
 
 

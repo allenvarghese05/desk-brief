@@ -21,6 +21,7 @@ class _Http:
         headers: Mapping[str, str] | None = None,
         secret_params: Mapping[str, str] | None = None,
         secret_headers: Mapping[str, str] | None = None,
+        units: int = 1,
     ) -> RawResponse:
         return RawResponse(
             request=req,
@@ -54,3 +55,9 @@ def test_protocols_runtime_checkable() -> None:
     raw = _Dummy().fetch(FetchRequest(source="dummy", dataset="d"), _Http())
     assert raw.ok
     assert raw.url_redacted == "https://example.invalid/d"
+
+
+def test_http_get_accepts_units_keyword() -> None:
+    """T08A: the protocol's optional cost argument (default 1) can be passed by keyword."""
+    req = FetchRequest(source="dummy", dataset="d")
+    assert _Http().get(req, "https://example.invalid/d", units=3).ok
