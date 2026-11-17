@@ -22,7 +22,7 @@ from streamlit.testing.v1 import AppTest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # t23_synth lives in tests/unit
 from t23_synth import ctx_for, put
 
-from brief_synth import FRI, MON, MON_0700, THU, World, et, monday_rows
+from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, monday_rows
 
 REPO = Path(__file__).resolve().parents[3]
 PAGES = REPO / "app" / "pages"
@@ -44,13 +44,16 @@ def text(at: AppTest) -> str:
     return "\n".join(parts)
 
 
-def xcheck_rows(target: Any, ref: Any, status: str, diff: float, left: str, right: str, name: str):
+def xcheck_rows(
+    target: Any, ref: Any, status: str, diff: float | None, left: str, right: str, name: str,
+    warn: float = 5.0,
+):  # fmt: skip
     return {
         "result_id": f"XC{next(_ids)}", "run_id": "RUN1", "check_name": name,
         "group_id": "sp500", "target_date": target, "at_time": et(target, "07:00"),
         "relation": "return", "left_instrument": "SPY", "left_source": left,
         "right_instrument": "ES_F", "right_source": right, "left_value": 1.0,
-        "right_value": 1.0, "expected_value": 1.0, "diff_bps": diff, "warn_bps": 5.0,
+        "right_value": 1.0, "expected_value": 1.0, "diff_bps": diff, "warn_bps": warn,
         "fail_bps": 10.0, "status": status,
         "details_json": json.dumps({"ref_date": ref.isoformat()}),
     }  # fmt: skip
@@ -68,12 +71,16 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
         w = World(tmp_path / f"w{next(counter)}")
         if not empty:
             w.observations(monday_rows())
+            w.observations(
+                [daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest")]
+            )
             w.dq(MON, [("fresh_a", "pass", "treasury", None), ("fresh_b", "warn", "ecb", None)])
             w.dq(MON, [("range_spy", "fail", "alpaca", "SPY")], check_type="validity")
             w.dq(FRI, [("fresh_a", "pass", "treasury", None)])
             w.dq(THU, [("fresh_a", "fail", "treasury", None)])
             w._append("crosscheck_results", [
-                xcheck_rows(MON, FRI, "warn", 6.5, "alpaca", "yahoo", "spy_vs_es"),
+                xcheck_rows(MON, FRI, "warn", 6.5, "alpaca", "yahoo", "spy_vs_es", warn=7.0),
+                xcheck_rows(MON, FRI, "skip", None, "yahoo", "ecb", "skipped_check"),
                 xcheck_rows(MON, FRI, "pass", 1.0, "yahoo", "ecb", "es_vs_yahoo"),
                 xcheck_rows(FRI, THU, "pass", 0.5, "yahoo", "ecb", "es_vs_yahoo"),
             ], lambda r: r["target_date"])  # fmt: skip
@@ -189,3 +196,22 @@ def test_crosscheck_gap_chart_shows_tolerance_band(run_page: RunPage) -> None:
     assert "<polyline" in t
     assert "bps" in t
     assert "warn" in t
+
+
+def test_instrument_hosted_history_and_tolerance_exclude_tier1(run_page: RunPage) -> None:
+    hosted = text(pick(run_page("instrument", "hosted"), "SPY"))
+    assert "590.25" not in hosted  # the tier-1 daily value in the 30-day window
+    assert "warn 7" not in hosted  # tolerance of the check that names alpaca
+    assert "warn 5 bp" in hosted
+    local = text(pick(run_page("instrument", "local"), "SPY"))
+    assert "590.25" in local
+
+
+def test_skipped_crosscheck_has_no_nan_in_strip_or_chart(run_page: RunPage) -> None:
+    at = run_page("xchecks", "local")
+    at = at.selectbox(key="check").select("sp500 · skipped_check").run()
+    t = text(at)
+    assert not at.exception
+    assert "nan" not in t.lower().replace("financial", "")
+    assert "no data in this window" in t
+    assert "no gap computed" in text(run_page("xchecks", "local"))

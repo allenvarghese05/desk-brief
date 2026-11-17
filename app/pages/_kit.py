@@ -109,7 +109,7 @@ def context(title: str) -> Ctx:
     return Ctx(config, mode, data.hidden_tiers(mode, config), store, data.current_time())
 
 
-def _where(ctx_config: Config) -> str:
+def where_key(ctx_config: Config) -> str:
     s = ctx_config.storage
     return s.bucket if s.backend == "r2" else s.local_root
 
@@ -149,7 +149,7 @@ def _serving_frame(_store: StorageBackend, where: str, name: str) -> pd.DataFram
 
 def serving_frame(ctx: Ctx, name: str) -> pd.DataFrame:
     """A ``serving/*.parquet`` file; empty frame when it is not there yet."""
-    return _serving_frame(ctx.store, _where(ctx.config), name)
+    return _serving_frame(ctx.store, where_key(ctx.config), name)
 
 
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
@@ -161,7 +161,7 @@ def _serving_json(_store: StorageBackend, where: str, name: str) -> dict[str, ob
 
 
 def serving_json(ctx: Ctx, name: str) -> dict[str, object]:
-    return _serving_json(ctx.store, _where(ctx.config), name)
+    return _serving_json(ctx.store, where_key(ctx.config), name)
 
 
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
@@ -178,7 +178,7 @@ def _recent_table(_store: StorageBackend, where: str, table: str, since: date) -
 
 def recent_table(ctx: Ctx, table: str, days: int) -> pd.DataFrame:
     """Partitions of a daily table (revisions, quarantine) of the last ``days`` days."""
-    return _recent_table(ctx.store, _where(ctx.config), table, ctx.today - timedelta(days=days))
+    return _recent_table(ctx.store, where_key(ctx.config), table, ctx.today - timedelta(days=days))
 
 
 def withheld_note(n: int, mode: str) -> None:
@@ -254,6 +254,10 @@ def line_chart(
 ) -> str:
     """Thin lines on one y axis (never two), the last point labelled directly, hover titles on
     every point. ``band`` shades a tolerance range; ``guides`` draws dashed reference lines."""
+    lines = [  # a NaN would turn every coordinate into "nan": drop such points
+        Line(ln.name, tuple((x, y) for x, y in ln.points if y == y), ln.colour, ln.dash)
+        for ln in lines
+    ]
     xs = sorted({x for ln in lines for x, _ in ln.points})
     ys = [y for ln in lines for _, y in ln.points] + list(guides) + list(band or ())
     if not xs or not ys:

@@ -15,10 +15,17 @@ for _p in (ROOT, ROOT / "src"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 from app.pages import _kit  # noqa: E402
 
 ctx = _kit.context("Cross-checks")
+
+
+def _gap(x: float) -> str:
+    return "no gap computed" if pd.isna(x) else f"{x:+.1f} bp"
+
+
 df = _kit.serving_frame(ctx, "crosschecks_7d.parquet")
 if df.empty:
     st.markdown("No cross-check results in the last 7 days.")
@@ -39,7 +46,7 @@ for group, name in keys:
         (
             _kit.day_text(r.ref_date),
             r.status,
-            f"compared data of {_kit.day_text(r.ref_date)}: {r.status}, {r.diff_bps:+.1f} bp "
+            f"compared data of {_kit.day_text(r.ref_date)}: {r.status}, {_gap(r.diff_bps)} "
             f"(warn {r.warn_bps:g}, fail {r.fail_bps:g})",
         )
         for r in c.itertuples()
@@ -64,7 +71,11 @@ c = df[(df["group_id"] == group) & (df["check_name"] == name)]
 warn, fail = float(c["warn_bps"].iloc[-1]), float(c["fail_bps"].iloc[-1])
 line = _kit.Line(
     "gap",
-    tuple((_kit.day_text(r.ref_date), float(r.diff_bps)) for r in c.itertuples()),
+    tuple(  # skipped checks have no gap and an unknown data date: nothing to plot
+        (_kit.day_text(r.ref_date), float(r.diff_bps))
+        for r in c.itertuples()
+        if pd.notna(r.diff_bps) and pd.notna(r.ref_date)
+    ),
     _kit.TIER_COLOUR[3],
 )
 st.markdown(
