@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from brief_synth import MON, MON_0700, World, monday_rows
+from brief_synth import FRI, MON, MON_0700, World, daily, monday_rows
 from deskbrief.report import html as report_html
 from deskbrief.report.html import FOOTER_LINE, render_html, render_text
 from deskbrief.report.model import BriefModel
@@ -186,3 +186,20 @@ def test_plain_text_lists_per_source_health(model: BriefModel) -> None:
     assert bad
     for h in bad:
         assert f"{h.source}: {h.status} ({h.n_failed} of {h.n_fetches} fetches failed)" in text
+
+
+def test_spread_caption_with_one_common_date_comes_from_the_real_model_path(
+    tmp_path: Path,
+) -> None:
+    """T09C: a model built from the store (not a hand-made description) gives the caption."""
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    w = World(tmp_path)
+    w.observations([daily("UST_10Y", FRI, 4.40, **tsy), daily("UST_2Y", FRI, 4.18, **tsy)])
+    model = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    r = next(x for x in model.rows() if x.instrument_id == "UST_2S10S")
+    assert r.change_text == "n/a"
+    cell = row_html(render_html(model), r.label)
+    assert "change unavailable (no earlier common date)" in cell
+    assert "chg since" not in cell
+    assert cell.count("+22bp on 13 Nov") == 1  # the value is not repeated bare
+    assert "change unavailable (no earlier common date)" in render_text(model)

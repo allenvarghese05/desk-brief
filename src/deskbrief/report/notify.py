@@ -178,13 +178,17 @@ class SmtpNotifier:
         for a in attachments:
             maintype, _, subtype = a.mime_type.partition("/")
             msg.add_attachment(a.data, maintype=maintype, subtype=subtype, filename=a.filename)
+        failure: str | None = None
         try:
             with self._connect(s) as smtp:
                 smtp.login(s.user, s.password)
                 smtp.send_message(msg)
         except Exception as exc:  # any failure, not only SMTP/OSError: never leak the password
-            detail = redact_text(f"{type(exc).__name__}: {exc}", _secret_forms(s))
-            raise NotifyError(f"SMTP send failed: {detail}") from None
+            failure = redact_text(f"{type(exc).__name__}: {exc}", _secret_forms(s))
+        if failure is not None:
+            # raised outside the ``except`` so Python never sets ``__context__`` to the raw
+            # exception (its text can hold the password); ``from None`` clears the cause too
+            raise NotifyError(f"SMTP send failed: {failure}") from None
 
 
 def notifier_for(ctx: RunContext, env: Mapping[str, str]) -> Notifier:
