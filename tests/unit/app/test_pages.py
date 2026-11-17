@@ -1,4 +1,4 @@
-"""Dashboard pages 2-6 (T35): AppTest smoke per page, hosted rule, P-009 labels, ref_date labels.
+"""Dashboard pages 2-3 (T35, part 1): AppTest smoke, hosted rule, P-009 labels, ref_date labels.
 
 SYNTHETIC FIXTURE: a store built from ``brief_synth`` (made-up values, Monday 16 Nov 2026 07:00
 ET) plus serving files built by ``deskbrief.pipeline.serving``. SPY is the only tier-1 instrument
@@ -29,9 +29,6 @@ PAGES = REPO / "app" / "pages"
 PAGE_FILES = {
     "instrument": "2_Instrument.py",
     "xchecks": "3_Cross_checks.py",
-    "health": "4_Data_health.py",
-    "sources": "5_Sources.py",
-    "runs": "6_Runs.py",
 }
 _ENV = ("DESKBRIEF_DISPLAY_MODE", "R2_ACCOUNT_ID", "R2_READER_ACCESS_KEY_ID")
 _ids = itertools.count()
@@ -192,80 +189,3 @@ def test_crosscheck_gap_chart_shows_tolerance_band(run_page: RunPage) -> None:
     assert "<polyline" in t
     assert "bps" in t
     assert "warn" in t
-
-
-# --- page 4: data health --------------------------------------------------------------------
-
-
-def test_data_health_groups_by_type_and_lists_revisions_and_quarantine(run_page: RunPage) -> None:
-    t = text(run_page("health", "local"))
-    assert "freshness" in t
-    assert "validity" in t
-    assert "negative_price" in t  # quarantine list
-    assert "UST_10Y" in t  # revisions log
-    assert "fresh_b" in t
-
-
-def test_data_health_hosted_withholds_tier1_rows(run_page: RunPage) -> None:
-    t = text(run_page("health", "hosted"))
-    assert "range_spy" not in t
-    assert "alpaca" not in t
-    assert "fresh_b" in t
-    assert "withheld" in t
-
-
-def test_data_health_freshness_timeline_per_dataset(run_page: RunPage) -> None:
-    t = text(run_page("health", "hosted"))
-    assert 'aria-label="12 Nov fail"' in t  # Thursday's late arrival
-    assert "minutes late" in t
-
-
-# --- page 5: sources ------------------------------------------------------------------------
-
-
-def test_sources_show_measured_numbers_with_days_of_data(run_page: RunPage) -> None:
-    at = run_page("sources", "hosted")
-    t = text(at)
-    assert "days of data" in t
-    df = at.dataframe[0].value
-    assert set(df["Source"]) >= {"yahoo", "treasury"}
-    row = df[df["Source"] == "yahoo"].iloc[0]
-    assert row["Days of data"] == 2
-    assert row["Uptime"] == "83.3%"  # fetch-weighted: (1 ok of 2 + 4 ok of 4) / 6
-
-
-def test_sources_empty_says_so(run_page: RunPage) -> None:
-    t = text(run_page("sources", empty=True))
-    assert "No scorecard data yet" in t
-
-
-# --- page 6: runs ---------------------------------------------------------------------------
-
-
-def test_runs_table_and_incidents_from_file(run_page: RunPage, tmp_path: Path) -> None:
-    at = run_page("runs", "hosted")
-    t = text(at)
-    assert "degraded" in t
-    assert "ok" in t
-    assert "morning" in t
-    assert "github.com/allenvarghese05/desk-brief/actions" in t
-    # the template block inside the code fence is not an incident
-    assert "YYYY-MM-DD" not in t
-
-
-def test_parse_incidents_skips_the_template_fence() -> None:
-    import sys
-
-    sys.path.insert(0, str(REPO))
-    from app.pages import _incidents
-
-    md = (
-        "# Incidents\n\n```\n## YYYY-MM-DD — short title\n- Detected by:\n```\n\n"
-        "## 2026-11-20 — Yahoo outage\n- Detected by: freshness\n- Impact: none\n\n"
-        "## 2026-11-18 — Late FRED\n- Detected by: sla\n"
-    )
-    items = _incidents.parse(md)
-    assert [i.title for i in items] == ["Yahoo outage", "Late FRED"]
-    assert items[0].date == "2026-11-20"
-    assert "freshness" in items[0].body
-    assert _incidents.parse("# Incidents\n\nnone yet") == []
