@@ -6,19 +6,19 @@ Every check implements ``evaluate(ctx, duck) -> list[DQResult]`` and registers i
 Which view each check reads (P-009: reproducible values come from ``obs_pit``, never from
 ``daily_close``, and the current unfinished ET date is excluded where it matters):
 
-=============  =======================================================================
-freshness      ``obs_pit(now)``; gated by the dataset's due time instead of the date rule
-freshness_      ``obs_pit(now)`` ``interval = 'tick'`` rows per ``Config.intraday`` entry; intraday
-intraday       job only, inside the session and one grace after the open
-completeness   ``obs_pit(now)``; daily feeds gated by due time + grace, minute bars, Yahoo and
-               Twelve Data feeds use the last finished session (``feed_completeness``)
-calendar       calendars only, no data read
-validity       ``obs_pit(now)`` restricted to this run's rows
-uniqueness     ``obs_all`` (the dedupe views would hide duplicates) for this run's fetches
-anomaly        ``obs_pit(now)``, ET dates strictly before today and not after the target;
-               skipped when the newest day is older than the expected data day
-revision       ``obs_all`` up to ``now`` (needs every version of a key)
-=============  =======================================================================
+==================  ==================================================================
+freshness           ``obs_pit(now)``; gated by the dataset's due time instead of the date rule
+freshness_intraday  ``obs_pit(now)`` ticks per ``Config.intraday`` entry; intraday job, in session
+completeness        ``obs_pit(now)``; daily feeds gated by due time + grace, minute bars, Yahoo,
+                    Twelve Data and Alpaca tick feeds use the last finished session
+                    (``feed_completeness``)
+calendar            calendars only, no data read
+validity            ``obs_pit(now)`` restricted to this run's rows
+uniqueness          ``obs_all`` (the dedupe views would hide duplicates) for this run's fetches
+anomaly             ``obs_pit(now)``, ET dates strictly before today and not after the target;
+                    skipped when the newest day is older than the expected data day
+revision            ``obs_all`` up to ``now`` (needs every version of a key)
+==================  ==================================================================
 """
 
 from __future__ import annotations
