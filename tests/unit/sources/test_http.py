@@ -104,6 +104,17 @@ def test_success_first_try(clock: FakeClock) -> None:
 
 
 @respx.mock
+def test_units_keyword_is_accepted_and_changes_nothing(clock: FakeClock) -> None:
+    """T08A: ``units`` is part of the protocol; until T08B it has no effect on the request."""
+    respx.get(URL).respond(200, content=b"a,b\n1,2\n", headers={"content-type": "text/csv"})
+    plain = make(clock).get(req(), URL, params={"series_id": "DGS10"})
+    weighted = make(clock).get(req(), URL, params={"series_id": "DGS10"}, units=3)
+    assert weighted.ok and weighted.attempts == plain.attempts == 1
+    assert weighted.body == plain.body and weighted.url_redacted == plain.url_redacted
+    assert weighted.fetch_status is plain.fetch_status is FetchStatus.OK
+
+
+@respx.mock
 def test_empty_body_is_empty_status(clock: FakeClock) -> None:
     respx.get(URL).respond(200, content=b"")
     assert make(clock).get(req(), URL).fetch_status is FetchStatus.EMPTY
