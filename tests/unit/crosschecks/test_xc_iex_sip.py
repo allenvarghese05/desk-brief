@@ -6,7 +6,7 @@ SYNTHETIC FIXTURE: all data is made up. Friday 2026-11-13 regular session is 09:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +113,29 @@ def test_percentiles(store: LocalBackend, config: Config) -> None:
     assert d["pct_minutes_over_fail"] == pytest.approx(6.0)
 
 
+def test_p95_is_nearest_rank_with_95_clean_and_5_bad_minutes(
+    store: LocalBackend, config: Config
+) -> None:
+    # nearest rank: ceil(0.95 * 100) = 95th smallest gap; 95 clean minutes, so it is a clean one
+    rows = pairs("SPY", 0, 95, 100.0, 100.0) + pairs("SPY", 95, 5, 100.30, 100.0)
+    put(store, config, rows)
+    r = run(store, config)["SPY"]
+    assert r.details["p95_abs_gap_bps"] == pytest.approx(0.0)
+    assert r.details["pct_minutes_over_fail"] == pytest.approx(5.0)
+    assert r.status is DQStatus.PASS  # exactly 5 % is not above the 5 % limit
+
+
+def test_n_missing_both_never_goes_negative(store: LocalBackend, config: Config) -> None:
+    # bars off the minute grid (30 s past each minute) make the distinct start times exceed the
+    # session's minute count; the count is a minute-grid estimate and is clamped at zero
+    rows = pairs("SPY", 0, 390, 100.0, 100.0)
+    rows += pairs("SPY", 0, 390, 100.0, 100.0, OPEN + timedelta(seconds=30))
+    put(store, config, rows)
+    d = run(store, config)["SPY"].details
+    assert d["n_iex_bars"] == d["n_sip_bars"] == 780
+    assert d["n_missing_both"] == 0
+
+
 def test_missing_minutes_are_excluded_and_counted(store: LocalBackend, config: Config) -> None:
     rows = pairs("SPY", 0, 100, 100.0, 100.0)  # minutes 0..99 on both sides
     rows += [iex_bar("SPY", minutes(OPEN, k), 100.0) for k in range(100, 110)]  # IEX only
@@ -139,6 +162,8 @@ def test_details_label_both_sides(store: LocalBackend, config: Config) -> None:
     assert (d["left"]["field"], d["left"]["unit"]) == ("close", "USD")
     assert (d["right"]["source"], d["right"]["dataset"]) == ("alpaca", "sip_bars_1m")
     assert (d["right"]["field"], d["right"]["unit"]) == ("close", "USD")
+    assert d["left_label"] == "IEX 1m close (single venue)"
+    assert d["right_label"] == "SIP 1m close (consolidated, all venues)"
     assert d["basis"] == "relative"
     assert d["ref_date"] == "2026-11-13"
     assert d["session_open_utc"] == OPEN.isoformat()
