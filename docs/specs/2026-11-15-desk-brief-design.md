@@ -352,7 +352,7 @@ deskbrief-data/
 ```
 
 - **Partition dates and `as_of`:** defined once in `src/deskbrief/store/backend.py` (module docstring). Raw uses the UTC date of `ingested_at`; observations use the ET date of `as_of`; run-scoped tables use `target_date`. `as_of` for `1d` = 00:00 ET on the reference date, for `1mo` = 00:00 ET on the 1st, for `1m` = bar start, for `tick` = the trade/quote instant.
-- **Small-files control:** `eod` compacts the day's `clean/.../run=*.parquet` into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
+- **Small-files control:** `eod` compacts `clean/.../run=*.parquet` for today's ET date and the six before it (P-017; partitions with fewer than two files are skipped) into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
 - **Local backend** mirrors the same layout under `.data/` for tests and dev.
 - **Access:** DuckDB `httpfs` with `CREATE SECRET (TYPE r2, ...)`. Three R2 API tokens: `ci-writer` (GHA, read/write this bucket), `dashboard-reader` (read-only), `admin` (Allen only, never in CI).
 

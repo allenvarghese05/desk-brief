@@ -101,12 +101,12 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 - The orchestrator wrote this record at his instruction.
 
 ## P-016 · 2026-11-17 · `empty` marks the Excel placeholder row
-- Decision: a table with nothing to list keeps one placeholder row. Its first cell reads `none: nothing to list` and the other cells are blank, except that in every table with a `status` column the placeholder's `status` is `empty`. That covers the five market tables, `tbl_checks` and `tbl_sources`. Macros (T33) skip rows whose `status` is `empty`. `tbl_lineage` has no `status` column, so macros recognise its placeholder by the first cell. Spec §9.2 is updated. T32B already builds this (`PLACEHOLDER_LABEL`, `PLACEHOLDER_STATUS` in `src/deskbrief/report/excel.py`), so no code changes.
+- Decision: a table with nothing to list keeps one placeholder row. Its first cell reads `none: nothing to list` and the other cells are blank, except that in every table with a `status` column the placeholder's `status` is `empty`. That covers the five market tables, `tbl_checks` and `tbl_sources`. Macros (T33) skip rows whose `status` is `empty`. `tbl_lineage` has no `status` column, so macros recognise its placeholder by the first cell. Spec §9.2 is updated. T32B already builds this (`PLACEHOLDER_LABEL`, `PLACEHOLDER_STATUS` in `src/deskbrief/report/excel.py`), so no code changes. `tests/contract/test_excel_tables.py` pins `PLACEHOLDER_STATUS == "empty"`.
 - Why: T32B put `empty` into `tbl_checks.status` and `tbl_sources.status`, which have their own status values, and spec §9.2 did not mention it. One skip rule is simpler for the macros than one per table. Raised in the [PR #47 review, finding 4](https://github.com/allenvarghese05/desk-brief/pull/47#pullrequestreview-5933580186).
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-17. Asked whether the spec should say that `empty` marks the placeholder row in any table with a status column, so the macros need one rule, he chose "Yes, one rule (Recommended)". The orchestrator wrote this record at his instruction.
 
 ## P-017 · 2026-11-17 · Every job rescores; eod compacts the last 7 days
-- Decision: spec §5.4 matches the code merged in T23 and T23B:
+- Decision: spec §5.4 and the small-files line in §6 match the code merged in T23 and T23B:
   - Every job ends with the serving step. It rescores `scorecard_daily` for the job's target date (an overwrite of that date's file, allowed for a `DAILY_TABLES` table under P-008), then writes the serving files.
   - The serving files (`health.json` and the 14-day, 30-day and 7-day windows) are anchored on the current ET date, not the job's target date. A backfill of an old date never replaces the latest view.
   - The scorecard counts every intraday poll. For other jobs it counts the latest run of each job per source, and a partial re-run replaces only the sources it fetched.
