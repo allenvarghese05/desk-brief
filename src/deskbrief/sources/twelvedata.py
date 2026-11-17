@@ -159,7 +159,7 @@ class TwelveDataSource:
             )
             return RawResponse(
                 request=req,
-                fetch_id=_new_fetch_id(),
+                fetch_id=new_id(),
                 requested_at=now,
                 responded_at=now,
                 http_status=None,
@@ -233,10 +233,6 @@ class TwelveDataSource:
 
 class _SymbolError(Exception):
     """One symbol's entry is unusable; the other symbols in the batch are still parsed."""
-
-
-def _new_fetch_id() -> str:
-    return new_id()
 
 
 def _payload_error(doc: Any) -> tuple[int | None, str] | None:

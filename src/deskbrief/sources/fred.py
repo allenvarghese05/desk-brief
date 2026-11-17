@@ -81,7 +81,7 @@ class FredSource:
         requests: list[FetchRequest] = []
         for series_id in self._index:
             if series_id not in self._specs:
-                log.warning("fred.plan.skip", series=series_id, reason="no series spec")
+                log.error("fred.plan.skip", series=series_id, reason="no series spec")
                 continue
             params = {
                 "series_id": series_id,

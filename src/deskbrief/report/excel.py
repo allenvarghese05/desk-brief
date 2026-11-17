@@ -59,7 +59,9 @@ LINEAGE_HEADERS = (
 YIELD_FMT, BP_FMT, PRICE_FMT, FX_FMT = '0.00"%"', "+0;-0", "#,##0.00", "0.0000"
 #: an ``fx_rate`` below this is a major pair (4 decimals); a larger one (JPY and the like) is not
 FX_FOUR_DECIMALS_BELOW = 20
-#: ``as_of_utc`` is text in this shape, so VBA reads it the same under every locale
+#: ``as_of_utc`` is text in this shape, so VBA reads it the same under every locale. An official
+#: daily value (and the derived spread) carries a date stamp (midnight ET of its date, as
+#: stored), not the time it was published; only a tick or a 1m bar is a time of day.
 AS_OF_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 #: first cell and ``status`` of the one row an otherwise empty table keeps; macros skip it
 PLACEHOLDER_LABEL = "none: nothing to list"
@@ -152,8 +154,7 @@ def _market_row(r: Row) -> list[Cell]:
         field = "spread"
     value, change = r.value, r.change_value
     status = r.change.status if r.change else ("ok" if r.available else "unavailable")
-    # The model keeps no timestamp for the derived spread (it is a date), so its cell is blank.
-    stamp = r.change.last.as_of if r.available and r.change else None
+    stamp = r.as_of if r.available else None  # the spread's is its shared date's midnight ET
     return [
         r.instrument_id,
         r.asset_class,

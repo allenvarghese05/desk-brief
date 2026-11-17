@@ -486,6 +486,10 @@ def health_summary(
     are left out of the DQ counts so a cross-check counts once, from ``crosscheck_results``.
     ``expected_sources`` defaults to every source with a feed in the config; a source with no
     fetch that day is ``missing``.
+
+    A partial re-run (one that evaluated only some checks) is still the latest run, so it
+    supersedes both check tables for ``target_date``: checks the earlier, fuller run recorded and
+    the re-run did not repeat are not counted, in the DQ and the cross-check counts alike.
     """
     dq = _latest_dq(duck, target_date)
     xc = _latest_xchecks(duck, target_date)

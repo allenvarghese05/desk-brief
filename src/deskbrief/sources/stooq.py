@@ -100,30 +100,33 @@ class StooqSource:
             return empty_frame("parsed_observations")
         inst, feed = entry
         rows: list[dict[str, object]] = []
-        for rec in csv.reader(io.StringIO("\n".join(lines[1:]))):
-            if len(rec) != len(HEADER):
-                raise ParseError(f"stooq: row has {len(rec)} columns: {rec!r}")
-            try:
-                day = date.fromisoformat(rec[0].strip())
-            except ValueError:
-                raise ParseError(f"stooq: bad date {rec[0]!r}") from None
-            base = {
-                "instrument_id": inst.id,
-                "source": NAME,
-                "dataset": DATASET,
-                "symbol": symbol,
-                "tier": feed.tier,
-                "interval": "1d",
-                "as_of": et_to_utc(day, "00:00"),
-                "is_derived": False,
-                "is_fallback": False,
-            }
-            for col, fld in _PRICE_FIELDS:
-                value = _num(rec[HEADER.index(col)], col) * feed.scale
-                rows.append({**base, "field": fld, "value": value, "unit": inst.unit})
-            rows.append(
-                {**base, "field": "volume", "value": _num(rec[5], "Volume"), "unit": "shares"}
-            )
+        try:
+            for rec in csv.reader(io.StringIO("\n".join(lines[1:]))):
+                if len(rec) != len(HEADER):
+                    raise ParseError(f"stooq: row has {len(rec)} columns: {rec!r}")
+                try:
+                    day = date.fromisoformat(rec[0].strip())
+                except ValueError:
+                    raise ParseError(f"stooq: bad date {rec[0]!r}") from None
+                base = {
+                    "instrument_id": inst.id,
+                    "source": NAME,
+                    "dataset": DATASET,
+                    "symbol": symbol,
+                    "tier": feed.tier,
+                    "interval": "1d",
+                    "as_of": et_to_utc(day, "00:00"),
+                    "is_derived": False,
+                    "is_fallback": False,
+                }
+                for col, fld in _PRICE_FIELDS:
+                    value = _num(rec[HEADER.index(col)], col) * feed.scale
+                    rows.append({**base, "field": fld, "value": value, "unit": inst.unit})
+                rows.append(
+                    {**base, "field": "volume", "value": _num(rec[5], "Volume"), "unit": "shares"}
+                )
+        except csv.Error as exc:
+            raise ParseError(f"stooq: unreadable CSV ({exc})") from None
         if not rows:
             return empty_frame("parsed_observations")
         return to_frame("parsed_observations", rows)

@@ -528,7 +528,10 @@ def _flip(
     except KeyExistsError:
         result.abort_reason = (
             f"another rebuild already flipped away from {previous!r}: marker {claim} exists. "
-            f"After rolling back _CURRENT by hand, delete {claim} to rebuild from {previous} again"
+            f"After rolling back _CURRENT by hand, delete {claim} to rebuild from "
+            f"{previous} again; if you did not roll back by hand, check `flipped_at` in the "
+            "marker body first (a rebuild killed between the claim and the pointer write leaves "
+            "the same marker)"
         )
         return result
     try:

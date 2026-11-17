@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import types
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime
 from typing import Any, Self, Union, get_args, get_origin, get_type_hints
@@ -53,7 +53,7 @@ from deskbrief.query import (
     series_all,
     value_label,
 )
-from deskbrief.timeutil import ensure_utc, et_date, to_et
+from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
 
 SCHEMA_VERSION = 1
 
@@ -115,6 +115,10 @@ class Row:
     # worst check or cross-check status for this instrument on the report date:
     # fail > warn > pass; skip is no result; none when there is none
     dq_flag: str = "none"
+    # the instant behind ``as_of_text``: the value's own timestamp (a daily official value is
+    # midnight ET of its date, not a publish time); the spread's is the midnight-ET stamp of the
+    # date both legs share. None when unavailable.
+    as_of: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -182,11 +186,21 @@ class BriefModel:
         config: Config,
         report_date: date,
         report_time: datetime,
+        *,
+        exclude_tiers: Collection[int] = (),
     ) -> Self:
-        """Build the brief for ET ``report_date`` as known at ``report_time`` (aware UTC)."""
+        """Build the brief for ET ``report_date`` as known at ``report_time`` (aware UTC).
+
+        ``exclude_tiers`` is passed to the ``query.py`` reads that accept it
+        (``overnight_changes``): an instrument whose latest value is an excluded tier falls back
+        to its best remaining tier, as a hosted deployment that may not show tier 1 needs. The
+        default ``()`` excludes nothing. Health, the derived 2s10s spread (official tier 3
+        yields only) and the anomaly history read no tier-1 value and take no filter.
+        """
         report_time = ensure_utc(report_time)
         changes = {
-            c.last.instrument_id: c for c in overnight_changes(duck, report_date, report_time)
+            c.last.instrument_id: c
+            for c in overnight_changes(duck, report_date, report_time, exclude_tiers=exclude_tiers)
         }
         snapshot = tuple(c.last for c in changes.values())  # ordered by instrument_id
         baselines = tuple(c.previous for c in changes.values() if c.previous is not None)
@@ -393,6 +407,7 @@ def _row(
         tier_name=TIER_NAME.get(last.tier, ""),
         change=change,
         qualifiers=_qualifiers(last, report_time),
+        as_of=last.as_of,
         value=last.value,
         value_unit=last.unit,
         change_value=change.change,
@@ -415,9 +430,10 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
     None when the config has no 10Y/2Y pair. Both legs must come from the same ET date: the
     row uses the *latest date both legs share* (``common[-1]``), which can be older than the
     report date and older than either leg's own newest value (for example when one leg has
-    published a later day than the other). That date is the row's ``as_of`` and is repeated in
-    its qualifier. The change compares it with the previous shared date. A tier-2 or tick yield
-    is never a leg (see ``_official_yields``). No shared date gives a "data unavailable" row.
+    published a later day than the other). That date (midnight ET) is the row's ``as_of`` and is
+    repeated in its qualifier. The change compares it with the previous shared date (with only
+    one shared date it says so, rather than leaving a bare ``n/a``). A tier-2 or tick yield is
+    never a leg (see ``_official_yields``). No shared date gives a "data unavailable" row.
     ``value``/``change_value`` are typed floats in bp, so writers need not parse the text.
     """
     ids = {i.id for i in config.instruments}
@@ -455,12 +471,15 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
     label = f"{name} (derived: 10-year minus 2-year official yield)"
     tail = f"{signed(spread, 0)}bp on {d_text}"
     change = "n/a"
+    no_change = "change unavailable (no earlier common date)"
     move: float | None = None
     if len(common) > 1:
         prev = common[-2]
         move = round(spread - (ten[prev] - two[prev]) * 100.0, CHANGE_DECIMALS)
         change = signed(move, 0) + "bp"
         tail += f", {change} since previous official value ({prev.day} {prev:%b})"
+    else:  # one shared date: nothing to compare with, and the caption must not repeat the value
+        tail += f", {no_change}"
     return Row(
         **base,
         label=label,
@@ -471,6 +490,7 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
         basis=BASIS_OFFICIAL,
         as_of_text=d_text,
         qualifiers=(f"derived from official 10Y and 2Y yields of {d_text}",),
+        as_of=et_to_utc(d, "00:00"),
         value=spread,
         value_unit="bp",
         change_value=move,
@@ -622,6 +642,15 @@ def _known_limits(
     if s.n_checks - s.n_skip == 0:
         out.append(
             KnownLimit("dq_missing", f"No data-quality results recorded for {s.target_date}")
+        )
+    else:
+        out.append(
+            KnownLimit(
+                "checks_scope",
+                f"Check results are those of the latest run for {s.target_date}: a partial "
+                "re-run supersedes both check tables (data quality and cross-checks) for the "
+                "date, so a check it did not repeat is not counted",
+            )
         )
     for i in s.issues:
         where = i.instrument_id or i.source or i.group_id or "all"

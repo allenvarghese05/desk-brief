@@ -215,3 +215,43 @@ def test_notable_lines_reach_the_brief_sheet(tmp_path: Path) -> None:
     assert "Notable" in text
     for n in model.notable:
         assert n.text in text
+
+
+# ---------------------------------------------------------------------------
+# T09C: spread as_of_utc, official date stamp, FX four-decimal boundary
+# ---------------------------------------------------------------------------
+
+
+def test_spread_as_of_utc_is_its_shared_date_stamp(book: xlsx_read.Workbook) -> None:
+    r = find(book, "tbl_rates", "UST_2S10S")
+    assert r["as_of_utc"].value == "2026-11-13T05:00:00Z"  # Fri 13 Nov 00:00 ET (EST = UTC-5)
+    assert r["as_of"].value == "13 Nov"
+
+
+def test_official_daily_as_of_utc_is_the_stored_midnight_et_stamp(
+    book: xlsx_read.Workbook,
+) -> None:
+    """An official value carries its date as midnight ET, not the time it was published."""
+    vix = find(book, "tbl_global", "VIX")
+    assert vix["as_of"].value == "13 Nov"
+    assert vix["as_of_utc"].value == "2026-11-13T05:00:00Z"
+    assert vix["tier_name"].value == "official"
+
+
+def test_fx_four_decimal_boundary_a_yen_rate_is_not_formatted_like_a_major_pair(
+    tmp_path: Path,
+) -> None:
+    ecb = {"source": "ecb", "dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}
+    w = World(tmp_path / "w")
+    w.observations(
+        [
+            daily("EURUSD", THU, 1.0800, **ecb),
+            daily("EURUSD", FRI, 1.0842, **ecb),
+            daily("USDJPY", THU, 149.80, **ecb),
+            daily("USDJPY", FRI, 150.25, **ecb),
+        ]
+    )
+    book = write(w, tmp_path)
+    eur, jpy = find(book, "tbl_fx", "EURUSD"), find(book, "tbl_fx", "USDJPY")
+    assert (eur["value"].value, eur["value"].num_format) == (1.0842, FX)
+    assert (jpy["value"].value, jpy["value"].num_format) == (150.25, PRICE)
