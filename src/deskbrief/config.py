@@ -165,6 +165,15 @@ class DatasetSchedule(_Model):
         return v
 
 
+class IntradaySchedule(_Model):
+    """A dataset polled during the session; its newest tick must stay fresh (spec §8.1)."""
+
+    source: str
+    dataset: str
+    calendar: CalendarName = "XNYS"
+    grace_minutes: int = Field(default=30, gt=0)
+
+
 class AnomalySettings(_Model):
     window_days: int = Field(ge=5)
     z_warn: float = Field(gt=0)
@@ -238,6 +247,7 @@ class Config(_Model):
     instruments: tuple[Instrument, ...] = Field(min_length=1)
     groups: tuple[Group, ...] = ()
     datasets: tuple[DatasetSchedule, ...] = ()
+    intraday: tuple[IntradaySchedule, ...] = ()
     checks: ChecksSettings
     crosschecks: CrosscheckSettings
     report: ReportSettings
@@ -292,6 +302,16 @@ class Config(_Model):
                 errors.append(f"dataset {ds.source}/{ds.dataset}: source not configured")
             elif (ds.source, ds.dataset) not in all_feeds:
                 errors.append(f"dataset {ds.source}/{ds.dataset}: no instrument feed uses it")
+        intraday_keys = [(s.source, s.dataset) for s in self.intraday]
+        if len(intraday_keys) != len(set(intraday_keys)):
+            errors.append("duplicate intraday entries")
+        for sched in self.intraday:
+            if sched.source not in self.sources:
+                errors.append(f"intraday {sched.source}/{sched.dataset}: source not configured")
+            elif (sched.source, sched.dataset) not in all_feeds:
+                errors.append(
+                    f"intraday {sched.source}/{sched.dataset}: no instrument feed uses it"
+                )
         heads = self.report.headline_instruments
         if len(heads) != len(set(heads)):
             errors.append("report headline: duplicate instruments")
