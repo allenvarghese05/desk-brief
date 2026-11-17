@@ -1,7 +1,7 @@
-"""INJECTED FAULT: stale price, x10 unit flip and a FRED revision through run_checks (T20).
+"""INJECTED FAULT: stale price, x10 flip, FRED revision and a stopped series via run_checks.
 
-SYNTHETIC FIXTURE: every observation below is made up. Named ``test_inj_checks_*`` so pytest
-collects it without a conftest hook.
+SYNTHETIC FIXTURE: every observation below is made up. Named ``inj_checks_*`` (the T07 Owns
+glob); the ``inj_*`` hook in conftest.py collects it.
 """
 
 from __future__ import annotations
@@ -149,3 +149,21 @@ def test_injected_fred_revision_records_row_and_warns(tmp_path: Path) -> None:
     _, revs = run_checks(ctx, connect(store, CONFIG))
     assert len(revs) == 1
     assert (revs.loc[0, "old_value"], revs.loc[0, "new_value"]) == (3.1, 3.2)
+
+
+def test_injected_stopped_series_does_not_replay_its_old_move(tmp_path: Path) -> None:
+    """INJECTED FAULT: a series stopped updating after a 50% jump; it must not re-alert daily."""
+    start = date(2026, 9, 1)
+    steps = [0.004, -0.006, 0.005, -0.007, 0.003] * 6 + [0.5]
+    value, rows = 100.0, []
+    for i, s in enumerate(steps):
+        value *= 1 + s
+        rows.append(row(start + timedelta(days=i), value, run_id="R0", ingested_at=at(start, 21)))
+    last = start + timedelta(days=len(steps) - 1)
+    store = LocalBackend(tmp_path)
+    first = run(store, rows, at(last + timedelta(days=1), 7), "R1")  # morning after: scored
+    assert list(select(first, "anomaly", instrument_id="SPY")["status"]) == ["fail"]
+    week_later = run(store, [], at(last + timedelta(days=8), 7), "R2")  # nothing new since
+    res = select(week_later, "anomaly", instrument_id="SPY")
+    assert list(res["status"]) == ["skip"]
+    assert "stale series" in res.iloc[0]["details_json"]

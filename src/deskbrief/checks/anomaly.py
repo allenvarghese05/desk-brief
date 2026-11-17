@@ -6,20 +6,35 @@ std`` of ``|move|`` over the ``window_days`` moves before it. ``warn`` at ``z_wa
 ``z_fail`` (config: 3 and 5; ``fail`` means "verify", not "wrong"). ``skip`` when there are fewer
 than ``MIN_MOVES`` earlier moves, or the window has zero variance.
 
+Only a move that belongs to the expected data day is scored. The newest observation must not be
+older than :func:`expected_last_day` (the latest business day on the dataset's calendar up to
+the cutoff, less ``lag_bdays``; series with no schedule use XNYS). A series that stopped updating
+gives ``skip`` ("stale series") instead of re-reporting its old move. The expected day steps back
+over days the series may legitimately lack (P-011: a SIFMA recommended early close for SIFMA
+datasets; oil-market closures for FRED oil). The XNYS fallback also covers index history on
+foreign exchanges (Nikkei, FTSE, DAX): on a holiday there but not in the US their newest bar is
+older than the XNYS expectation, giving a harmless "stale series" skip, never a fail.
+
 P-009: reads ``obs_pit(now)`` and ignores ET dates on or after today (the unfinished day) and
 after the target date, so a run is reproducible.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import duckdb
 import numpy as np
 import pandas as pd
 
-from deskbrief.checks.base import ET_DATE_SQL, make_result, query, register
+from deskbrief.calendars import (
+    add_business_days,
+    is_business_day,
+    is_early_close,
+    prev_business_day,
+)
+from deskbrief.checks.base import ET_DATE_SQL, make_result, market_closed, query, register
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import et_date
@@ -37,6 +52,21 @@ def daily_moves(values: np.ndarray, unit: str) -> np.ndarray:
         return np.abs(np.where(prev != 0, values[1:] / prev - 1.0, np.nan))
 
 
+def expected_last_day(
+    ctx: RunContext, source: str, dataset: str, symbol: str, cutoff: date
+) -> date:
+    """Newest data day a healthy series must have reached by ``cutoff`` (see module docstring)."""
+    sched = next(
+        (x for x in ctx.config.datasets if (x.source, x.dataset) == (source, dataset)), None
+    )
+    cal, lag = (sched.calendar, sched.lag_bdays) if sched else ("XNYS", 0)
+    day = cutoff if is_business_day(cal, cutoff) else prev_business_day(cal, cutoff)
+    day = add_business_days(cal, day, -lag)
+    while market_closed(symbol, day) or (cal == "SIFMA_US" and is_early_close(day, cal=cal)):
+        day = prev_business_day(cal, day)
+    return day
+
+
 class AnomalyCheck:
     name = "anomaly"
     check_type = CheckType.ANOMALY
@@ -47,7 +77,8 @@ class AnomalyCheck:
         fields = ", ".join(f"'{f}'" for f in DAILY_CLOSE_FIELDS)
         df: pd.DataFrame = query(
             duck,
-            f"SELECT instrument_id, source, dataset, field, unit, {ET_DATE_SQL} AS d, value "  # noqa: S608
+            f"SELECT instrument_id, source, dataset, field, unit, symbol, "  # noqa: S608
+            f"{ET_DATE_SQL} AS d, value "
             f"FROM obs_pit(?) WHERE interval = '1d' AND field IN ({fields}) "
             f"AND {ET_DATE_SQL} <= ? ORDER BY instrument_id, source, dataset, field, d",
             [ctx.now_utc, cutoff],
@@ -68,7 +99,17 @@ class AnomalyCheck:
             }
             std = float(hist.std(ddof=1)) if len(hist) > 1 else 0.0
             who: dict[str, Any] = {"source": str(source), "instrument_id": str(inst)}
-            if len(hist) < MIN_MOVES or not np.isfinite(last):
+            latest = date.fromisoformat(str(g["d"].iloc[-1])[:10])
+            symbol = str(g["symbol"].iloc[-1])
+            expected = expected_last_day(ctx, str(source), str(dataset), symbol, cutoff)
+            if latest < expected:
+                out.append(
+                    make_result(
+                        ctx, self, DQStatus.SKIP, reason="stale series",
+                        expected_day=expected.isoformat(), **who, **info,
+                    )
+                )  # fmt: skip
+            elif len(hist) < MIN_MOVES or not np.isfinite(last):
                 out.append(
                     make_result(ctx, self, DQStatus.SKIP, reason="history too short", **who, **info)
                 )
