@@ -25,12 +25,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+import pandas as pd
+
 from deskbrief.calendars import is_business_day, session_bounds_utc
+from deskbrief.checks import run_checks
 from deskbrief.config import CalendarName, Config
+from deskbrief.crosschecks.base import run_crosschecks
 from deskbrief.logging import get_logger
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.sources.http import BudgetTracker, CallableBudgetStore, DefaultHttpClient
 from deskbrief.store.backend import KeyNotFoundError, StorageBackend, budget_key
+from deskbrief.store.duck import connect
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
 from deskbrief.timeutil import ensure_utc, to_et
@@ -43,6 +48,22 @@ _EOD_CALENDARS: tuple[CalendarName, ...] = ("XNYS", "SIFMA_US", "TARGET")
 # ---------------------------------------------------------------------------------------------
 
 Hook = Callable[[RunContext], None]
+
+
+@dataclass(frozen=True)
+class CheckOutputs:
+    """What the checks hook hands back; the runner flushes each frame once (P-008).
+
+    ``dq_results`` already holds the single-source rows *and* the mirrored ``consistency``
+    rows; the runner adds its own rows and makes the one ``dq_results`` append for the run.
+    """
+
+    dq_results: pd.DataFrame
+    revisions: pd.DataFrame
+    crosscheck_results: pd.DataFrame
+
+
+ChecksHook = Callable[[RunContext], CheckOutputs | None]
 ReportHook = Callable[[RunContext], str | None]  # returns the report key, if one was written
 
 
@@ -54,11 +75,32 @@ def _noop_report(ctx: RunContext) -> str | None:
     return None
 
 
+def _noop_checks(ctx: RunContext) -> CheckOutputs | None:
+    return None
+
+
+def run_checks_step(ctx: RunContext) -> CheckOutputs:
+    """Checks hook (T06): single-source checks (T20) plus cross-checks (T21), nothing written.
+
+    One DuckDB connection, opened after the observations flush, serves both. The cross-checks'
+    mirrored ``consistency`` rows are concatenated with the check rows here, so the runner makes
+    one ``dq_results`` append per run.
+    """
+    duck = connect(ctx.store, ctx.config)
+    try:
+        dq, revisions = run_checks(ctx, duck)
+        crosscheck, consistency = run_crosschecks(ctx, duck)
+    finally:
+        duck.close()
+    merged = pd.concat([dq, consistency], ignore_index=True) if len(consistency) else dq
+    return CheckOutputs(merged, revisions, crosscheck)
+
+
 @dataclass(frozen=True)
 class JobSteps:
     """Steps that run after the fetch/clean flush, in this order. Each is isolated by the runner."""
 
-    run_checks: Hook = _noop  # T20/T21: dq_results, crosscheck_results, revisions, alerts
+    run_checks: ChecksHook = _noop_checks  # T06: dq_results, crosscheck_results, revisions
     build_serving: Hook = _noop  # T23: serving snapshot
     build_report: ReportHook = _noop_report  # T31: html/xlsx/xlsm (morning)
     notify: Hook = _noop  # T31: email
@@ -66,7 +108,7 @@ class JobSteps:
 
 def steps_for(job: JobKind) -> JobSteps:
     """Hooks for ``job``. Later cards edit this table (T31 is allowed to edit the morning row)."""
-    return JobSteps()
+    return JobSteps(run_checks=run_checks_step)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -242,6 +284,7 @@ def parse_sources_arg(value: str | None) -> frozenset[str] | None:
 
 
 __all__ = [
+    "CheckOutputs",
     "Gate",
     "JobSteps",
     "budget_store",
@@ -250,6 +293,7 @@ __all__ = [
     "evaluate_gate",
     "last_cron_fire",
     "parse_sources_arg",
+    "run_checks_step",
     "schedule_delay_s",
     "scheduled_for_from_env",
     "steps_for",

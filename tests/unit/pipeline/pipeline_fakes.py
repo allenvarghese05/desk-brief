@@ -14,6 +14,7 @@ import pandas as pd
 
 from deskbrief.config import Config, load_config
 from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext
+from deskbrief.pipeline.jobs import JobSteps
 from deskbrief.pipeline.runner import RunEnv
 from deskbrief.schemas import empty_frame, to_frame
 from deskbrief.sources.base import HttpClient, ParseError
@@ -179,8 +180,11 @@ def make_env(
     clock: Callable[[], datetime] | None = None,
     env: dict[str, str] | None = None,
     config: Config | None = None,
+    real_steps: bool = False,
 ) -> RunEnv:
-    return RunEnv(
+    """``real_steps=False`` (default) runs no check/serving hooks, so runner tests stay about the
+    runner; wiring tests pass ``real_steps=True`` to get ``jobs.steps_for``."""
+    env_ = RunEnv(
         config=config or load_test_config(),
         store=LocalBackend(tmp_path / "data"),
         http=NoHttp(),
@@ -189,3 +193,6 @@ def make_env(
         git_sha="deadbeefcafe",
         env=env or {},
     )
+    if not real_steps:
+        env_.steps_for = lambda job: JobSteps()
+    return env_
