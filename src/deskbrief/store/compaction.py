@@ -131,9 +131,10 @@ def _compact_all(store: StorageBackend, jobs: list[tuple[str, date]]) -> list[Co
     """Every (table, date) is attempted; failures are raised together at the end."""
     results: list[CompactionResult] = []
     errors: list[str] = []
+    version = current_clean_version(store)  # once: every partition compacts the same version
     for table, part_date in jobs:
         try:
-            results.append(compact_partition(store, table, part_date))
+            results.append(compact_partition(store, table, part_date, clean_version=version))
         except Exception as exc:  # one failing partition must not stop the others
             errors.append(f"{table} {part_date}: {type(exc).__name__}: {exc}")
     if errors:
