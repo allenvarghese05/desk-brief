@@ -6,7 +6,7 @@ Rules that apply to every card:
 - One card → one branch (`t{id}-{slug}`) → one PR. Target ≤ ~400 changed lines excluding fixtures/lockfile.
 - A card may only touch files in its **Owns** list (+ its own tests and fixtures). Anything else → stop, ask the planner.
 - `config.yaml` *values* are not contracts: a source card may add or adjust feeds/datasets **for its own source** (disclose in the PR). Other config edits go through the planner (ruling P-004 in `docs/plan/decisions.md`).
-- **Contracts** (frozen after Phase 0): `models.py`, `schemas.py`, `sources/base.py`, `store/backend.py` public API, `config.py` models, storage key layout (§6), table schemas (§7.2), Excel table names (§9.2). Changing one needs a planner-approved `contract:` PR merged first.
+- **Contracts** (frozen after Phase 0): `models.py`, `schemas.py`, `sources/base.py`, `store/backend.py` public API, `config.py` models, storage key layout (§6), table schemas (§7.2), Excel table names and column headers (§9.2, P-015). Changing one needs a planner-approved `contract:` PR merged first.
 - TDD: failing test first. No network in unit tests. Synthetic data only under `tests/`, labeled.
 - Definition of done for every card: acceptance criteria met, `make ci` green locally and in CI, reviewer APPROVE, `docs/agent-log/T{id}.md` entry written (P-014).
 
@@ -361,7 +361,7 @@ Order:
 - Changelog: card created from PR #27 (the deferred T07 bullet).
 
 #### T09B — Brief-model follow-ups 2
-- **Depends:** T07, T09 merged · **Blocks:** T32B · **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/*`, `tests/unit/test_query.py`, `tests/brief_synth.py`
+- **Depends:** T07, T09 merged · **Blocks:** T32B · **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/test_model.py`, `tests/unit/report/golden/*`, `tests/unit/test_query.py`, `tests/brief_synth.py`
 - Deliverables:
   - Reuse T20/T07's anomaly logic for notable moves (the deferred T09 bullet).
   - `health_summary` and the cross-check items read only the latest run for each `target_date`. Re-runs keep both runs' rows under P-008. Source: [PR #32 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/32#pullrequestreview-5932131226).
@@ -377,8 +377,10 @@ Order:
 - **Depends:** T09B · **Blocks:** T33 · **Owns:** `src/deskbrief/report/excel.py`, `tests/contract/test_excel_tables.py`, `tests/unit/report/test_excel.py`, `tests/xlsx_read.py`
 - Deliverables:
   - Append `dq_flag` and `as_of_utc` to the five market tables exactly as spec §9.2 lists them (P-015).
+  - Values for `dq_flag`: `fail`, then `warn`, then `pass`, taking the worst over the instrument's checks and cross-checks on the report date. `skip` counts as no result, and an instrument with no result gets `none`.
+  - `as_of_utc`: ISO 8601 UTC text, for example `2026-11-16T11:58:00Z`, stored as text so VBA reads it the same everywhere. Blank when the value is unavailable.
   - Write typed derived values from T09B, and remove `_parse_bp`.
-  - Export the placeholder label as a constant and set the placeholder's `status` to `empty`.
+  - Export the placeholder label as a constant and set the placeholder's `status` to `empty`. Note in the T33 card handoff that macros skip the placeholder row.
   - Replace the FX-format magic number with a named constant.
   - Cover Notable, the IEX and fallback qualifiers, and lineage `is_fallback` in tests. Source: [PR #33 review, findings 2, 3, 5 and 6](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409).
 - Acceptance: the contract test pins the new headers; a negative-spread test.
@@ -403,7 +405,7 @@ Order:
 - Changelog: card created from the PR #31 reviews.
 
 #### T06D — Rebuild follow-ups
-- **Depends:** T06 merged · **Owns:** `src/deskbrief/pipeline/clean.py`, `tests/unit/pipeline/*`
+- **Depends:** T06 merged · **Owns:** `src/deskbrief/pipeline/clean.py`, `tests/unit/pipeline/test_pipeline_rebuild_safety.py`, `tests/fault_injection/inj_runner_rebuild.py`
 - Deliverables:
   - The abort reason names the `clean/_flips/from-{previous}` marker key and the operator step, and the marker stores the flip time.
   - A test that a non-`KeyExistsError` claim-write failure gives `failed`, no flush and an unchanged pointer.
@@ -455,7 +457,7 @@ Order:
 
 - Compaction must accept rebuild files named `run={run_id}-{YYYY-MM}.parquet` (T06 part 2; rows keep the real `run_id`). The scorecard reads only the latest run for each `target_date`. Source: [PR #35 review, finding 4](https://github.com/allenvarghese05/desk-brief/pull/35#pullrequestreview-5932290937) and [PR #32 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/32#pullrequestreview-5932131226).
 
-- Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).; rebuild file names and latest-run reading from the PR #35 and #32 reviews
+- Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231); rebuild file names and latest-run reading from the PR #35 and #32 reviews.
 
 #### T24B — Remaining workflows
 - **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the intraday branch of `evaluate_gate` in `pipeline/jobs.py` (allowed; shared file, see Review follow-ups); only if needed for Yahoo-only enforcement, a small edit in `pipeline/runner.py` after T06 merges
@@ -478,7 +480,7 @@ Order:
     - a 13:45 UTC CET run outside the session is still `skipped`;
     - an exempted run leaves freshness results for other sources unchanged and the serving view intact.
 
-- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; single window rule, US-holiday order, `scheduled_for` gating, Yahoo-only planning and hook safety from [PR #23 round 2, findings 1, 2, 4 and 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588); `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).; Gate source restriction and intraday `scheduled_for` from the PR #24 review
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; single window rule, US-holiday order, `scheduled_for` gating, Yahoo-only planning and hook safety from [PR #23 round 2, findings 1, 2, 4 and 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588); `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510); Gate source restriction and intraday `scheduled_for` from the PR #24 review.
 
 ### Phase 3 — Outputs
 
@@ -506,7 +508,7 @@ Order:
 - **Depends:** T32, T32B, H6 · **Owns:** `vba/*`, `report/vba.py`, `tests/contract/test_vba_manifest.py`, CI step in `ci.yml` (allowed edit: add `vba-manifest` job)
 - Acceptance: `.bas` modules reference only §9.2 names; `.xlsm` produced when `vbaProject.bin` exists, skipped with warning otherwise; manifest check fails on drift; README macro-unblock note.
 
-- Changelog: PR #6 round 2: P-009 line.; depends on T32B and uses the spec §9.2 headers per P-015 ([PR #33 review](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409))
+- Changelog: PR #6 round 2: P-009 line; depends on T32B and uses the spec §9.2 headers per P-015 ([PR #33 review, findings 1 and 4](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409)).
 #### T34 — Dashboard shell, query wiring, hosting
 - P-009: the value component shows the field label next to tier and as-of.
 - **Depends:** T02, T30 (`query.py`) — may start on `query.py` stub interface agreed in T30 PR · **Owns:** `app/Home.py`, `app/theme.py`, `app/components/*`, `.streamlit/config.toml`, `tests/unit/app/test_home.py`

@@ -528,7 +528,7 @@ Column headers (P-015; changing them needs a `contract:` PR):
 | `tbl_sources` | `label`, `status`, `n_fetches`, `n_failed` |
 | `tbl_lineage` | `label`, `field`, `role`, `instrument_id`, `value`, `unit`, `as_of_et`, `source`, `dataset`, `symbol`, `tier`, `is_fallback`, `fetch_id`, `run_id`, `requested_at_et`, `latency_ms`, `http_status`, `fetch_status`, `raw_key`, `rows_parsed` |
 
-In the market tables, `status` is the row's own state (for example no baseline). `dq_flag` is the worst check or cross-check status for the instrument (`pass`, `warn`, `fail` or `none`), and `as_of_utc` is ISO 8601 UTC. An empty table keeps one placeholder row whose `label` starts with `none`, and macros skip it. T32B adds `dq_flag`, `as_of_utc` and a placeholder `status` of `empty`. `Volatility` and `Macro` rows sit in `tbl_global`, told apart by `asset_class`.
+In the market tables, `status` is the row's own state (for example no baseline). `dq_flag` carries the instrument's worst check result for the report date, for `ShowFlaggedOnly`; `as_of_utc` is a UTC timestamp next to the display text in `as_of`. `Volatility` and `Macro` rows sit in `tbl_global`, told apart by `asset_class`.
 
 ### 9.3 VBA (`vba/*.bas`, embedded via `vbaProject.bin`)
 

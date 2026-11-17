@@ -89,10 +89,11 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 - Decision:
   - The column headers of the eight Excel tables, as T32 built them (`src/deskbrief/report/excel.py`, pinned by `tests/contract/test_excel_tables.py`), are recorded in spec §9.2. They are part of the Python–VBA contract.
   - Before T33 starts, the five market tables (`tbl_rates`, `tbl_fx`, `tbl_commod`, `tbl_equity`, `tbl_global`) gain two columns, appended at the end so existing positions stay put:
-    - `dq_flag`: the worst check or cross-check status for that instrument on the report date (`pass`, `warn`, `fail` or `none`), so `ShowFlaggedOnly` can filter market tables.
-    - `as_of_utc`: an ISO 8601 UTC timestamp next to the display text in `as_of`.
-  - Changing any header after this needs a `contract:` PR.
-  - Card T32B builds the two columns.
+    - `dq_flag`: the instrument's worst check or cross-check result on the report date, so `ShowFlaggedOnly` can filter market tables.
+    - `as_of_utc`: a UTC timestamp next to the display text in `as_of`.
+    - The owner approved the two columns. Their names and exact values are the planner's choice, set in card T32B.
+  - Changing any header after this needs a `contract:` PR. The plan's Contracts list names Excel column headers alongside table names.
+  - Card T32B builds the two columns. It is the one header change this ruling approves, so it needs no separate `contract:` PR.
 - Why: T33's macros depend on exact headers. §9.2 named the tables but not their columns, and adding columns after the macros exist would break them. Raised in the [PR #33 review, findings 1 and 4](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409).
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-16, in two answers:
   - Asked whether to record T32's headers in the spec as the official contract, he chose "Yes, record them (Recommended)".
