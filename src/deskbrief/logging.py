@@ -9,9 +9,9 @@ Every log line is one JSON object (structlog). Before rendering, a redaction pro
 Known limits (deliberate, T08; each is pinned by a ``test_known_unmasked`` case): a strong name
 followed by a bare status word (``password=ok``, ``secret: true``, ``cookie: expired``) is kept;
 a 1-3 digit number after a ``key id`` name is kept; and a weak-tier value made only of short
-uppercase/numeric segments is kept if one segment is a date or interval (``token=AB12_1d``).
-Tightened in T08: all-uppercase short-segment values with no date/interval (``token=GHP_ABCD1234``)
-and short numbers after other strong names (``password=123``) are now masked.
+uppercase/numeric segments is kept if one segment is a date or interval (a value like ``AB12_1d``).
+Tightened in T08: all-uppercase short-segment values with no date/interval (like ``AB12_CD34``)
+and short numbers after other strong names (like a 3-digit password) are now masked.
 
 Usage::
 
