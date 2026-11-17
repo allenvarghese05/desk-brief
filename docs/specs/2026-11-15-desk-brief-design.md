@@ -278,12 +278,14 @@ class Source(Protocol):
 
 | Job | Trigger (UTC) | Target | Steps |
 |---|---|---|---|
-| `morning` | two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013); code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
-| `intraday` | cron `*/15 13-21 * * 1-5`; code exits early outside NYSE session. Plus cron `15 12 * * 1-5` (P-012). At the 14:15 Europe/Berlin ECB fix (12:15 UTC summer, 13:15 UTC winter) the run fetches Yahoo quotes even before the NYSE open; the 12:15 trigger is `skipped` in winter | now | fetch Alpaca IEX latest, Twelve Data FX batch, Yahoo quotes (ES=F, CL=F, BZ=F, GC=F, ^TNX, ^VIX) → clean → freshness/validity/anomaly → serving. At the ECB fix outside the session: Yahoo quotes only (`--sources yahoo`) |
-| `eod` | cron `30 22 * * 1-5` | today | Alpaca 1-min bars IEX+SIP for xcheck symbols, daily bars; Twelve Data 1-min around ECB fix; Treasury curve; ECB; Stooq; Cboe → clean → all checks + cross-checks → scorecard → compaction → serving → ping |
+| `morning` | two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013); code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → scorecard → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
+| `intraday` | cron `*/15 13-21 * * 1-5`; code exits early outside NYSE session. Plus cron `15 12 * * 1-5` (P-012). At the 14:15 Europe/Berlin ECB fix (12:15 UTC summer, 13:15 UTC winter) the run fetches Yahoo quotes even before the NYSE open; the 12:15 trigger is `skipped` in winter | now | fetch Alpaca IEX latest, Twelve Data FX batch, Yahoo quotes (ES=F, CL=F, BZ=F, GC=F, ^TNX, ^VIX) → clean → freshness/validity/anomaly → scorecard → serving. At the ECB fix outside the session: Yahoo quotes only (`--sources yahoo`) |
+| `eod` | cron `30 22 * * 1-5` | today | Alpaca 1-min bars IEX+SIP for xcheck symbols, daily bars; Twelve Data 1-min around ECB fix; Treasury curve; ECB; Stooq; Cboe → clean → all checks + cross-checks → scorecard → compaction (last 7 ET days) → serving → ping |
 | `sla` | cron `20 12 * * 1-5` | today | if no report for today's date: email "report missed SLA", fail job (red X = visible incident) |
 | `backfill` | `workflow_dispatch(start, end, sources)` | range | official + daily sources for range; `trigger=manual` |
 | `rebuild` | `workflow_dispatch(from_date)` | range | re-parse raw → new `clean/v{N+1}/` → recompute derived → atomically flip `clean/_CURRENT` |
+
+Every job ends with the same serving step (P-017). It rescores `scorecard_daily` for the job's target date, overwriting that date's file. In `eod` only, it then compacts `observations` and `quarantine` for today's ET date and the six before it, skipping partitions with fewer than two files. Last, it writes the serving files, anchored on the current ET date rather than the target date, so a backfill of an old date never replaces the latest view. Every intraday poll counts in the scorecard; for other jobs, the latest run of each job per source counts.
 
 DST: cron is UTC. Each job computes ET local time and NYSE calendar in code and decides; report date is always an ET date. All workflows use `concurrency: {group: deskbrief-pipeline, cancel-in-progress: false}` so runs never overlap.
 
@@ -350,7 +352,7 @@ deskbrief-data/
 ```
 
 - **Partition dates and `as_of`:** defined once in `src/deskbrief/store/backend.py` (module docstring). Raw uses the UTC date of `ingested_at`; observations use the ET date of `as_of`; run-scoped tables use `target_date`. `as_of` for `1d` = 00:00 ET on the reference date, for `1mo` = 00:00 ET on the 1st, for `1m` = bar start, for `tick` = the trade/quote instant.
-- **Small-files control:** `eod` compacts the day's `clean/.../run=*.parquet` into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
+- **Small-files control:** `eod` compacts `clean/.../run=*.parquet` for today's ET date and the six before it (P-017; partitions with fewer than two files are skipped) into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
 - **Local backend** mirrors the same layout under `.data/` for tests and dev.
 - **Access:** DuckDB `httpfs` with `CREATE SECRET (TYPE r2, ...)`. Three R2 API tokens: `ci-writer` (GHA, read/write this bucket), `dashboard-reader` (read-only), `admin` (Allen only, never in CI).
 
@@ -528,7 +530,7 @@ Column headers (P-015; changing them needs a `contract:` PR):
 | `tbl_sources` | `label`, `status`, `n_fetches`, `n_failed` |
 | `tbl_lineage` | `label`, `field`, `role`, `instrument_id`, `value`, `unit`, `as_of_et`, `source`, `dataset`, `symbol`, `tier`, `is_fallback`, `fetch_id`, `run_id`, `requested_at_et`, `latency_ms`, `http_status`, `fetch_status`, `raw_key`, `rows_parsed` |
 
-In the market tables, `status` is the row's own state (for example no baseline). `dq_flag` carries the instrument's worst check result for the report date, for `ShowFlaggedOnly`; `as_of_utc` is a UTC timestamp next to the display text in `as_of`. `Volatility` and `Macro` rows sit in `tbl_global`, told apart by `asset_class`.
+In the market tables, `status` is the row's own state (for example no baseline). `dq_flag` carries the instrument's worst check result for the report date, for `ShowFlaggedOnly`; `as_of_utc` is a UTC timestamp next to the display text in `as_of`. A table with nothing to list keeps one placeholder row: its first cell reads `none: nothing to list` and the other cells are blank, except that in every table with a `status` column the placeholder's `status` is `empty` (P-016). Macros skip rows whose `status` is `empty`. `tbl_lineage` has no `status` column; macros recognise its placeholder by the first cell. `Volatility` and `Macro` rows sit in `tbl_global`, told apart by `asset_class`.
 
 ### 9.3 VBA (`vba/*.bas`, embedded via `vbaProject.bin`)
 

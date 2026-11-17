@@ -1,6 +1,6 @@
 # Desk Brief — Implementation Plan
 
-Status: v1, 2026-11-15; review follow-up cards added 2026-11-16. Source of truth for task order. Spec: `docs/specs/2026-11-15-desk-brief-design.md` (cited as **§n**). Process: `docs/process/agent-workflow.md`.
+Status: v1, 2026-11-15; review follow-up cards added 2026-11-16 and 2026-11-17. Source of truth for task order. Spec: `docs/specs/2026-11-15-desk-brief-design.md` (cited as **§n**). Process: `docs/process/agent-workflow.md`.
 
 Rules that apply to every card:
 - One card → one branch (`t{id}-{slug}`) → one PR. Target ≤ ~400 changed lines excluding fixtures/lockfile.
@@ -307,13 +307,13 @@ Order and shared files:
 - Changelog: card created from the PR #18 round-2 review; summer test updated for P-012.
 
 #### T18 — Make the test suite runnable in a sandbox
-- **Depends:** T06, T07, T08, T09, T17 merged (they own most of the test directories below) · **Parallel with:** T22 and later cards
+- **Depends:** T06, T07, T08, T09, T17, T07C, T09C merged (they own most of the test directories below; T07C owns `tests/unit/checks/*` and T09C owns `tests/brief_synth.py`) · **Runs last** among the open follow-up cards
 - **Owns:** `tests/conftest.py` (add one repo-root `config.yaml` fixture or constant), the `[tool.pytest.ini_options]` table in `pyproject.toml`. It may make the path-only change to switch these files to that fixture: `tests/unit/test_config.py`, `tests/unit/test_models.py`, `tests/unit/pipeline/{pipeline_fakes.py,test_pipeline_catchup_rebuild.py}`, `tests/unit/{checks,crosschecks,store}/conftest.py`, `tests/unit/sources/test_{fred,twelvedata,alpaca,cboe,stooq}.py`, `tests/fault_injection/test_inj_checks_faults.py`, `tests/brief_synth.py`.
 - Deliverables: find why pytest collection touches `.env.example` and stop it; resolve `config.yaml` from the repo root instead of the working directory; keep tests that build an `httpx` client from loading the system CA store when they use respx.
 - Acceptance: `pytest -m "not integration"` passes from the repo root under a sandbox that denies `.env*` and the system keychain; CI unchanged.
 - Why: reviewers on PRs #16–#21 could not run the suite locally and relied on CI alone. Source: the [PR #16 author response](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315) ("I could not run pytest locally").
 
-- Changelog: card created from the PR #16 author response.
+- Changelog: card created from the PR #16 author response; T07C and T09C added to Depends, and "Parallel with" replaced, because both own files this card path-edits (wave-3 cards, [PR #49 round-1 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/49)).
 
 #### Live-probe gates (owner, before T24A's first scheduled run)
 Every source card merged with its live probe PENDING and synthetic fixtures only. These are the per-source probes that phase gate G1 calls for, listed so none is missed. Before T24A ships, the owner runs each with real keys and records the result in `docs/sources/<source>.md`:
@@ -414,6 +414,91 @@ Order:
 
 - Changelog: card created from the PR #35 review.
 
+### Review follow-ups, wave 3 (from PRs #37 and #40–#48)
+
+Non-blocking findings deferred in the third wave. Each bullet links its source. As before, a follow-up card may own files of a merged card, and no two open cards own the same file.
+
+Order:
+- T09C before T34B (T34B uses T09C's `exclude_tiers` pass-through).
+- T07C, T22C, T23C and T06E are independent of each other and of the other open cards.
+- T18 runs after T07C and T09C, which own test files that T18 path-edits (see T18's Depends).
+- T09C does not block T33. Until it merges, macros must not rely on `as_of_utc` for `UST_2S10S` (see the T33 card).
+
+Not carried: the two PR #41 nits. The stale PR-body line needs no action, and the duplicate-entry message in `config.py` matches the `datasets` message and would need a `contract:` PR to change. Source: [PR #41 review](https://github.com/allenvarghese05/desk-brief/pull/41#pullrequestreview-5933282565).
+
+#### T07C — Check follow-ups 3
+- **Depends:** T07B merged · **Owns:** `src/deskbrief/checks/{feed_completeness.py,freshness.py,base.py}`, `tests/unit/checks/*`
+- Deliverables:
+  - `feed_completeness` covers `alpaca/iex_latest`: at least one tick per configured Alpaca instrument inside the XNYS session, with the same session, early-close and holiday handling as the Yahoo and Twelve Data tick rules. Alpaca's `as_of` is the last-trade time, so the rule asks only that the instrument appears, not that its tick is recent: an illiquid ETF must not fail. `freshness_intraday` keeps judging the feed as a whole. Source: [PR #46 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/46#pullrequestreview-5933420789).
+  - A test for the `as_of <= now` guard in `newest_tick`: a tick with `as_of = now + 5 min` and `ingested_at <= now` is ignored, giving `no_ticks` or an older tick's age. Source: [PR #46 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/46#pullrequestreview-5933420789).
+  - The `freshness_intraday` row of the docstring table in `checks/base.py` fits on one line. Source: [PR #46 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/46#pullrequestreview-5933420789).
+  - This card's own agent log, `docs/agent-log/T07C.md`, records that `docs/agent-log/T07B.md` overstated `feed_completeness`'s coverage until this card. T07B.md itself is not edited. Source: [PR #46 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/46#pullrequestreview-5933420789).
+- Acceptance: tests for an Alpaca instrument missing in session (fail), present but old (pass), pre-open, an early close and a holiday (skip); the guard test fails if the guard is removed.
+
+- Changelog: card created from the PR #46 review.
+
+#### T22C — Cross-check follow-ups 3
+- **Depends:** T22B merged · **Owns:** `src/deskbrief/crosschecks/fx_ecb.py`, `tests/unit/crosschecks/test_xc_fx_ecb.py`
+- Deliverables:
+  - The docstring and the `BAR_LENGTH` comment say the bar-start convention is unverified until the Twelve Data live probe, and that `BAR_LENGTH` becomes 0 if `datetime` turns out to be the bar end.
+  - The `_is_derived` test adds an ECB row for one derived cross and asserts that both source rows carry the same `right_is_derived`.
+  - The Yahoo skip reason formats the tolerance from seconds (or from `TICK_TOLERANCE` directly), so a non-whole-minute tolerance prints correctly.
+  - A comment that `n_yahoo_ticks` counts ticks in the ±10-minute window here, unlike `yahoo_vs_primary`.
+- Source: [PR #42 review, findings 1–4](https://github.com/allenvarghese05/desk-brief/pull/42#pullrequestreview-5933261782).
+- Acceptance: a test per behaviour bullet.
+
+- Changelog: card created from the PR #42 review.
+
+#### T09C — Report follow-ups
+- **Depends:** T09B, T32B, T31B merged · **Blocks:** T34B · **Owns:** `src/deskbrief/report/{model.py,html.py,excel.py,notify.py}`, `src/deskbrief/query.py` (docstring only), `tests/unit/report/*`, `tests/unit/test_query.py`, `tests/brief_synth.py`, `tests/xlsx_read.py`
+- Deliverables:
+  - `Row.as_of` for the 2s10s spread: the shared date stamp of the two yields, so Excel `as_of_utc` is no longer blank for `UST_2S10S`. The Excel test asserts the new value. Source: [PR #47 review, findings 3 and 5](https://github.com/allenvarghese05/desk-brief/pull/47#pullrequestreview-5933580186).
+  - The spread's tail says "change unavailable (no earlier common date)" when there is only one common date, so the HTML caption stops repeating the value. A test builds an n/a row through the real model path, not a hand-built description, and asserts the caption. Source: [PR #43 review, findings 1 and 2](https://github.com/allenvarghese05/desk-brief/pull/43#pullrequestreview-5933289273).
+  - Excel: a test pins `as_of_utc` for one official daily row (the stored midnight-ET stamp), and the `AS_OF_UTC_FORMAT` comment says official values carry a date stamp, not a publish time. A test pins the FX four-decimal boundary with a rate near 150 next to a major pair. Source: [PR #47 review, findings 1 and 2](https://github.com/allenvarghese05/desk-brief/pull/47#pullrequestreview-5933580186).
+  - `BriefModel.from_store` takes a keyword-only `exclude_tiers=()` and passes it to every `query.py` read that already accepts it, so the dashboard can build a hosted model with tier 1 excluded. Default `()` keeps every existing caller unchanged. Source: [PR #37 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/37#pullrequestreview-5932793791) (T09B added the parameter to `query.py` only).
+  - The `health_summary` docstring and the Known-limits text say that a partial re-run supersedes both check tables for its date. Source: [PR #44 round-2 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/44#pullrequestreview-5933450119).
+  - notify: the scrubbed `NotifyError` also has no `__context__` holding the raw exception. The concurrent-archive test flags `overwrite=True` instead of checking for a default value. Source: [PR #43 review, findings 3 and 4](https://github.com/allenvarghese05/desk-brief/pull/43#pullrequestreview-5933289273).
+  - Optional: a `_COMPLETE` marker written last in each archive version, so a partial version is visible. Source: [PR #43 review, finding 5](https://github.com/allenvarghese05/desk-brief/pull/43#pullrequestreview-5933289273).
+- Acceptance: a test per bullet; the Excel contract test is unchanged (no header changes); `SCHEMA_VERSION` stays 1.
+
+- Changelog: card created from the PR #43, #44 and #47 reviews; `from_store` pass-through moved here from T34B, because T34B does not own `model.py` ([PR #49 round-1 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/49)).
+
+#### T23C — Scorecard, serving and compaction follow-ups
+- **Depends:** T23, T23B merged · **Owns:** `src/deskbrief/scorecard.py`, `src/deskbrief/pipeline/serving.py`, `src/deskbrief/store/compaction.py`, `tests/unit/test_scorecard.py`, `tests/unit/test_serving.py`, `tests/unit/test_compaction.py`, `tests/unit/t23_synth.py`, `docs/agent-log/T23B.md` (the stale "Decisions" line only)
+- Deliverables:
+  - The scorecard and the serving build share one DuckDB connection per job, re-reading the scorecard after its write. Measure the intraday serving step before and after and put both numbers in the PR. Source: [PR #45 round-2 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/45#pullrequestreview-5933525550).
+  - The backfill test also asserts `scorecard_30d.parquet`. `parts` is a list literal. Source: [PR #45 round-2 review, findings 3 and 4](https://github.com/allenvarghese05/desk-brief/pull/45#pullrequestreview-5933525550).
+  - The compaction window test checks day 6, the oldest included date, so `RECENT_DAYS = 6` fails it. A serving test with `now_utc` late in the UTC day (after 20:00 ET in winter) asserts the window counts back from the ET date. Source: [PR #48 round-2 review, findings 1 and 2](https://github.com/allenvarghese05/desk-brief/pull/48#pullrequestreview-5933765825).
+  - `_compact_all` resolves the clean version once and passes `clean_version=` to every partition. Re-wrap the `serving.py` module docstring. Source: [PR #48 round-2 review, findings 4 and 5](https://github.com/allenvarghese05/desk-brief/pull/48#pullrequestreview-5933765825).
+  - `docs/agent-log/T23B.md` says the last 7 ET days are compacted, and older partitions only by a manual call. Source: [PR #48 round-2 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/48#pullrequestreview-5933765825).
+- Acceptance: a test per behaviour bullet; each mutation named above fails a test.
+
+- Changelog: card created from the PR #45 and #48 reviews.
+
+#### T06E — Rebuild follow-ups 2
+- **Depends:** T06D merged · **Owns:** `src/deskbrief/pipeline/clean.py`, `tests/unit/pipeline/test_pipeline_rebuild_safety.py`, `tests/fault_injection/inj_runner_rebuild.py`
+- Deliverables:
+  - The marker test asserts that `flipped_at` equals the rebuild's injected clock.
+  - The abort test asserts the full "delete clean/_flips/from-v1" phrase.
+  - The abort reason adds: "if you did not roll back by hand, check `flipped_at` in the marker body first", since a rebuild killed between the claim and the pointer write leaves the same marker.
+  - A comment on the parametrized claim-failure test says why its two cases assert different things.
+  - Optional, carried from T06D: delete abandoned version directories. Abandoned means a `clean/v{N}/` that is not the version in `_CURRENT`, has no `clean/_flips/from-*` marker naming it as `new_version`, and was last written more than 7 days ago. If done, tests show that `_CURRENT`'s version, a flipped-to version and a recent in-progress version are never deleted. Source: the deferred-cleanup item in the [PR #40 review](https://github.com/allenvarghese05/desk-brief/pull/40#pullrequestreview-5933274186) acceptance list.
+- Source: [PR #40 review, findings 1–4](https://github.com/allenvarghese05/desk-brief/pull/40#pullrequestreview-5933274186).
+- Acceptance: a test per behaviour bullet.
+
+- Changelog: card created from the PR #40 review.
+
+#### T34B — Dashboard follow-ups
+- **Depends:** T34, T09C merged · **Owns:** `app/Home.py`, `app/theme.py`, `app/components/*`, `tests/unit/app/{test_home.py,test_components.py,conftest.py}`
+- Deliverables:
+  - Hosted mode passes its hidden tiers to `BriefModel.from_store(..., exclude_tiers=...)` (T09C) in `build_snapshot`, so an instrument whose latest value is tier 1 falls back to tier 2 or 3 instead of disappearing. The `series_all` history keeps its current per-mode filter. The cached reader's key includes the hidden tiers, so hosted and local snapshots never share a cache entry. Source: [PR #37 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/37#pullrequestreview-5932793791).
+  - `Home.py` also catches `duckdb.Error` and `OSError` as "Cannot read the data store", without echoing the message. A test covers an unreachable store, not just missing credentials. Source: [PR #37 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/37#pullrequestreview-5932793791).
+  - The `theme.py` docstring stops promising stale greying. `overview()` in `app/components/data.py` appends dashboard limits to the model's `known_limits` for the Known limits expander: no stale greying, no z column, no curve panel, no live polling, and a 30-day sparkline instead of the spec's 1-day one. Source: [PR #37 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/37#pullrequestreview-5932793791).
+  - `panels.py` raises `ValueError` instead of `assert`, and tests `row.change is not None` instead of the `"n/a"` text. Source: [PR #37 review, finding 4](https://github.com/allenvarghese05/desk-brief/pull/37#pullrequestreview-5932793791).
+- Acceptance: AppTest cases for the hosted fallback and the unreachable store; a test per remaining behaviour bullet.
+
+- Changelog: card created from the PR #37 review (the `query.py` half shipped in T09B); depends on T09C for the `from_store` pass-through, cache key and Known-limits location made explicit, from the [PR #49 round-1 review, findings 3 and 5](https://github.com/allenvarghese05/desk-brief/pull/49).
+
 ### Phase 2 — Scheduling, quality, cross-checks
 
 #### T24A — `morning.yml` v0 (ship first)
@@ -506,9 +591,10 @@ Order:
 #### T33 — VBA `.xlsm`
 - P-009: macros never relabel values; the `label`/`field` column from T32 is kept visible.
 - **Depends:** T32, T32B, H6 · **Owns:** `vba/*`, `report/vba.py`, `tests/contract/test_vba_manifest.py`, CI step in `ci.yml` (allowed edit: add `vba-manifest` job)
+- Handoff from T32B: macros skip rows whose `status` is `empty` (P-016). Until T09C merges, `as_of_utc` is blank for `UST_2S10S`, so macros must not rely on it for that row.
 - Acceptance: `.bas` modules reference only §9.2 names; `.xlsm` produced when `vbaProject.bin` exists, skipped with warning otherwise; manifest check fails on drift; README macro-unblock note.
 
-- Changelog: PR #6 round 2: P-009 line; depends on T32B and uses the spec §9.2 headers per P-015 ([PR #33 review, findings 1 and 4](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409)).
+- Changelog: PR #6 round 2: P-009 line; depends on T32B and uses the spec §9.2 headers per P-015 ([PR #33 review, findings 1 and 4](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409)); T32B handoff line from [PR #47 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/47#pullrequestreview-5933580186) and P-016.
 #### T34 — Dashboard shell, query wiring, hosting
 - P-009: the value component shows the field label next to tier and as-of.
 - **Depends:** T02, T30 (`query.py`) — may start on `query.py` stub interface agreed in T30 PR · **Owns:** `app/Home.py`, `app/theme.py`, `app/components/*`, `.streamlit/config.toml`, `tests/unit/app/test_home.py`
