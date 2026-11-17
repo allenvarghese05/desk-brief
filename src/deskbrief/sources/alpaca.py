@@ -30,7 +30,10 @@ raw body or logs. **Missing key**: no HTTP call; an error ``RawResponse`` naming
 Pagination: bars follow ``next_page_token`` in ``fetch``, bounded by ``MAX_PAGES`` and a repeated
 token check, so it can never loop forever. One page is returned byte-for-byte. Several pages are
 stored as ``{"pages":[<page 1 bytes>,<page 2 bytes>,...]}`` so each page stays verbatim; any
-page failure fails the whole fetch (never a partial frame). ``parse`` accepts both shapes.
+page failure fails the whole fetch (never a partial frame). When pagination stops on the page cap,
+a repeated token or a non-JSON later page, the response is still an error, but its body keeps the
+pages already fetched in that same ``pages`` shape (replayable raw). ``parse`` accepts both shapes
+and refuses the error response. Free-plan IEX prices and volume cover one exchange only.
 
 Errors: a non-2xx fetch, or a provider error body (``{"code":..,"message":..}``, also inside a
 200), raises :class:`ParseError`. A legitimately empty ``bars`` is ``empty_frame`` and the fetch is
@@ -341,16 +344,21 @@ def _error_response(
         responded_at=utc_now(),
         http_status=None,
         content_type="",
-        body=b"",
+        # a failed pagination keeps what it already fetched, verbatim, so raw can be replayed
+        body=_pages_body(pages) if pages else b"",
         error=message,
         attempts=max(1, sum(p.attempts for p in pages or [])),
         status=FetchStatus.ERROR,
     )
 
 
+def _pages_body(pages: list[RawResponse]) -> bytes:
+    return b'{"pages":[' + b",".join(p.body for p in pages) + b"]}"
+
+
 def _merge_pages(req: FetchRequest, pages: list[RawResponse]) -> RawResponse:
     """One response holding every page's bytes verbatim: ``{"pages":[p1,p2,...]}``."""
-    body = b'{"pages":[' + b",".join(p.body for p in pages) + b"]}"
+    body = _pages_body(pages)
     return RawResponse(
         request=req,
         fetch_id=pages[0].fetch_id,

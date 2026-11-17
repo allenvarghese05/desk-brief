@@ -748,6 +748,13 @@ def test_single_page_is_returned_unwrapped(src: AlpacaSource, config: Config) ->
     assert raw.body == fx("bars_sip.json") and raw.attempts == 1
 
 
+def _stored_pages(raw: RawResponse) -> list[dict[str, Any]]:
+    doc = json.loads(raw.body)
+    assert isinstance(doc, dict)
+    pages: list[dict[str, Any]] = doc["pages"]
+    return pages
+
+
 @respx.mock
 @pytest.mark.usefixtures("keys")
 def test_pagination_token_loop_stops_with_an_error(src: AlpacaSource, config: Config) -> None:
@@ -756,7 +763,10 @@ def test_pagination_token_loop_stops_with_an_error(src: AlpacaSource, config: Co
     raw = src.fetch(eod_req(src, config, "iex_bars_1m"), http_client())
     assert route.call_count == 2  # page 1 -> token "same"; page 2 repeats it
     assert not raw.ok and raw.fetch_status is FetchStatus.ERROR
-    assert raw.error is not None and "loop" in raw.error and raw.body == b""
+    assert raw.error is not None and "loop" in raw.error
+    # T08: the pages already fetched are kept verbatim in raw (replayable), though parse refuses
+    assert raw.body == b'{"pages":[' + looping + b"," + looping + b"]}"
+    assert _stored_pages(raw) == [json.loads(looping)] * 2
     with pytest.raises(ParseError):
         src.parse(raw)
 
@@ -776,6 +786,12 @@ def test_pagination_is_bounded_even_when_every_token_is_new(
     raw = src.fetch(eod_req(src, config, "iex_bars_1m"), http_client())
     assert route.call_count == MAX_PAGES
     assert not raw.ok and raw.error is not None and str(MAX_PAGES) in raw.error
+    # T08: all MAX_PAGES pages stay in raw, each verbatim and in order
+    pages = _stored_pages(raw)
+    assert len(pages) == MAX_PAGES
+    assert [p["next_page_token"] for p in pages] == [f"t{i}" for i in range(MAX_PAGES)]
+    with pytest.raises(ParseError):
+        src.parse(raw)
 
 
 @respx.mock
@@ -857,3 +873,17 @@ def test_registers_itself_at_import(config: Config, monkeypatch: pytest.MonkeyPa
     assert registry.registered() == ["alpaca"]
     built = registry.get_sources(config)
     assert [s.name for s in built] == ["alpaca"]
+
+
+@respx.mock
+@pytest.mark.usefixtures("keys")
+def test_non_json_later_page_keeps_the_pages_already_fetched(
+    src: AlpacaSource, config: Config
+) -> None:
+    """T08: a bad later page still leaves the good earlier pages in raw."""
+    page1 = fx("bars_iex_page1.json")
+    responses = iter([json_response(page1), json_response(b"<html>oops</html>")])
+    respx.get(BARS_URL).mock(side_effect=lambda request: next(responses))
+    raw = src.fetch(eod_req(src, config, "iex_bars_1m"), http_client())
+    assert not raw.ok and raw.error is not None and "page 2" in raw.error
+    assert raw.body == b'{"pages":[' + page1 + b"]}"

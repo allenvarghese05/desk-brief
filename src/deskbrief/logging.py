@@ -6,6 +6,13 @@ Every log line is one JSON object (structlog). Before rendering, a redaction pro
 * ``name=value`` secrets inside strings (URLs, query strings, headers)
 * the literal values of known secret environment variables, wherever they appear
 
+Known limits (deliberate, T08; each is pinned by a ``test_known_unmasked`` case): a strong name
+followed by a bare status word (``password=ok``, ``secret: true``, ``cookie: expired``) is kept;
+a 1-3 digit number after a ``key id`` name is kept; and a weak-tier value made only of short
+uppercase/numeric segments is kept if one segment is a date or interval (a value like ``AB12_1d``).
+Tightened in T08: all-uppercase short-segment values with no date/interval (like ``AB12_CD34``)
+and short numbers after other strong names (like a 3-digit password) are now masked.
+
 Usage::
 
     from deskbrief.logging import configure_logging, get_logger
@@ -56,17 +63,24 @@ _NAMED_KEY_RE = re.compile(
 )
 
 # Strong-tier values that are obviously not credentials (whole value, case-insensitive) stay
-# readable: status words, booleans, an already-masked value, and 1-3 digit numbers.
+# readable: status words, booleans and an already-masked value. A 1-3 digit number is readable
+# only after a ``key id`` name (``key_id: 12``); after any other strong name (``password=123``)
+# it is masked, because a short numeric password or PIN is still a credential (T08).
 _PLACEHOLDER_RE = re.compile(
-    r"(required|missing|none|null|ok|expired|n/a|true|false|\*\*\*|\d{1,3})", re.IGNORECASE
+    r"(required|missing|none|null|ok|expired|n/a|true|false|\*\*\*)", re.IGNORECASE
 )
+_ID_NAME_RE = re.compile(r"key[_-]?id$", re.IGNORECASE)
+_SHORT_NUMBER_RE = re.compile(r"\d{1,3}")
 
-# Weak-tier values that look like market/cache keys stay readable: two or more segments split
+# Weak-tier values that look like market/cache keys stay readable: two to five segments split
 # on ":" or "_", each short and uppercase/numeric ("SPY", "EURUSD", "13", "00Z"), an interval
-# ("1m", "1mo"), or a date ("2026-11-14", "2026-11-14T13"). Lowercase or long segments
-# ("sk_live_abc", "AbCd...") are still treated as credentials.
-_KEY_SEGMENT = r"(?:[A-Z0-9]{1,8}|\d+(?:mo|m|h|d|w)|\d{4}-\d{2}-\d{2}(?:T\d{2})?)"
-_MARKET_KEY_RE = re.compile(rf"{_KEY_SEGMENT}(?:[:_]{_KEY_SEGMENT})+")
+# ("1m", "1mo"), or a date ("2026-11-14", "2026-11-14T13"), and AT LEAST ONE segment must be an
+# interval or a date. Lowercase or long segments ("sk_live_abc", "AbCd...") and all-uppercase
+# values with no date/interval ("GHP_ABCD1234", "AB12:CD34", "1234:5678") are credentials (T08).
+_TIME_SEGMENT = r"(?:\d+(?:mo|m|h|d|w)|\d{4}-\d{2}-\d{2}(?:T\d{2})?)"
+_KEY_SEGMENT = rf"(?:[A-Z0-9]{{1,8}}|{_TIME_SEGMENT})"
+_MARKET_KEY_RE = re.compile(rf"{_KEY_SEGMENT}(?:[:_]{_KEY_SEGMENT}){{1,4}}")
+_TIME_SEGMENT_RE = re.compile(_TIME_SEGMENT)
 
 # Free text. Two tiers so we neither leak nor mangle ordinary diagnostics:
 #  * strong names: masked after "=" or ":" whatever the value looks like
@@ -107,13 +121,19 @@ def _mask_header(m: re.Match[str]) -> str:
 
 
 def _mask_strong(m: re.Match[str]) -> str:
-    if _PLACEHOLDER_RE.fullmatch(m.group("val")):
+    val = m.group("val")
+    if _PLACEHOLDER_RE.fullmatch(val) or (
+        _SHORT_NUMBER_RE.fullmatch(val) and _ID_NAME_RE.search(m.group("name"))
+    ):
         return m.group(0)
     return f"{m.group('name')}{m.group('q1') or ''}{m.group('sep')}{m.group('q2') or ''}{MASK}"
 
 
 def _mask_weak(m: re.Match[str]) -> str:
-    if _MARKET_KEY_RE.fullmatch(m.group("val")):
+    val = m.group("val")
+    if _MARKET_KEY_RE.fullmatch(val) and any(
+        _TIME_SEGMENT_RE.fullmatch(seg) for seg in re.split(r"[:_]", val)
+    ):
         return m.group(0)
     return f"{m.group('name')}{m.group('sep')}{MASK}"
 

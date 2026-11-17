@@ -302,7 +302,7 @@ def test_fetch_all_symbols_empty_on_xnys_business_day_is_error(
     raw = make(config, T0).fetch(history_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
     assert raw.fetch_status is FetchStatus.ERROR
     assert raw.error is not None
-    assert "no data on an XNYS business day" in raw.error
+    assert "no data on a trading day" in raw.error
     assert not raw.ok
 
 
@@ -635,3 +635,45 @@ def test_fetch_output_round_trips_through_parse(config: Config, fake: FakeYF) ->
     validate("parsed_observations", h)
     assert row(q, "UST_10Y", "last")["value"] == pytest.approx(4.25)
     assert row(h, "ES_F", "close")["value"] == pytest.approx(1.5)
+
+
+# -- T08: the "empty on a business day is an error" rule depends on the symbol set ----------------
+
+THANKSGIVING = datetime(2026, 11, 26, 15, 0, tzinfo=UTC)  # Thursday, XNYS closed
+
+
+def test_empty_on_xnys_holiday_is_not_an_error_for_us_equities(
+    config: Config, fake: FakeYF
+) -> None:
+    raw = make(config, THANKSGIVING).fetch(history_req("SPY", "QQQ"), http=None)  # type: ignore[arg-type]
+    assert raw.error is None
+    assert raw.fetch_status is FetchStatus.EMPTY
+
+
+@pytest.mark.parametrize("symbols", [("ES=F",), ("^TNX",), ("SPY", "ES=F")])
+def test_empty_on_xnys_holiday_is_an_error_when_a_non_xnys_symbol_expects_data(
+    config: Config, fake: FakeYF, symbols: tuple[str, ...]
+) -> None:
+    """Futures, indices and yields trade on an XNYS holiday weekday, so no data means a block."""
+    raw = make(config, THANKSGIVING).fetch(history_req(*symbols), http=None)  # type: ignore[arg-type]
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.error is not None
+    assert "no data" in raw.error
+
+
+def test_empty_on_a_weekend_is_status_empty_for_non_xnys_symbols(
+    config: Config, fake: FakeYF
+) -> None:
+    raw = make(config, SUNDAY).fetch(history_req("ES=F", "^TNX"), http=None)  # type: ignore[arg-type]
+    assert raw.error is None
+    assert raw.fetch_status is FetchStatus.EMPTY
+
+
+def test_non_xnys_bar_dated_today_is_dropped_even_after_its_session_ends(config: Config) -> None:
+    """T08 (documented limit): with no calendar for futures/indices/yields, today's bar is only
+    emitted from the next day, even when the session has already finished."""
+    payload = history_payload("^TNX", "2026-11-16", tz="America/Chicago")
+    late_evening = datetime(2026, 11, 16, 23, 30, tzinfo=UTC)  # 17:30 Chicago, session over
+    assert make(config).parse(raw_from("history", payload, at=late_evening)).empty
+    next_day = datetime(2026, 11, 17, 15, 0, tzinfo=UTC)
+    assert not make(config).parse(raw_from("history", payload, at=next_day)).empty

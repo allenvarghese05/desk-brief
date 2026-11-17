@@ -19,8 +19,13 @@ model); a failure of one symbol among several is kept in the body and skipped by
 Time semantics (P-006): ``tick`` ``as_of`` = Yahoo's ``regularMarketTime`` (the quote instant);
 ``1d`` ``as_of`` = 00:00 America/New_York on the bar's exchange-local date.
 Volume is not emitted as an observation (shares vs contracts vs zero) but is kept in raw.
-Only final trading-day bars are emitted (see ``_final_bar_filter``). ``fetch`` turns off
-yfinance's ``hide_exceptions`` so blocks/rate limits raise instead of looking like empty data.
+Only final trading-day bars are emitted (see ``_final_bar_filter``). Known limit: futures,
+indices and yields have no calendar here, so a bar dated *today* (exchange-local) is dropped even
+when that session has already ended; it is emitted from the next day's run.
+"All symbols empty" is an error only when a requested symbol expects data that day (US ETFs and
+stocks: an XNYS business day; other kinds: any weekday); see ``YahooSource._expects_data``.
+``fetch`` turns off yfinance's ``hide_exceptions`` so blocks/rate limits raise instead of
+looking like empty data.
 The module registers ``YahooSource`` with the registry on import.
 """
 
@@ -152,10 +157,10 @@ class YahooSource:
             if symbols and len(errors) == len(symbols):
                 http_status, error = None, errors[0]  # every symbol failed
             elif not any(("price" in v) or v.get("bars") for v in symbols.values()):
-                if calendars.is_business_day("XNYS", et_date(requested_at)):
-                    # a business day with nothing at all is a block or outage, not "no data"
+                if self._expects_data(req, et_date(requested_at)):
+                    # a day on which these symbols trade, with nothing at all: block or outage
                     http_status = None
-                    error = f"all {len(symbols)} symbols returned no data on an XNYS business day"
+                    error = f"all {len(symbols)} symbols returned no data on a trading day"
                 else:
                     status = FetchStatus.EMPTY
             if errors:
@@ -174,6 +179,27 @@ class YahooSource:
             url_redacted=url,
             status=status,
         )
+
+    def _expects_data(self, req: FetchRequest, day: date) -> bool:
+        """Would at least one requested symbol normally have data on ``day``?
+
+        US ``etf``/``stock`` symbols follow the XNYS calendar. Everything else (futures, indices,
+        yields, FX, unconfigured symbols) has no calendar here and trades on any weekday, so an
+        XNYS holiday does not excuse an empty answer for them.
+        """
+        kinds = {
+            feed.symbol: inst.kind
+            for inst in self._config.instruments
+            for feed in inst.feeds
+            if feed.source == SOURCE
+        }
+        for symbol in req.symbols:
+            if kinds.get(symbol) in ("etf", "stock"):
+                if calendars.is_business_day("XNYS", day):
+                    return True
+            elif day.weekday() < 5:
+                return True
+        return False
 
     def _collect(self, req: FetchRequest) -> dict[str, dict[str, Any]]:
         if req.dataset != "quote" and req.dataset not in _BAR_DATASETS:

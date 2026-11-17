@@ -53,9 +53,26 @@ error. Tests: `test_sip_window_always_ends_at_least_16_minutes_before_now` (swee
 Bars follow `next_page_token` inside `fetch` (`limit=10000` per page), bounded two ways: a hard cap
 of `MAX_PAGES = 20` pages and a repeated-token check, so it can never loop forever. Either failure,
 a failing HTTP page, or a non-JSON later page returns an error `RawResponse` (the whole fetch
-fails; never a partial frame). A single page is stored byte-for-byte; several pages are stored as
+fails; never a partial frame). When the failure is the page cap, a repeated token or a non-JSON
+later page, the error `RawResponse` body still holds the pages fetched so far (same `pages` shape),
+so raw keeps them even though `parse` refuses the response. A single page is stored byte-for-byte; several pages are stored as
 `{"pages":[<page 1 bytes>,<page 2 bytes>,...]}` so each page stays verbatim, and `parse` accepts both
 shapes.
+
+## IEX covers one exchange only
+
+On the free plan `feed=iex` returns trades, quotes and bars from the IEX exchange alone. IEX prices
+can differ from the consolidated tape, and its volume is a small fraction of consolidated volume
+(IEX volume is never comparable to SIP or to a full-market figure). The `tier` 1 / tier 2 split
+and the `iex_vs_sip` cross-check exist because of this; do not show IEX volume as market volume.
+
+## Deferred (T08)
+
+* A SIP window guard in `fetch` (as well as `plan`) was not added: `fetch` would have to read the
+  wall clock, which makes the recorded-fixture fetch tests depend on the date they run. `plan`
+  stays the single guard (clamped at `now - 16 min`).
+* Per-symbol quarantine (one bad symbol rejecting the whole payload) waits for the live probe,
+  which shows whether real payloads ever carry one bad symbol among good ones.
 
 ## Errors and empty responses
 
