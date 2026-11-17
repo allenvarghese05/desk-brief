@@ -5,8 +5,9 @@ SYNTHETIC FIXTURE: every source, payload and price here is made up.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,58 @@ def test_a_second_flip_away_from_the_same_version_is_refused(tmp_path: Path) -> 
     assert m.status is RunStatus.FAILED
     assert any("already flipped" in n for n in m.notes)
     assert current_clean_version(env.store) == "v1"
+
+
+def test_the_flip_abort_names_the_marker_key_and_the_operator_step(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    first_run(env)
+    env.store.put_bytes("clean/_flips/from-v1", b"{}")
+    note = next(n for n in run_rebuild(env).notes if "already flipped" in n)
+    assert "clean/_flips/from-v1" in note
+    assert "delete" in note
+    assert "rolling back" in note
+
+
+def test_the_flip_marker_records_utc_flip_time_and_new_version(tmp_path: Path) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    first_run(env)
+    assert run_rebuild(env).status is RunStatus.OK
+    body = json.loads(env.store.get_bytes("clean/_flips/from-v1"))
+    assert body["new_version"] == "v2"
+    flipped = datetime.fromisoformat(body["flipped_at"])
+    assert flipped.utcoffset() == timedelta(0)
+    assert body["flipped_at"].endswith("+00:00")
+
+
+@pytest.mark.parametrize("failing", ["clean/v2/_CLAIM", "clean/_flips/from-v1"])
+def test_a_non_key_exists_claim_failure_fails_without_flush_or_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    env = make_env(tmp_path, [FakeSource("stooq")])
+    first_run(env)
+    real_put = env.store.put_bytes
+    flushes: list[str] = []
+    real_flush = clean.RunBuffer.flush
+
+    def no_claim(key: str, data: bytes, *, overwrite: bool = False) -> None:
+        if key == failing:
+            raise OSError("backend unavailable")
+        real_put(key, data, overwrite=overwrite)
+
+    def flush(self: clean.RunBuffer, datasets: Datasets, ctx: Any, **kw: Any) -> Any:
+        flushes.append(ctx.run_id)
+        return real_flush(self, datasets, ctx, **kw)
+
+    monkeypatch.setattr(clean.RunBuffer, "flush", flush)
+    env.store.put_bytes = no_claim  # type: ignore[method-assign]
+    m = run_rebuild(env)
+    assert m.status is RunStatus.FAILED
+    assert current_clean_version(env.store) == "v1"
+    assert not env.store.exists(CLEAN_CURRENT_KEY)  # still never written: unchanged
+    assert not env.store.exists("clean/_flips/from-v1")
+    if failing.endswith("_CLAIM"):
+        assert flushes == []  # the version was never writable: nothing was written
+        assert any("could not claim" in n for n in m.notes)
 
 
 def test_a_failed_pointer_write_releases_the_flip_claim(tmp_path: Path) -> None:
