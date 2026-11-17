@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from brief_synth import FRI, daily
+from brief_synth import FRI, daily, monday_rows
 
+HOME = Path(__file__).resolve().parents[3] / "app" / "Home.py"
 Run = Callable[..., AppTest]
 
 
@@ -40,12 +43,26 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
 def test_hosted_never_renders_tier1_rows(run_home: Run) -> None:
     at = run_home("hosted")
     text = page(at, limits=False)
-    assert "SPY" not in text
     assert "alpaca" not in text
     assert 'title="live"' not in text
     assert "600.00" not in text  # the tier-1 SPY tick value
-    assert "withheld" in " ".join(c.value for c in at.caption)  # honest note
-    assert not [o for sb in at.selectbox for o in sb.options if o.startswith("SPY")]
+    assert "withheld" not in " ".join(c.value for c in at.caption)  # SPY fell back, not hidden
+
+
+def test_hosted_falls_back_to_tier3_when_latest_is_tier1(run_home: Run) -> None:
+    """SPY's latest value is a tier-1 tick; hosted shows its tier-3 Friday close instead."""
+    at = run_home("hosted")
+    text = page(at, limits=False)
+    assert "598.50" in text
+    assert "600.00" not in text
+    assert any(o.startswith("SPY") for sb in at.selectbox for o in sb.options)
+
+
+def test_hosted_shows_gap_for_instrument_with_only_tier1_data(run_home: Run) -> None:
+    only_t1 = [r for r in monday_rows() if not (r["instrument_id"] == "SPY" and r["tier"] != 1)]
+    at = run_home("hosted", rows=only_t1)
+    assert "600.00" not in page(at, limits=False)
+    assert "data unavailable" in page(at, limits=False)  # shown as a gap, never as the tick
 
 
 def test_unset_or_unknown_mode_fails_closed_to_hosted(run_home: Run) -> None:
@@ -110,6 +127,48 @@ def test_unreachable_r2_shows_error_not_traceback(
     assert at.error
     assert "R2_READER_ACCESS_KEY_ID" in at.error[0].value
     assert "SECRET" not in at.error[0].value.replace("R2_READER_SECRET_ACCESS_KEY", "")
+
+
+def test_unreadable_store_shows_error_without_message(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import duckdb
+    from app.components import data
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise duckdb.IOException("secret-token-123 connection refused")
+
+    run_home("hosted")  # builds the store and config
+    st.cache_data.clear()
+    monkeypatch.setattr(data, "build_snapshot", boom)
+    at = AppTest.from_file(str(HOME), default_timeout=60).run()
+    assert not at.exception
+    assert at.error
+    assert "Cannot read the data store" in at.error[0].value
+    assert "secret-token-123" not in at.error[0].value
+
+
+def test_oserror_shows_error_without_message(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.components import data
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise OSError("/private/path/leak")
+
+    run_home("hosted")
+    st.cache_data.clear()
+    monkeypatch.setattr(data, "build_snapshot", boom)
+    at = AppTest.from_file(str(HOME), default_timeout=60).run()
+    assert at.error
+    assert "Cannot read the data store" in at.error[0].value
+    assert "/private/path/leak" not in at.error[0].value
+
+
+def test_known_limits_list_dashboard_limits(run_home: Run) -> None:
+    text = page(run_home("hosted"))
+    for phrase in ("stale", "z", "curve", "polling", "30-day"):
+        assert phrase in text.lower()
 
 
 def test_provenance_drawer_lists_lineage(run_home: Run) -> None:

@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 
+import duckdb
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,12 +38,16 @@ def main() -> None:
     path = os.environ.get("DESKBRIEF_CONFIG") or str(ROOT / "config.yaml")
     config = _config(path)
     mode = data.resolve_mode(os.environ.get(config.dashboard.mode_env))
+    hidden = data.hidden_tiers(mode, config)
     try:
-        snap = data.load_snapshot(config)
+        snap = data.load_snapshot(config, hidden)
     except StorageError as exc:  # message names missing variables, never their values
         st.error(f"Cannot read the data store: {exc}")
         return
-    ov = data.overview(snap, mode, data.hidden_tiers(mode, config))
+    except (duckdb.Error, OSError):  # may hold paths or endpoints: say nothing about the cause
+        st.error("Cannot read the data store.")
+        return
+    ov = data.overview(snap, mode, hidden)
     panels.top_bar(ov)
     panels.headline_strip(ov)
     for section in ov.sections:

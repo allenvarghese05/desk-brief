@@ -1,6 +1,7 @@
 """Dashboard look (spec 10.2, minimalist-ui): warm neutral text, no gradients, no shadows, no card
 borders. One muted green / rust pair marks direction; red is reserved for check failures and
-stale or hidden data is grey. Numbers are tabular and right-aligned.
+unavailable values are grey (there is no stale greying yet).
+Numbers are tabular and right-aligned.
 """
 
 from __future__ import annotations
