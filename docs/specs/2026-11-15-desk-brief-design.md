@@ -519,6 +519,17 @@ Tier glyphs everywhere: ● live/proxy (T1), ◐ delayed (T2), ○ official (T3)
 
 Sheets: `Brief` (headline + index), `Rates`, `FX`, `Commodities`, `Equities`, `Global`, `Checks`, `Sources`, `Lineage`, `About` (honesty labels, tier legend, limits). Each data block is an Excel Table with a stable name (`tbl_rates`, `tbl_fx`, `tbl_commod`, `tbl_equity`, `tbl_global`, `tbl_checks`, `tbl_sources`, `tbl_lineage`) and stable column headers — **this naming is the contract between Python and VBA.** Number formats: yields `0.00"%"`, bps `+0;-0`, prices `#,##0.00`, FX `0.0000`.
 
+Column headers (P-015; changing them needs a `contract:` PR):
+
+| Table | Headers, in order |
+|---|---|
+| `tbl_rates`, `tbl_fx`, `tbl_commod`, `tbl_equity`, `tbl_global` | `instrument_id`, `asset_class`, `name`, `label`, `field`, `value`, `unit`, `change`, `change_unit`, `basis`, `status`, `as_of`, `tier`, `tier_name`, `proxy`, `qualifiers`, `description`, `dq_flag`, `as_of_utc` |
+| `tbl_checks` | `label`, `kind`, `status`, `check_type`, `source`, `instrument_id`, `group_id`, `observed`, `threshold`, `ref_date` |
+| `tbl_sources` | `label`, `status`, `n_fetches`, `n_failed` |
+| `tbl_lineage` | `label`, `field`, `role`, `instrument_id`, `value`, `unit`, `as_of_et`, `source`, `dataset`, `symbol`, `tier`, `is_fallback`, `fetch_id`, `run_id`, `requested_at_et`, `latency_ms`, `http_status`, `fetch_status`, `raw_key`, `rows_parsed` |
+
+In the market tables, `status` is the row's own state (for example no baseline). `dq_flag` carries the instrument's worst check result for the report date, for `ShowFlaggedOnly`; `as_of_utc` is a UTC timestamp next to the display text in `as_of`. `Volatility` and `Macro` rows sit in `tbl_global`, told apart by `asset_class`.
+
 ### 9.3 VBA (`vba/*.bas`, embedded via `vbaProject.bin`)
 
 | Module | Macro | What it does |
