@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -57,7 +58,7 @@ def world(tmp_path: Path, *, run_b_row: bool = True) -> LocalBackend:
     return store
 
 
-def card(store: LocalBackend, **kw: str) -> pd.DataFrame:
+def card(store: LocalBackend, **kw: Any) -> pd.DataFrame:
     return scorecard.compute_scorecard(connect(store, ctx_for(store, "X").config), D, **kw)
 
 
@@ -93,8 +94,8 @@ def test_disagreement_rate_counts_both_sides_and_ignores_skips(tmp_path: Path) -
 
 def test_current_run_is_scored_before_its_runs_row_exists(tmp_path: Path) -> None:
     store = world(tmp_path, run_b_row=False)  # the runner writes ``runs`` after the hooks
-    assert scorecard.latest_run_id(connect(store, ctx_for(store, "X").config), D) == "RUNA"
-    df = card(store, run_id="RUNB").set_index("source")
+    assert card(store).set_index("source").loc["yahoo"]["fetches"] == 5  # only RUNA is on record
+    df = card(store, current=ctx_for(store, "RUNB")).set_index("source")
     assert df.loc["yahoo"]["fetches"] == 3
 
 
@@ -107,3 +108,49 @@ def test_write_overwrites_the_day_and_skips_an_empty_day(tmp_path: Path) -> None
     assert len(Datasets(store).read("scorecard_daily")) == 2
     empty = ctx_for(store, "RUNZ", target=D + timedelta(days=1))
     assert scorecard.write_scorecard(empty) is None  # nothing fetched: keep any earlier file
+
+
+def two_jobs(tmp_path: Path) -> LocalBackend:
+    """A morning run fetched yahoo; the eod run fetched yahoo and stooq (all synthetic)."""
+    store = LocalBackend(tmp_path / "data")
+    for run_id, job, hours in (("RUNM", "morning", -6), ("RUNE", "eod", 0)):
+        row = run_row(run_id, D, NOON + timedelta(hours=hours), job)
+        put(store, "runs", [row], run_id, D)
+    morning = [
+        fetch("RUNM", "yahoo", "ok", 100, 1),
+        fetch("RUNM", "ecb", "error", 50, 2, age_s=None),
+    ]
+    put(store, "source_log", morning, "RUNM", D)
+    eod = [fetch("RUNE", "yahoo", "ok", 300, 3), fetch("RUNE", "stooq", "ok", 400, 4)]
+    put(store, "source_log", eod, "RUNE", D)
+    return store
+
+
+def test_sources_of_different_jobs_on_one_date_are_all_scored(tmp_path: Path) -> None:
+    df = card(two_jobs(tmp_path)).set_index("source")
+    assert list(df.index) == ["ecb", "stooq", "yahoo"]  # morning-only ecb survives eod
+    assert df.loc["ecb"]["error_rate"] == 1.0
+    assert df.loc["yahoo"]["fetches"] == 2  # one latest run per job, summed
+    assert df.loc["yahoo"]["median_latency_ms"] == 200  # pooled over both: median(100, 300)
+
+
+def test_an_eod_rerun_of_one_source_replaces_only_that_source(tmp_path: Path) -> None:
+    store = two_jobs(tmp_path)
+    put(store, "runs", [run_row("RUNE2", D, NOON + timedelta(hours=1))], "RUNE2", D)
+    put(store, "source_log", [fetch("RUNE2", "stooq", "error", 700, 5, age_s=None)], "RUNE2", D)
+    df = card(store).set_index("source")
+    assert df.loc["stooq"]["ok_rate"] == 0.0  # the re-run replaced RUNE's stooq
+    assert df.loc["stooq"]["fetches"] == 1
+    assert df.loc["yahoo"]["fetches"] == 2  # yahoo keeps RUNE's numbers (and the morning's)
+    assert df.loc["yahoo"]["median_latency_ms"] == 200
+
+
+def test_a_full_eod_rerun_replaces_every_eod_source(tmp_path: Path) -> None:
+    store = two_jobs(tmp_path)
+    put(store, "runs", [run_row("RUNE2", D, NOON + timedelta(hours=1))], "RUNE2", D)
+    rerun = [fetch("RUNE2", "yahoo", "ok", 900, 5), fetch("RUNE2", "stooq", "ok", 800, 6)]
+    put(store, "source_log", rerun, "RUNE2", D)
+    df = card(store).set_index("source")
+    assert df.loc["stooq"]["median_latency_ms"] == 800
+    assert df.loc["yahoo"]["fetches"] == 2  # morning's run plus RUNE2; RUNE is gone
+    assert df.loc["yahoo"]["median_latency_ms"] == 500  # median(100, 900)

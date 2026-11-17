@@ -48,9 +48,9 @@ def put(
     return Datasets(store).append(table, to_frame(table, rows), ctx_for(store, run_id, part), part)
 
 
-def run_row(run_id: str, target: date, started: datetime) -> dict[str, Any]:
+def run_row(run_id: str, target: date, started: datetime, job: str = "eod") -> dict[str, Any]:
     return {
-        "run_id": run_id, "job": "eod", "trigger": "manual", "target_date": target,
+        "run_id": run_id, "job": job, "trigger": "manual", "target_date": target,
         "started_at": started, "status": "ok", "git_sha": "deadbeef", "config_hash": "cafe",
         "n_fetch": 1, "n_fetch_failed": 0, "n_obs": 1, "n_dq_fail": 0, "n_dq_warn": 0,
     }  # fmt: skip
