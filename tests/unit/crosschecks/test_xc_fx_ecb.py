@@ -7,6 +7,7 @@ ECB rows are ``field=rate``, ``interval=1d``, ``as_of`` 00:00 ET of the referenc
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -191,9 +192,47 @@ def test_yahoo_ticks_only_outside_tolerance_is_skip_with_its_own_reason(
     r = run(store, config)[("EURUSD", "yahoo")]
     assert r.status is DQStatus.SKIP
     assert (
-        r.details["reason"] == "no Yahoo tick within +-1m of the fix (EURUSD; nearest 300 s away)"
+        r.details["reason"] == "no Yahoo tick within +-60 s of the fix (EURUSD; nearest 300 s away)"
     )
     assert r.details["n_yahoo_ticks"] == 1
+
+
+def test_yahoo_skip_reason_formats_a_non_whole_minute_tolerance(
+    store: LocalBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fx_ecb, "TICK_TOLERANCE", timedelta(seconds=90))
+    put(store, config, [ecb("EURUSD", 1.0), yh("EURUSD", minutes(FIX, 5), 1.0)])
+    r = run(store, config)[("EURUSD", "yahoo")]
+    assert "within +-90 s of the fix" in r.details["reason"]
+
+
+def test_both_sources_carry_the_same_derived_flag_for_a_cross(
+    store: LocalBackend, config: Config
+) -> None:
+    put(store, config, [ecb("GBPUSD", 1.25), td("GBPUSD", BAR, 1.25), yh("GBPUSD", FIX, 1.25)])
+    out = run(store, config)
+    flags = {out[("GBPUSD", s)].details["right_is_derived"] for s in ("twelvedata", "yahoo")}
+    assert flags == {True}
+
+
+def test_bar_start_convention_is_documented_as_unverified() -> None:
+    doc = fx_ecb.__doc__ or ""
+    assert "unverified" in doc
+    assert "Twelve Data live probe" in doc
+    assert "BAR_LENGTH" in doc
+    src = inspect.getsource(fx_ecb)
+    lines = src.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("BAR_LENGTH"))
+    comment = "\n".join(lines[i - 2 : i])
+    assert "unverified" in comment
+    assert "BAR_LENGTH becomes 0" in comment
+
+
+def test_n_yahoo_ticks_window_is_documented() -> None:
+    src = inspect.getsource(fx_ecb)
+    assert "n_yahoo_ticks" in src
+    assert "+-10 minute window" in src
+    assert "unlike\n            # `yahoo_vs_primary`" in src
 
 
 @pytest.mark.parametrize(("offset_s", "used"), [(-60, True), (60, True), (-61, False), (61, False)])
