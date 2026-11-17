@@ -14,7 +14,6 @@ unavailable value is a blank cell with ``status = unavailable``. A table with no
 Spec §9.2 has no sheet for Volatility or Macro: those rows go to ``Global`` (``tbl_global``), told
 apart by the ``asset_class`` column.
 """
-# ruff: noqa: RUF001  (true minus sign is intentional input to the parser below)
 
 from __future__ import annotations
 
@@ -27,7 +26,7 @@ import xlsxwriter
 
 from deskbrief.query import value_label
 from deskbrief.report.model import SPREAD_ID, TIER_GLYPH, TIER_NAME, BriefModel, Row
-from deskbrief.timeutil import to_et
+from deskbrief.timeutil import ensure_utc, to_et
 
 SHEETS = (
     "Brief", "Rates", "FX", "Commodities", "Equities", "Global",
@@ -44,7 +43,7 @@ MARKET_TABLES = (
 MARKET_HEADERS = (
     "instrument_id", "asset_class", "name", "label", "field", "value", "unit", "change",
     "change_unit", "basis", "status", "as_of", "tier", "tier_name", "proxy", "qualifiers",
-    "description",
+    "description", "dq_flag", "as_of_utc",
 )  # fmt: skip
 CHECKS_HEADERS = (
     "label", "kind", "status", "check_type", "source", "instrument_id", "group_id",
@@ -58,6 +57,13 @@ LINEAGE_HEADERS = (
 )  # fmt: skip
 
 YIELD_FMT, BP_FMT, PRICE_FMT, FX_FMT = '0.00"%"', "+0;-0", "#,##0.00", "0.0000"
+#: an ``fx_rate`` below this is a major pair (4 decimals); a larger one (JPY and the like) is not
+FX_FOUR_DECIMALS_BELOW = 20
+#: ``as_of_utc`` is text in this shape, so VBA reads it the same under every locale
+AS_OF_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+#: first cell and ``status`` of the one row an otherwise empty table keeps; macros skip it
+PLACEHOLDER_LABEL = "none: nothing to list"
+PLACEHOLDER_STATUS = "empty"
 _CHANGE_FMT = {
     "bp": BP_FMT,
     "pct": '+0.0"%";-0.0"%"',
@@ -77,7 +83,6 @@ _INDEX_NOTES = {
     "Lineage": "the fetch behind every value and every baseline",
     "About": "how to read the values, tier legend, known limits",
 }
-_PLACEHOLDER = "none: nothing to list"
 
 
 def write_workbook(model: BriefModel, path: Path) -> Path:
@@ -131,49 +136,34 @@ def build(model: BriefModel, wb: Any) -> None:
 Cell = Any  # a plain value, or a ``(value, number_format)`` pair
 
 
-def _parse_bp(text: str) -> float | None:
-    """The derived 2s10s row carries no typed value, only ``+22bp`` or minus-3bp text."""
-    if not text.endswith("bp"):
-        return None
-    return float(text.removesuffix("bp").replace("−", "-"))
-
-
 def _value_fmt(unit: str, value: float) -> str:
     if unit == "pct":
         return YIELD_FMT
     if unit == "bp":
         return BP_FMT
-    if unit == "fx_rate" and abs(value) < 20:
+    if unit == "fx_rate" and abs(value) < FX_FOUR_DECIMALS_BELOW:
         return FX_FMT
     return PRICE_FMT
 
 
 def _market_row(r: Row) -> list[Cell]:
-    value: float | None
-    change: float | None
-    unit: str | None
-    field: str | None
-    change_unit: str | None
+    field: str | None = r.change.last.field if r.change else None
     if r.instrument_id == SPREAD_ID and r.available:
-        value, unit, field = _parse_bp(r.value_text), "bp", "spread"
-        change, change_unit = _parse_bp(r.change_text), "bp"
-    elif r.change is not None:
-        last = r.change.last
-        value, unit, field = last.value, last.unit, last.field
-        change, change_unit = r.change.change, r.change.change_unit
-    else:
-        value = unit = field = change = change_unit = None
+        field = "spread"
+    value, change = r.value, r.change_value
     status = r.change.status if r.change else ("ok" if r.available else "unavailable")
+    # The model keeps no timestamp for the derived spread (it is a date), so its cell is blank.
+    stamp = r.change.last.as_of if r.available and r.change else None
     return [
         r.instrument_id,
         r.asset_class,
         r.name,
         r.label,
         field,
-        (value, _value_fmt(unit or "", value or 0.0)) if value is not None else None,
-        unit,
-        (change, _CHANGE_FMT[change_unit or "pct"]) if change is not None else None,
-        change_unit if change is not None else None,
+        (value, _value_fmt(r.value_unit or "", value)) if value is not None else None,
+        r.value_unit,
+        (change, _CHANGE_FMT[r.change_value_unit or "pct"]) if change is not None else None,
+        r.change_value_unit if change is not None else None,
         r.basis,
         status,
         r.as_of_text if r.available else None,
@@ -182,6 +172,8 @@ def _market_row(r: Row) -> list[Cell]:
         "proxy" if r.is_proxy else None,
         "; ".join(r.qualifiers) or None,
         r.description,
+        r.dq_flag,
+        ensure_utc(stamp).strftime(AS_OF_UTC_FORMAT) if stamp else None,
     ]
 
 
@@ -289,7 +281,7 @@ class _Book:
     def table(
         self, ws: Any, name: str, headers: Sequence[str], rows: Sequence[Sequence[Cell]]
     ) -> None:
-        body = list(rows) or [[_PLACEHOLDER] + [None] * (len(headers) - 1)]
+        body = list(rows) or [self._placeholder(headers)]
         ws.add_table(
             0,
             0,
@@ -304,6 +296,13 @@ class _Book:
             for c, cell in enumerate(row):
                 value, num = cell if isinstance(cell, tuple) else (cell, None)
                 self._put(ws, r, c, value, num)
+
+    @staticmethod
+    def _placeholder(headers: Sequence[str]) -> list[Cell]:
+        row: list[Cell] = [PLACEHOLDER_LABEL] + [None] * (len(headers) - 1)
+        if "status" in headers:
+            row[headers.index("status")] = PLACEHOLDER_STATUS
+        return row
 
     def _put(self, ws: Any, r: int, c: int, value: Any, num: str | None) -> None:
         fmt = self.fmt(num) if num else None

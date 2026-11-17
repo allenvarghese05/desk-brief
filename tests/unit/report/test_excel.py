@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import xlsx_read
-from brief_synth import MON, MON_0700, World, monday_rows
+from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, monday_rows, tick
 from deskbrief.report.excel import write_workbook
 from deskbrief.report.model import BriefModel
 from xlsx_read import Cell
@@ -151,3 +151,67 @@ def test_about_explains_close_vs_yield_vs_reference_rate_and_tiers(
     assert "proxy" in text
     assert "Not investment advice" in text
     assert "Proxies, not the underlying" in text  # known limits come from the model
+
+
+def test_as_of_utc_is_iso_text_and_dq_flag_is_the_models(book: xlsx_read.Workbook) -> None:
+    es = find(book, "tbl_equity", "ES_F")
+    assert es["as_of_utc"].value == "2026-11-16T11:59:00Z"  # 06:59 ET tick
+    assert es["as_of_utc"].num_format == "General"  # text, so VBA reads it the same everywhere
+    assert es["dq_flag"].value == "warn"
+    assert find(book, "tbl_rates", "UST_10Y")["dq_flag"].value == "none"
+    assert find(book, "tbl_rates", "UST_10Y")["as_of_utc"].value == "2026-11-16T11:58:00Z"
+
+
+def test_unavailable_row_has_blank_as_of_utc_and_none_flag(book: xlsx_read.Workbook) -> None:
+    r = find(book, "tbl_equity", "QQQ")
+    assert (r["as_of_utc"].value, r["dq_flag"].value) == (None, "none")
+
+
+def test_negative_spread_is_typed_negative_bp(tmp_path: Path) -> None:
+    """Inverted curve: the typed value is -18, never parsed from the minus-sign text."""
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    w = World(tmp_path / "w")
+    w.observations(
+        [
+            daily("UST_10Y", THU, 4.10, **tsy),
+            daily("UST_10Y", FRI, 4.00, **tsy),
+            daily("UST_2Y", THU, 4.20, **tsy),
+            daily("UST_2Y", FRI, 4.18, **tsy),
+        ]
+    )
+    r = find(write(w, tmp_path), "tbl_rates", "UST_2S10S")
+    assert (r["value"].value, r["value"].num_format) == (-18.0, BP)  # 4.00 - 4.18
+    assert (r["change"].value, r["change"].num_format) == (pytest.approx(-8.0), BP)  # from -10
+    assert (r["unit"].value, r["change_unit"].value) == ("bp", "bp")
+
+
+def test_qualifiers_iex_and_fallback_and_lineage_is_fallback(tmp_path: Path) -> None:
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    w.observations(
+        [tick("BRENT", et(MON, "06:58"), 75.0, source="stooq", dataset="daily", is_fallback=True)]
+    )
+    book = write(w, tmp_path)
+    assert find(book, "tbl_equity", "SPY")["qualifiers"].value == (
+        "IEX: single exchange, not the consolidated tape"
+    )
+    brent = find(book, "tbl_commod", "BRENT")
+    assert "fallback source: stooq" in str(brent["qualifiers"].value)
+    flags = {
+        r["instrument_id"].value: r["is_fallback"].value for r in book.table_rows("tbl_lineage")
+    }
+    assert flags["BRENT"] == "fallback"
+    assert flags["SPY"] is None
+
+
+def test_notable_lines_reach_the_brief_sheet(tmp_path: Path) -> None:
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    w.xchecks(MON, [("spy_vs_es", "fail", 40.0)], mirror=True)
+    model = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    assert any(n.kind == "crosscheck" for n in model.notable)
+    book = xlsx_read.Workbook(write_workbook(model, tmp_path / "brief.xlsx"))
+    text = [str(c.value) for c in book.cells("Brief").values()]
+    assert "Notable" in text
+    for n in model.notable:
+        assert n.text in text

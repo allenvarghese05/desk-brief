@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 import xlsx_read
-from brief_synth import MON, MON_0700, World, monday_rows
-from deskbrief.report.excel import write_workbook
+from brief_synth import MON, MON_0700, World, load, monday_rows
+from deskbrief.report.excel import PLACEHOLDER_LABEL, PLACEHOLDER_STATUS, write_workbook
 from deskbrief.report.model import BriefModel
 
 # spec §9.2, verbatim
@@ -34,7 +34,7 @@ TABLE_SHEET = {
 MARKET_HEADERS = (
     "instrument_id", "asset_class", "name", "label", "field", "value", "unit", "change",
     "change_unit", "basis", "status", "as_of", "tier", "tier_name", "proxy", "qualifiers",
-    "description",
+    "description", "dq_flag", "as_of_utc",
 )  # fmt: skip
 HEADERS = {
     **dict.fromkeys(
@@ -85,3 +85,52 @@ def test_every_data_table_has_a_label_column_and_market_tables_a_field_column(
         assert "label" in headers, name
     for name in ("tbl_rates", "tbl_fx", "tbl_commod", "tbl_equity", "tbl_global", "tbl_lineage"):
         assert "field" in HEADERS[name], name
+
+
+MARKET_TABLES = ("tbl_rates", "tbl_fx", "tbl_commod", "tbl_equity", "tbl_global")
+
+
+def test_new_market_columns_come_last_in_this_order() -> None:
+    """P-015: ``dq_flag`` then ``as_of_utc`` appended; every earlier position is unchanged."""
+    assert MARKET_HEADERS[-2:] == ("dq_flag", "as_of_utc")
+    assert MARKET_HEADERS.index("description") == 16
+
+
+def test_dq_flag_vocabulary_is_exactly_fail_warn_pass_none(tmp_path: Path) -> None:
+    """The VBA filters on these four strings; ``skip`` never appears (it is no result)."""
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    w.dq(
+        MON,
+        [
+            ("a", "pass", "yahoo", "UST_10Y"),
+            ("b", "warn", "yahoo", "ES_F"),
+            ("c", "fail", "ecb", "EURUSD"),
+            ("d", "skip", "yahoo", "WTI"),
+        ],
+    )
+    model = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    book = xlsx_read.Workbook(write_workbook(model, tmp_path / "brief.xlsx"))
+    flags = {
+        r["instrument_id"].value: r["dq_flag"].value
+        for t in MARKET_TABLES
+        for r in book.table_rows(t)
+    }
+    assert flags["UST_10Y"] == "pass"
+    assert flags["ES_F"] == "warn"
+    assert flags["EURUSD"] == "fail"
+    assert flags["WTI"] == "none"  # only a skip: no result
+    assert set(flags.values()) == {"fail", "warn", "pass", "none"}
+
+
+def test_placeholder_label_constant_and_status_empty(tmp_path: Path) -> None:
+    """Macros skip the placeholder row by its ``status``; the label is exported, not retyped."""
+    assert PLACEHOLDER_LABEL == "none: nothing to list"
+    assert PLACEHOLDER_STATUS == "empty"
+    model = BriefModel.from_store(World(tmp_path / "e").connect(), load(), MON, MON_0700)
+    book = xlsx_read.Workbook(write_workbook(model, tmp_path / "brief.xlsx"))
+    for name in ("tbl_checks", "tbl_lineage"):  # tbl_sources lists every enabled source
+        (row,) = book.table_rows(name)
+        assert row["label"].value == PLACEHOLDER_LABEL, name
+        if "status" in row:
+            assert row["status"].value == "empty", name
