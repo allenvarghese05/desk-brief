@@ -6,13 +6,14 @@ Thursday 2026-11-12 (00:00 ET = 05:00Z for the ``1d`` as_of). Run at Monday 2026
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 from xc_fakes import DAY_FRI, duck_for, fred, make_ctx, obs, put, stooq_close
 
-from deskbrief.config import Config
+from deskbrief.calendars import is_business_day
+from deskbrief.config import Config, Group, Tolerance
 from deskbrief.crosschecks.base import registered, run_crosschecks
 from deskbrief.crosschecks.proxy_exact import ProxyVsExact, in_roll_window
 from deskbrief.models import DQStatus, XResult
@@ -21,29 +22,35 @@ from deskbrief.store.local import LocalBackend
 THU = datetime(2026, 11, 12, 5, 0, tzinfo=UTC)
 
 
-def closes(inst: str, prev: float, cur: float, **over: Any) -> list[dict[str, Any]]:
-    return [
-        stooq_close(inst, prev, as_of=THU, **over),
-        stooq_close(inst, cur, as_of=DAY_FRI, **over),
-    ]
+def closes(
+    inst: str, prev: float, cur: float, days: tuple[datetime, datetime] = (THU, DAY_FRI)
+) -> list[dict[str, Any]]:
+    return [stooq_close(inst, prev, as_of=days[0]), stooq_close(inst, cur, as_of=days[1])]
 
 
-def history(inst: str, symbol: str, prev: float, cur: float, unit: str) -> list[dict[str, Any]]:
+def history(
+    inst: str,
+    symbol: str,
+    prev: float,
+    cur: float,
+    unit: str,
+    days: tuple[datetime, datetime] = (THU, DAY_FRI),
+) -> list[dict[str, Any]]:
     def row(as_of: datetime, v: float) -> dict[str, Any]:
         return obs(
             instrument_id=inst, source="yahoo", dataset="history", symbol=symbol, tier=2,
             field="close", interval="1d", as_of=as_of, value=v, unit=unit,
         )  # fmt: skip
 
-    return [row(THU, prev), row(DAY_FRI, cur)]
+    return [row(days[0], prev), row(days[1], cur)]
 
 
 def yields(inst: str, series: str, prev: float, cur: float) -> list[dict[str, Any]]:
     return [fred(inst, series, prev, as_of=THU), fred(inst, series, cur, as_of=DAY_FRI)]
 
 
-def run(store: LocalBackend, config: Config) -> dict[str, XResult]:
-    ctx = make_ctx(config, store)
+def run(store: LocalBackend, config: Config, **kw: Any) -> dict[str, XResult]:
+    ctx = make_ctx(config, store, **kw)
     return {r.group_id or "": r for r in ProxyVsExact().evaluate(ctx, duck_for(store, config))}
 
 
@@ -131,8 +138,20 @@ def test_direction_rule_overrides_small_difference_thresholds(
     assert r.status is DQStatus.FAIL
 
 
-def test_futures_roll_window_caps_at_warn(store: LocalBackend, config: Config) -> None:
-    # oil_wti: warn 150 bp, fail 400 bp. 2026-11-13 is inside the approximate WTI roll window
+def spot_wti(prev: float, cur: float) -> list[dict[str, Any]]:
+    """FRED spot WTI (tier 3): present in config, but not the exact leg of spec §3."""
+
+    def row(as_of: datetime, v: float) -> dict[str, Any]:
+        return obs(
+            instrument_id="WTI", source="fred", dataset="series", symbol="DCOILWTICO", tier=3,
+            field="close", interval="1d", as_of=as_of, value=v, unit="USD",
+        )  # fmt: skip
+
+    return [row(THU, prev), row(DAY_FRI, cur)]
+
+
+def test_wti_roll_window_is_not_modelled(store: LocalBackend, config: Config) -> None:
+    # oil_wti: warn 150 bp, fail 400 bp. No WTI roll calendar yet, so a fail is never softened
     put(
         store,
         config,
@@ -140,13 +159,23 @@ def test_futures_roll_window_caps_at_warn(store: LocalBackend, config: Config) -
     )
     r = run(store, config)["oil_wti"]
     assert r.diff_bps == pytest.approx(-1000.0)
-    assert r.status is DQStatus.WARN  # would be FAIL outside a roll window
-    assert r.details["roll_window"] is True
-    assert r.details["capped_at_warn"] is True
+    assert r.status is DQStatus.FAIL
+    assert r.details["roll_window"] == "not modelled"
+    assert r.details["capped_at_warn"] is False
 
 
-def test_outside_a_roll_window_failure_stands(store: LocalBackend, config: Config) -> None:
-    # gold has no roll rule in this module: same shape of gap fails
+def test_wti_direction_disagreement_still_fails(store: LocalBackend, config: Config) -> None:
+    put(
+        store,
+        config,
+        closes("USO", 100.0, 100.5) + history("WTI", "CL=F", 60.0, 59.7, "USD"),  # +50 vs -50 bp
+    )
+    r = run(store, config)["oil_wti"]
+    assert r.details["direction_disagreement"] is True
+    assert r.status is DQStatus.FAIL
+
+
+def test_gold_roll_window_is_not_modelled(store: LocalBackend, config: Config) -> None:
     put(
         store,
         config,
@@ -154,8 +183,63 @@ def test_outside_a_roll_window_failure_stands(store: LocalBackend, config: Confi
     )
     r = run(store, config)["gold"]
     assert r.status is DQStatus.FAIL
-    assert r.details["roll_window"] is False
+    assert r.details["roll_window"] == "not modelled"
     assert r.details["capped_at_warn"] is False
+
+
+def test_exact_leg_is_the_yahoo_future_not_spot(store: LocalBackend, config: Config) -> None:
+    # only FRED spot exists for WTI: skip with a reason, never a silent switch to spot
+    put(store, config, closes("USO", 100.0, 100.0) + spot_wti(60.0, 66.0))
+    r = run(store, config)["oil_wti"]
+    assert r.status is DQStatus.SKIP
+    assert "WTI/close from yahoo" in r.details["reason"]
+    # with both present the (lower-tier) Yahoo future wins over the tier-3 spot
+    put(store, config, history("WTI", "CL=F", 60.0, 60.3, "USD"))
+    r = run(store, config)["oil_wti"]
+    assert r.right_source == "yahoo"
+    assert r.right_value == pytest.approx(0.005)
+
+
+# Dec 2026: ES_F third Friday is the 18th, window 10-19 Dec. Fri 11 Dec vs Thu 10 Dec.
+ES_DAYS = (datetime(2026, 12, 10, 5, 0, tzinfo=UTC), datetime(2026, 12, 11, 5, 0, tzinfo=UTC))
+ES_NOW = datetime(2026, 12, 14, 12, 0, tzinfo=UTC)
+# Nov 2026: BRENT window is the last 3 sessions (25, 27, 30 Nov). Wed 25 Nov vs Tue 24 Nov.
+BR_DAYS = (datetime(2026, 11, 24, 5, 0, tzinfo=UTC), datetime(2026, 11, 25, 5, 0, tzinfo=UTC))
+BR_NOW = datetime(2026, 11, 27, 12, 0, tzinfo=UTC)
+
+
+def test_direction_fail_inside_an_es_roll_window_is_capped_at_warn(
+    store: LocalBackend, config: Config
+) -> None:
+    # spec §8.2: roll windows cap at warn, and that includes the direction-disagreement fail
+    put(
+        store,
+        config,
+        closes("SPY", 100.0, 100.30, ES_DAYS)  # +30 bp
+        + history("ES_F", "ES=F", 5000.0, 4985.0, "index_pts", ES_DAYS),  # -30 bp
+    )
+    r = run(store, config, target=ES_NOW.date(), now=ES_NOW)["sp500"]
+    assert r.details["ref_date"] == "2026-12-11"
+    assert r.details["direction_disagreement"] is True
+    assert r.details["roll_window"] is True
+    assert r.details["capped_at_warn"] is True
+    assert r.status is DQStatus.WARN
+
+
+def test_direction_fail_inside_a_brent_roll_window_is_capped_at_warn(
+    store: LocalBackend, config: Config
+) -> None:
+    put(
+        store,
+        config,
+        closes("BNO", 100.0, 100.5, BR_DAYS)  # +50 bp
+        + history("BRENT", "BZ=F", 80.0, 79.6, "USD", BR_DAYS),  # -50 bp
+    )
+    r = run(store, config, target=BR_NOW.date(), now=BR_NOW)["oil_brent"]
+    assert r.details["ref_date"] == "2026-11-25"
+    assert r.details["direction_disagreement"] is True
+    assert r.details["roll_window"] is True
+    assert r.status is DQStatus.WARN
 
 
 @pytest.mark.parametrize(
@@ -166,20 +250,27 @@ def test_outside_a_roll_window_failure_stands(store: LocalBackend, config: Confi
         ("ES_F", date(2026, 12, 19), True),  # 1 day after
         ("ES_F", date(2026, 12, 20), False),
         ("ES_F", date(2026, 11, 13), False),  # not a quarterly month
-        ("WTI", date(2026, 11, 5), False),  # expiry Fri 20 Nov; window = 10 sessions before
-        ("WTI", date(2026, 11, 6), True),
-        ("WTI", date(2026, 11, 23), True),  # 1 session after
-        ("WTI", date(2026, 11, 24), False),
         ("BRENT", date(2026, 11, 24), False),  # last sessions: 25, 27, 30 Nov
         ("BRENT", date(2026, 11, 25), True),
         ("BRENT", date(2026, 12, 1), True),  # first session of the next month
         ("BRENT", date(2026, 12, 2), False),
+        ("WTI", date(2026, 11, 13), False),  # not modelled
         ("GOLD_F", date(2026, 11, 30), False),
         ("SPY", date(2026, 11, 30), False),
     ],
 )
 def test_in_roll_window(inst: str, day: date, expected: bool) -> None:
     assert in_roll_window(inst, day) is expected
+
+
+@pytest.mark.parametrize(("inst", "sessions"), [("ES_F", 27), ("BRENT", 48), ("WTI", 0)])
+def test_roll_window_length_over_2026(inst: str, sessions: int) -> None:
+    # APPROXIMATION pending a roll-calendar card: these are the counts the current rules give,
+    # out of 251 XNYS sessions in 2026. Pinned so a rule change that widens a window (and so
+    # disables fails on more days) shows up in review.
+    days = [date(2026, 1, 1) + timedelta(days=n) for n in range(365)]
+    n = sum(is_business_day("XNYS", d) and in_roll_window(inst, d) for d in days)
+    assert n == sessions
 
 
 # --- inverse_duration relation (TLT: D = 16.5, warn 40 bp, fail 100 bp) -------------------------
@@ -261,6 +352,37 @@ def test_inverse_duration_falls_back_to_the_exact_yield_source(
     )
     r = run(store, config)["ust_10y"]
     assert r.right_source == "yahoo"
+    assert r.status is DQStatus.PASS
+
+
+def test_official_yield_takes_precedence_over_exact_when_they_differ(
+    store: LocalBackend, config: Config
+) -> None:
+    # synthetic group: official = UST_2Y, exact = UST_10Y (config's real groups use one id for both)
+    g = Group(
+        id="prec", label="precedence", proxy="SHY", exact="UST_10Y", official="UST_2Y",
+        relation="inverse_duration", duration=1.9, tolerance=Tolerance(warn_bps=10, fail_bps=30),
+    )  # fmt: skip
+    cfg = config.model_copy(update={"groups": (g,)})
+    both = closes("SHY", 100.0, 99.81) + yields("UST_2Y", "DGS2", 4.00, 4.10)  # -0.19%
+    both += yields("UST_10Y", "DGS10", 4.00, 4.50)
+    put(store, config, both)
+    r = ProxyVsExact().evaluate(make_ctx(cfg, store), duck_for(store, cfg))[0]
+    assert (r.right_instrument, r.status) == ("UST_2Y", DQStatus.PASS)
+    assert r.details["delta_yield_bp"] == pytest.approx(10.0)
+
+
+def test_exact_yield_is_used_only_when_official_has_no_data(
+    store: LocalBackend, config: Config
+) -> None:
+    g = Group(
+        id="prec", label="precedence", proxy="SHY", exact="UST_10Y", official="UST_2Y",
+        relation="inverse_duration", duration=1.9, tolerance=Tolerance(warn_bps=10, fail_bps=30),
+    )  # fmt: skip
+    cfg = config.model_copy(update={"groups": (g,)})
+    put(store, config, closes("SHY", 100.0, 99.905) + yields("UST_10Y", "DGS10", 4.00, 4.05))
+    r = ProxyVsExact().evaluate(make_ctx(cfg, store), duck_for(store, cfg))[0]
+    assert r.right_instrument == "UST_10Y"
     assert r.status is DQStatus.PASS
 
 

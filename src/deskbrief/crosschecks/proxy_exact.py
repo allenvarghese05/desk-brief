@@ -4,12 +4,18 @@ One row per configured group that has a ``proxy`` and relation ``return`` or ``i
 (``same``/``level`` groups are other checks). Evaluated for the last completed XNYS session
 before today (P-009, reading ``obs_pit``) against the session before it; both days of a series
 must come from one ``(source, dataset)``, preferring the higher tier, so sources are never mixed.
+The daily closes are not simultaneous (futures settle at their own time, ETFs close at 16:00 ET),
+so some structural bp gap between the two legs is expected even on a clean day.
 
 * ``return`` (SPY vs ES_F, USO vs WTI, BNO vs BRENT, GLD vs GOLD_F): left = proxy daily return,
   right = exact daily return (decimal, ``close/prev - 1``); ``diff_bps`` is the difference of the
   returns (1 bp = 0.01% return). The status is the group tolerance, except that **opposite
-  directions with both moves above 25 bp is a fail**. Futures roll windows (:func:`in_roll_window`)
-  cap a fail at ``warn``.
+  directions with both moves above 25 bp is a fail**. The exact leg is the future named in spec §3
+  and read from Yahoo only (ES=F, CL=F, BZ=F, GC=F); a missing Yahoo leg is a ``skip``, never a
+  silent switch to FRED spot. Roll windows (:func:`in_roll_window`, ES_F and BRENT only) cap any
+  fail, direction fails included (spec §8.2), at ``warn`` and set ``details.capped_at_warn``.
+  WTI and gold roll windows are NOT modelled (``details.roll_window == "not modelled"``) until a
+  roll-calendar card exists: an earlier WTI window covered 57% of sessions and disabled fails.
 * ``inverse_duration`` (SHY/IEF/TLT vs a yield): expected ETF return = ``-D * dy`` with ``dy`` the
   change of the ``pct`` yield in decimal (TLT, D = 16.5, +10 bp -> -1.65%). left = actual ETF
   return, ``expected_value`` = expected return, right = the current yield. The yield comes from
@@ -48,6 +54,8 @@ DIRECTION_MIN_BPS = 25.0  # both moves must exceed this for a direction disagree
 
 CLOSE = ("close",)
 YIELD = ("yield", "close")
+ROLL_MODELLED = ("ES_F", "BRENT")  # no calendar for WTI or gold yet
+EXACT_SOURCES = ("yahoo",)  # spec §3: the exact leg is the Yahoo future
 Pair = tuple[Obs, Obs]  # (previous day, reference day)
 
 
@@ -55,22 +63,15 @@ def in_roll_window(instrument_id: str, d: date) -> bool:
     """True if ``d`` is in the approximate futures roll window of ``instrument_id``.
 
     ES_F: 8 days before through 1 day after the third Friday of Mar/Jun/Sep/Dec.
-    WTI: 10 sessions before through 1 session after the last trade day (3 sessions before the
-    25th, or before the session preceding it when the 25th is closed). BRENT: the last 3
-    sessions of a month and the first of the next. Other instruments have no rule.
+    BRENT: the last 3 sessions of a month and the first of the next. Other instruments (WTI,
+    gold) are not modelled: always False. Approximation pending a roll-calendar card; over 2026
+    it covers 27 (ES_F) and 48 (BRENT) of 251 sessions.
     """
     if instrument_id == "ES_F":
         if d.month not in (3, 6, 9, 12):
             return False
         third_friday = date(d.year, d.month, 15 + (4 - date(d.year, d.month, 15).weekday()) % 7)
         return third_friday - timedelta(days=8) <= d <= third_friday + timedelta(days=1)
-    if instrument_id == "WTI":
-        the_25th = date(d.year, d.month, 25)
-        anchor = (
-            the_25th if is_business_day("XNYS", the_25th) else prev_business_day("XNYS", the_25th)
-        )
-        expiry = add_business_days("XNYS", anchor, -3)
-        return add_business_days("XNYS", expiry, -10) <= d <= add_business_days("XNYS", expiry, 1)
     if instrument_id == "BRENT":
         last = date(d.year + (d.month == 12), d.month % 12 + 1, 1) - timedelta(days=1)
         while not is_business_day("XNYS", last):
@@ -107,14 +108,15 @@ class ProxyVsExact:
         exact_id = g.exact or g.official
         assert exact_id is not None  # Group validator: a return group has two instruments
         p_pair = _daily(ctx, duck, g.proxy, CLOSE, prev, ref)
-        e_pair = _daily(ctx, duck, exact_id, CLOSE, prev, ref)
+        e_pair = _daily(ctx, duck, exact_id, CLOSE, prev, ref, EXACT_SOURCES)
         details = _base(prev, ref, "daily_return_diff")
-        details["roll_window"] = in_roll_window(exact_id, ref)
+        modelled = exact_id in ROLL_MODELLED
+        details["roll_window"] = in_roll_window(exact_id, ref) if modelled else "not modelled"
         details["capped_at_warn"] = False
         left_src, right_src = _src(p_pair), _src(e_pair)
         ret_p = ret_e = diff = None
         status = DQStatus.SKIP
-        reason = _missing([(g.proxy, "close", p_pair), (exact_id, "close", e_pair)])
+        reason = _missing([(g.proxy, "close", p_pair), (exact_id, "close from yahoo", e_pair)])
         if p_pair:
             ret_p = _ret(p_pair, details, "left")
         if e_pair:
@@ -127,13 +129,14 @@ class ProxyVsExact:
             details["direction_disagreement"] = opposite
             if opposite:
                 status = DQStatus.FAIL
-            if status is DQStatus.FAIL and details["roll_window"]:
+            if status is DQStatus.FAIL and details["roll_window"] is True:
                 status, details["capped_at_warn"] = DQStatus.WARN, True
         elif reason is None:
             reason = "previous value is zero"
         return _result(
-            ctx, g, "return", (g.proxy, left_src, ret_p), (exact_id, right_src, ret_e), ret_e,
-            diff, status, ref, details, reason,
+            ctx, g, "return", left=(g.proxy, left_src, ret_p),
+            right=(exact_id, right_src, ret_e), expected=ret_e, diff=diff, status=status,
+            ref=ref, details=details, reason=reason,
         )  # fmt: skip
 
     # -- inverse duration -------------------------------------------------------------------
@@ -172,9 +175,10 @@ class ProxyVsExact:
         elif reason is None:
             reason = "previous value is zero"
         return _result(
-            ctx, g, "inverse_duration", (g.proxy, _src(p_pair), ret_p),
-            (y_id, _src(y_pair), y_pair[1].value if y_pair else None), expected,
-            diff, status, ref, details, reason,
+            ctx, g, "inverse_duration", left=(g.proxy, _src(p_pair), ret_p),
+            right=(y_id, _src(y_pair), y_pair[1].value if y_pair else None),
+            expected=expected, diff=diff, status=status, ref=ref, details=details,
+            reason=reason,
         )  # fmt: skip
 
 
@@ -188,17 +192,18 @@ def _daily(
     fields: tuple[str, ...],
     prev: date,
     ref: date,
+    sources: tuple[str, ...] | None = None,
 ) -> Pair | None:
     """Both days' value (first field of ``fields`` present) from one ``(source, dataset)``.
 
     Highest-tier feed first. A yield is ``yield`` at Treasury/FRED but ``close`` (unit ``pct``)
-    at Yahoo (``^TNX``), so yields pass both fields.
+    at Yahoo (``^TNX``), so yields pass both fields. ``sources`` restricts the feeds read.
     """
     start, end = et_day_bounds(prev)[0], et_day_bounds(ref)[1]
     seen: set[tuple[str, str]] = set()
     for feed in sorted(ctx.config.instrument(inst_id).feeds, key=lambda f: -f.tier):
         key = (feed.source, feed.dataset)
-        if key in seen:
+        if key in seen or (sources is not None and feed.source not in sources):
             continue
         seen.add(key)
         rows = query_obs(
@@ -255,6 +260,7 @@ def _result(
     ctx: RunContext,
     g: Group,
     relation: str,
+    *,
     left: tuple[str, str, float | None],
     right: tuple[str, str, float | None],
     expected: float | None,
