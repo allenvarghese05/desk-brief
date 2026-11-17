@@ -26,18 +26,21 @@ exposed = _kit.exposed_sources(ctx.config, ctx.hidden)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _dq(_ctx: _kit.Ctx, where: str) -> pd.DataFrame:
+def _dq(_ctx: _kit.Ctx, where: str) -> pd.DataFrame:  # `where` only keys the cache
     conn = data.open_connection(_ctx.config, os.environ)
     try:
         return conn.execute(
-            "SELECT * FROM dq WHERE target_date > ? ORDER BY target_date, check_type, check_name",
+            "SELECT run_id, check_type, check_name, source, instrument_id, target_date, "
+            "evaluated_at, "
+            "status, observed, threshold FROM dq WHERE target_date > ? "
+            "ORDER BY target_date, check_type, check_name",
             [_ctx.today - timedelta(days=WINDOW)],
         ).fetchdf()
     finally:
         conn.close()
 
 
-where = _kit._where(ctx.config)
+where = _kit.where_key(ctx.config)
 dq = _dq(ctx, where)
 withheld = 0
 if not dq.empty:
@@ -92,7 +95,12 @@ else:
             for r in g.itertuples()
         ]
         late = g["observed"].dropna()
-        latest = f"latest {late.iloc[-1]:g} minutes late" if len(late) else "minutes late n/a"
+        grace = g["threshold"].dropna()
+        latest = (
+            f"latest {late.iloc[-1]:g} minutes late (grace {grace.iloc[-1]:g})"
+            if len(late) and len(grace)
+            else "minutes late n/a"
+        )
         rows.append(
             f"<tr><td>{_kit.escape(str(name))}</td><td>{_kit.status_strip(items)}</td>"
             f"<td class='db-n num'>{latest}</td></tr>"

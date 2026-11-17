@@ -22,7 +22,7 @@ from streamlit.testing.v1 import AppTest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # t23_synth lives in tests/unit
 from t23_synth import ctx_for, put
 
-from brief_synth import FRI, MON, MON_0700, THU, World, et, monday_rows
+from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, monday_rows
 
 REPO = Path(__file__).resolve().parents[3]
 PAGES = REPO / "app" / "pages"
@@ -47,13 +47,16 @@ def text(at: AppTest) -> str:
     return "\n".join(parts)
 
 
-def xcheck_rows(target: Any, ref: Any, status: str, diff: float, left: str, right: str, name: str):
+def xcheck_rows(
+    target: Any, ref: Any, status: str, diff: float | None, left: str, right: str, name: str,
+    warn: float = 5.0,
+):  # fmt: skip
     return {
         "result_id": f"XC{next(_ids)}", "run_id": "RUN1", "check_name": name,
         "group_id": "sp500", "target_date": target, "at_time": et(target, "07:00"),
         "relation": "return", "left_instrument": "SPY", "left_source": left,
         "right_instrument": "ES_F", "right_source": right, "left_value": 1.0,
-        "right_value": 1.0, "expected_value": 1.0, "diff_bps": diff, "warn_bps": 5.0,
+        "right_value": 1.0, "expected_value": 1.0, "diff_bps": diff, "warn_bps": warn,
         "fail_bps": 10.0, "status": status,
         "details_json": json.dumps({"ref_date": ref.isoformat()}),
     }  # fmt: skip
@@ -71,12 +74,16 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
         w = World(tmp_path / f"w{next(counter)}")
         if not empty:
             w.observations(monday_rows())
+            w.observations(
+                [daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest")]
+            )
             w.dq(MON, [("fresh_a", "pass", "treasury", None), ("fresh_b", "warn", "ecb", None)])
             w.dq(MON, [("range_spy", "fail", "alpaca", "SPY")], check_type="validity")
             w.dq(FRI, [("fresh_a", "pass", "treasury", None)])
             w.dq(THU, [("fresh_a", "fail", "treasury", None)])
             w._append("crosscheck_results", [
-                xcheck_rows(MON, FRI, "warn", 6.5, "alpaca", "yahoo", "spy_vs_es"),
+                xcheck_rows(MON, FRI, "warn", 6.5, "alpaca", "yahoo", "spy_vs_es", warn=7.0),
+                xcheck_rows(MON, FRI, "skip", None, "yahoo", "ecb", "skipped_check"),
                 xcheck_rows(MON, FRI, "pass", 1.0, "yahoo", "ecb", "es_vs_yahoo"),
                 xcheck_rows(FRI, THU, "pass", 0.5, "yahoo", "ecb", "es_vs_yahoo"),
             ], lambda r: r["target_date"])  # fmt: skip
@@ -87,6 +94,13 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
                 "error_rate": 0.0, "disagreement_rate": None, "n_crosschecks": 0,
             }], "RUNSC", FRI)  # fmt: skip
             w.run(MON)
+            w._append("runs", [{
+                "run_id": "RUNLATE", "job": "intraday", "trigger": "schedule", "target_date": MON,
+                "scheduled_for": et(MON, "06:50"), "started_at": et(MON, "06:55"),
+                "finished_at": et(MON, "06:58"), "status": "ok", "git_sha": "deadbeef",
+                "config_hash": "cafe", "n_fetch": 1, "n_fetch_failed": 0, "n_obs": 1,
+                "n_dq_fail": 0, "n_dq_warn": 0,
+            }], lambda r: MON)  # fmt: skip
             w.run(FRI, status="degraded")
             w._append("revisions", [{
                 "instrument_id": "UST_10Y", "source": "treasury", "dataset": "par_curve",
@@ -103,6 +117,10 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
                 "fetch_id": "F9", "run_id": "RUN1", "source": "yahoo", "dataset": "quote",
                 "reason": "negative_price", "detail": "synthetic", "raw_key": None,
                 "detected_at": et(MON, "06:40"),
+            }, {
+                "fetch_id": "F10", "run_id": "RUN1", "source": "alpaca", "dataset": "iex_latest",
+                "reason": "tier1_bad_tick", "detail": "synthetic", "raw_key": None,
+                "detected_at": et(MON, "06:41"),
             }], lambda r: MON)  # fmt: skip
             from deskbrief.pipeline import serving
 
@@ -242,12 +260,13 @@ def test_sources_empty_says_so(run_page: RunPage) -> None:
 # --- page 6: runs ---------------------------------------------------------------------------
 
 
-def test_runs_table_and_incidents_from_file(run_page: RunPage, tmp_path: Path) -> None:
+def test_runs_table_start_delay_and_links(run_page: RunPage) -> None:
     at = run_page("runs", "hosted")
     t = text(at)
     assert "degraded" in t
     assert "ok" in t
     assert "morning" in t
+    assert "300 s" in t  # scheduled 06:50, started 06:55
     assert "github.com/allenvarghese05/desk-brief/actions" in t
     # the template block inside the code fence is not an incident
     assert "YYYY-MM-DD" not in t
@@ -260,7 +279,7 @@ def test_parse_incidents_skips_the_template_fence() -> None:
     from app.pages import _incidents
 
     md = (
-        "# Incidents\n\n```\n## YYYY-MM-DD — short title\n- Detected by:\n```\n\n"
+        "# Incidents\n\n```\n## 2026-01-01 — Template example\n- Detected by:\n```\n\n"
         "## 2026-11-20 — Yahoo outage\n- Detected by: freshness\n- Impact: none\n\n"
         "## 2026-11-18 — Late FRED\n- Detected by: sla\n"
     )
@@ -269,3 +288,30 @@ def test_parse_incidents_skips_the_template_fence() -> None:
     assert items[0].date == "2026-11-20"
     assert "freshness" in items[0].body
     assert _incidents.parse("# Incidents\n\nnone yet") == []
+
+
+def test_instrument_hosted_history_and_tolerance_exclude_tier1(run_page: RunPage) -> None:
+    hosted = text(pick(run_page("instrument", "hosted"), "SPY"))
+    assert "590.25" not in hosted  # the tier-1 daily value in the 30-day window
+    assert "warn 7" not in hosted  # tolerance of the check that names alpaca
+    assert "warn 5 bp" in hosted
+    local = text(pick(run_page("instrument", "local"), "SPY"))
+    assert "590.25" in local
+
+
+def test_skipped_crosscheck_has_no_nan_in_strip_or_chart(run_page: RunPage) -> None:
+    at = run_page("xchecks", "local")
+    at = at.selectbox(key="check").select("sp500 · skipped_check").run()
+    t = text(at)
+    assert not at.exception
+    assert "nan" not in t.lower().replace("financial", "")
+    assert "no data in this window" in t
+    assert "no gap computed" in text(run_page("xchecks", "local"))
+
+
+def test_data_health_quarantine_hosted_withholds_tier1_source(run_page: RunPage) -> None:
+    hosted = text(run_page("health", "hosted"))
+    assert "tier1_bad_tick" not in hosted
+    assert "negative_price" in hosted
+    assert "withheld" in hosted
+    assert "tier1_bad_tick" in text(run_page("health", "local"))

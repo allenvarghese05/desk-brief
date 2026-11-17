@@ -20,7 +20,7 @@ from app.components import data  # noqa: E402
 from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell  # noqa: E402
 from app.pages import _kit  # noqa: E402
 
-from deskbrief.query import ValueRow, field_label, latest_snapshot, lineages  # noqa: E402
+from deskbrief.query import Lineage, ValueRow, field_label, latest_snapshot, lineages  # noqa: E402
 from deskbrief.timeutil import et_date, to_et  # noqa: E402
 
 ctx = _kit.context("Instrument")
@@ -72,14 +72,14 @@ def _checks(_ctx: _kit.Ctx, where: str, iid: str) -> pd.DataFrame:
             "SELECT target_date, check_type, check_name, source, status, observed, threshold "
             "FROM dq WHERE instrument_id = ? AND target_date > ? ORDER BY target_date DESC, "
             "check_name",
-            [iid, ctx.today - timedelta(days=CHECK_DAYS)],
+            [iid, _ctx.today - timedelta(days=CHECK_DAYS)],
         ).fetchdf()
     finally:
         conn.close()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _lineage(_ctx: _kit.Ctx, where: str, row: ValueRow) -> object:
+def _lineage(_ctx: _kit.Ctx, where: str, row: ValueRow) -> Lineage:
     conn = data.open_connection(_ctx.config, os.environ)
     try:
         return lineages(conn, [row])[0]
@@ -95,7 +95,7 @@ if not names:
 iid = st.selectbox(
     "Instrument", sorted(names), format_func=lambda i: f"{i} · {names[i]}", key="instrument"
 )
-where = _kit._where(ctx.config)
+where = _kit.where_key(ctx.config)
 rows = _ladder(ctx, where, iid, ctx.hidden)
 if not rows:
     st.markdown("No value in a tier shown in this mode.")
@@ -107,8 +107,16 @@ best = max(rows, key=lambda r: r.tier)
 cells = []
 for r in sorted(rows, key=lambda r: -r.tier):
     p = Provenance(r.source, r.tier, f"{to_et(r.as_of):%d %b %H:%M}", field_label(r))
-    gap = (r.value - best.value) / best.value * 10_000 if best.value and r is not best else None
-    gap_txt = "reference" if r is best else f"{gap:+.1f} bp vs {TIER_NAME[best.tier]}"
+    if r is best:
+        gap_txt = "reference"
+    elif r.unit == "pct":  # a yield: the gap is a difference in percentage points
+        gap_txt = f"{(r.value - best.value) * 100:+.1f} bp vs {TIER_NAME[best.tier]}"
+    elif best.value:  # a price or rate: the gap is relative
+        gap_txt = (
+            f"{(r.value - best.value) / best.value * 10_000:+.1f} bp vs {TIER_NAME[best.tier]}"
+        )
+    else:
+        gap_txt = "n/a"
     cells.append(
         f"<tr><td>{TIER_GLYPH[r.tier]} {TIER_NAME[r.tier]}</td>"
         f'<td class="num">{value_cell(f"{r.value:,.4f} {r.unit}", p)}</td>'
@@ -121,6 +129,7 @@ if not tol.empty:
     t = _kit.keep_rows(
         t, ("left_source", "right_source"), _kit.exposed_sources(ctx.config, ctx.hidden)
     )
+    t = t.sort_values(["ref_date", "at_time"])
     if not t.empty:
         warn, fail = t["warn_bps"].iloc[-1], t["fail_bps"].iloc[-1]
         tol_txt = f"cross-check tolerance: warn {warn:g} bp, fail {fail:g} bp"
@@ -156,13 +165,13 @@ _kit.show_chart(_kit.line_chart(lines, unit), table, "30-day values")
 # --- lineage ---
 st.subheader("Lineage")
 lg = _lineage(ctx, where, best)
-v = lg.value  # type: ignore[attr-defined]
+v = lg.value
 facts = [
     ("Source", f"{v.source} / {v.dataset} / {v.symbol}"),
     ("Fetched", f"{to_et(v.ingested_at):%d %b %H:%M} ET, fetch {v.fetch_id}"),
-    ("Latency", f"{lg.latency_ms or 'n/a'} ms, HTTP {lg.http_status or 'n/a'}"),  # type: ignore[attr-defined]
-    ("Raw object", f"{lg.raw_key or 'n/a'}"),  # type: ignore[attr-defined]
-    ("sha256", f"{lg.sha256 or 'n/a'}"),  # type: ignore[attr-defined]
+    ("Latency", f"{lg.latency_ms or 'n/a'} ms, HTTP {lg.http_status or 'n/a'}"),
+    ("Raw object", f"{lg.raw_key or 'n/a'}"),
+    ("sha256", f"{lg.sha256 or 'n/a'}"),
     ("Parser", v.parser_version),
 ]
 st.markdown(

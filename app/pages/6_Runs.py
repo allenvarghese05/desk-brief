@@ -38,9 +38,7 @@ else:
         "DQ warn": runs["n_dq_warn"],
     })  # fmt: skip
     st.dataframe(table, hide_index=True, width="stretch")
-    jobs = sorted(runs["job"].unique())
-    links = " · ".join(f"[{j} runs]({ACTIONS}?query=workflow%3A{j})" for j in jobs)
-    st.markdown(f"GitHub: {links} · [all workflow runs]({ACTIONS})")
+    st.markdown(f"GitHub: [workflow runs]({ACTIONS})")
 
 st.subheader("Incidents")
 path = ROOT / "INCIDENTS.md"
