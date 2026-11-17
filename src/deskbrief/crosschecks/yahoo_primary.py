@@ -3,10 +3,12 @@
 **Equities.** Members are the instruments in ``crosschecks.iex_vs_sip.symbols`` that also have
 ``yahoo/quote`` and ``alpaca/sip_bars_1m`` feeds: the Alpaca source (T14) fetches SIP bars only
 for those symbols, so other equities (AAPL, MSFT, NVDA, USO, BNO, SHY, IEF) would skip every day.
-Left = the *last* Yahoo ``last`` tick (interval ``tick``) at or before the XNYS session close of
-the reference date (early closes honoured), so after-hours and closing-auction prints never pair
-with a regular-session bar. Right = the SIP 1m bar ``close`` starting in the tick's minute ±1
-(offsets tried in order 0, -1, +1).
+Left = the *last* Yahoo ``last`` tick (interval ``tick``) inside the XNYS regular session of the
+reference date, ``open <= as_of < close`` (early closes honoured). A tick stamped exactly at the
+close is excluded (it would pair with the last 15:59 bar and cause a spurious warn); pre-market,
+after-hours and closing-auction prints never pair with a regular-session bar. When only
+pre-market ticks exist the skip reason says so. Right = the SIP 1m bar ``close`` starting in the
+tick's minute ±1 (offsets tried in order 0, -1, +1).
 
 **FX.** Members are fx instruments with ``yahoo/quote`` and ``twelvedata/fx_series_1m`` feeds.
 Twelve Data bars exist only in a window around the ECB fix (14:15 CET ±10 min, T15), so the
@@ -75,7 +77,7 @@ class YahooVsPrimary:
         ref = reference_date(ctx, "XNYS")
         bounds = session_bounds_utc(ref)
         assert bounds is not None  # ref is an XNYS business day
-        close_utc = bounds[1]
+        open_utc, close_utc = bounds
         start, end = et_day_bounds(ref)
         ticks = query_obs(
             ctx, duck, source="yahoo", dataset="quote", interval="tick",
@@ -87,7 +89,8 @@ class YahooVsPrimary:
         )  # fmt: skip
         out: list[XResult] = []
         for inst in members:
-            in_session = [t for t in ticks if t.instrument_id == inst.id and t.as_of <= close_utc]
+            mine = [t for t in ticks if t.instrument_id == inst.id]
+            in_session = [t for t in mine if open_utc <= t.as_of < close_utc]
             y_obs = max(in_session, key=lambda t: t.as_of) if in_session else None
             left = Side.from_obs(y_obs) if y_obs else Side(inst.id, "yahoo", "quote", inst.unit)
             right = Side(inst.id, "alpaca", "sip_bars_1m", inst.unit)
@@ -98,7 +101,15 @@ class YahooVsPrimary:
             }
             skip: str | None = None
             if y_obs is None:
-                skip = f"missing side: no yahoo quote tick at or before the session close on {ref}"
+                if not mine:
+                    skip = f"missing side: no yahoo quote tick on {ref}"
+                elif all(t.as_of < open_utc for t in mine):
+                    skip = (
+                        f"missing side: only pre-market yahoo quote ticks before the session "
+                        f"open on {ref}"
+                    )
+                else:
+                    skip = f"missing side: no yahoo quote tick before the session close on {ref}"
             else:
                 by_start = {b.as_of: b for b in bars if b.instrument_id == inst.id}
                 m = _minute(y_obs.as_of)
