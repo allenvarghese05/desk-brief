@@ -126,7 +126,12 @@
           },
           "qualifiers": [
             "delayed quote, 2 min old"
-          ]
+          ],
+          "value": 4.37,
+          "value_unit": "pct",
+          "change_value": -3.000000000000025,
+          "change_value_unit": "bp",
+          "dq_flag": "none"
         },
         {
           "instrument_id": "UST_2Y",
@@ -198,7 +203,12 @@
             "status": "ok",
             "note": null
           },
-          "qualifiers": []
+          "qualifiers": [],
+          "value": 4.18,
+          "value_unit": "pct",
+          "change_value": -2.000000000000046,
+          "change_value_unit": "bp",
+          "dq_flag": "none"
         },
         {
           "instrument_id": "UST_2S10S",
@@ -219,7 +229,12 @@
           "change": null,
           "qualifiers": [
             "derived from official 10Y and 2Y yields of 13 Nov"
-          ]
+          ],
+          "value": 22.000000000000064,
+          "value_unit": "bp",
+          "change_value": -2.999999999999936,
+          "change_value_unit": "bp",
+          "dq_flag": "none"
         }
       ]
     },
@@ -297,7 +312,12 @@
             "status": "ok",
             "note": null
           },
-          "qualifiers": []
+          "qualifiers": [],
+          "value": 1.0842,
+          "value_unit": "fx_rate",
+          "change_value": 0.38888888888888307,
+          "change_value_unit": "pct",
+          "dq_flag": "none"
         }
       ]
     },
@@ -377,7 +397,12 @@
           },
           "qualifiers": [
             "delayed quote, 2 min old"
-          ]
+          ],
+          "value": 71.2,
+          "value_unit": "USD",
+          "change_value": -1.1111111111111072,
+          "change_value_unit": "pct",
+          "dq_flag": "fail"
         }
       ]
     },
@@ -457,7 +482,12 @@
           },
           "qualifiers": [
             "delayed quote, 1 min old"
-          ]
+          ],
+          "value": 5976.0,
+          "value_unit": "index_pts",
+          "change_value": -0.40000000000000036,
+          "change_value_unit": "pct",
+          "dq_flag": "warn"
         },
         {
           "instrument_id": "SPY",
@@ -531,7 +561,12 @@
           },
           "qualifiers": [
             "IEX: single exchange, not the consolidated tape"
-          ]
+          ],
+          "value": 600.0,
+          "value_unit": "USD",
+          "change_value": 0.25062656641603454,
+          "change_value_unit": "pct",
+          "dq_flag": "warn"
         },
         {
           "instrument_id": "QQQ",
@@ -550,7 +585,12 @@
           "tier_glyph": "",
           "tier_name": "",
           "change": null,
-          "qualifiers": []
+          "qualifiers": [],
+          "value": null,
+          "value_unit": null,
+          "change_value": null,
+          "change_value_unit": null,
+          "dq_flag": "none"
         }
       ]
     },
@@ -606,7 +646,12 @@
             "status": "no_move_yet",
             "note": null
           },
-          "qualifiers": []
+          "qualifiers": [],
+          "value": 16.2,
+          "value_unit": "index_pts",
+          "change_value": null,
+          "change_value_unit": null,
+          "dq_flag": "none"
         }
       ]
     }

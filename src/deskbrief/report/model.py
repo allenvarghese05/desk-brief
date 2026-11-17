@@ -25,16 +25,16 @@ deterministic: no wall-clock reads, stable ordering, ``to_json`` output is byte-
 from __future__ import annotations
 
 import json
-import statistics
 import types
 from collections.abc import Sequence
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime
-from itertools import pairwise
 from typing import Any, Self, Union, get_args, get_origin, get_type_hints
 
 import duckdb
+import numpy as np
 
+from deskbrief.checks.anomaly import MIN_MOVES, daily_moves
 from deskbrief.config import Config, Instrument, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
@@ -45,8 +45,8 @@ from deskbrief.query import (
     ValueRow,
     field_label,
     health_summary,
+    instrument_flags,
     lineages,
-    measure,
     overnight_changes,
     series,
     series_all,
@@ -72,7 +72,7 @@ TIER_NAME = {1: "live", 2: "delayed", 3: "official"}
 SHORT_LABELS = {"ES_F": "S&P fut", "UST_10Y": "10Y", "UST_2Y": "2Y"}
 UNAVAILABLE = "data unavailable"
 SPREAD_ID = "UST_2S10S"
-MIN_MOVES_FOR_Z = 10
+_FLAG_ORDER = ("none", "pass", "warn", "fail")  # worst last
 SPREAD_LOOKBACK_DAYS = 14  # enough official days to find the latest date both legs share
 
 _MINUS = "−"
@@ -106,6 +106,14 @@ class Row:
     tier_name: str
     change: ChangeRow | None
     qualifiers: tuple[str, ...] = ()  # per-row caveats: fallback, IEX, delayed, derived
+    # typed numbers behind the text (None when unavailable); writers use these, never the text
+    value: float | None = None
+    value_unit: str | None = None  # unit of ``value``: pct, USD, fx_rate, index_pts, ..., bp
+    change_value: float | None = None
+    change_value_unit: str | None = None  # pct | bp | pts | pp
+    # worst check or cross-check status for this instrument on the report date:
+    # fail > warn > pass; skip is no result; none when there is none
+    dq_flag: str = "none"
 
 
 @dataclass(frozen=True)
@@ -183,11 +191,19 @@ class BriefModel:
         baselines = tuple(c.previous for c in changes.values() if c.previous is not None)
         enabled = [s for s, st in config.sources.items() if st.enabled]
         summary = health_summary(duck, report_date, expected_sources=enabled)
+        flags = instrument_flags(duck, report_date)
 
         rows = {
-            i.id: _row(i, changes.get(i.id), report_date, report_time) for i in config.instruments
+            i.id: replace(
+                _row(i, changes.get(i.id), report_date, report_time),
+                dq_flag=flags.get(i.id, "none"),
+            )
+            for i in config.instruments
         }
         spread = _spread_row(duck, config, report_time)
+        if spread:  # derived: as bad as its worst leg
+            legs = [flags.get(i, "none") for i in ("UST_10Y", "UST_2Y")]
+            spread = replace(spread, dq_flag=max(legs, key=_FLAG_ORDER.index))
         sections = tuple(
             Section(
                 ac,
@@ -307,8 +323,14 @@ def _qualifiers(last: ValueRow, report_time: datetime) -> tuple[str, ...]:
     if last.dataset.startswith("iex"):
         out.append("IEX: single exchange, not the consolidated tape")
     if last.tier == 2 and last.interval in ("tick", "1m"):
-        minutes = max(0, int((report_time - last.as_of).total_seconds() // 60))
-        out.append(f"delayed quote, {minutes} min old")
+        age = (report_time - last.as_of).total_seconds()
+        if age < 0:  # a timestamp after the report time is a bad clock, not a fresh quote
+            out.append(
+                f"delayed quote dated {int(-age // 60) + 1} min in the future: "
+                "check the source's timestamp"
+            )
+        else:
+            out.append(f"delayed quote, {int(age // 60)} min old")
     return tuple(out)
 
 
@@ -370,6 +392,10 @@ def _row(
         tier_name=TIER_NAME.get(last.tier, ""),
         change=change,
         qualifiers=_qualifiers(last, report_time),
+        value=last.value,
+        value_unit=last.unit,
+        change_value=change.change,
+        change_value_unit=change.change_unit if change.change is not None else None,
     )
 
 
@@ -385,8 +411,13 @@ def _official_yields(duck: duckdb.DuckDBPyConnection, iid: str, at: datetime) ->
 def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -> Row | None:
     """2s10s in bp from the official 10Y and 2Y yields of one ET date (spec §9.1 sample).
 
-    None when the config has no 10Y/2Y pair. The change compares the latest date both legs
-    share with the one before it; no common date gives a "data unavailable" row.
+    None when the config has no 10Y/2Y pair. Both legs must come from the same ET date: the
+    row uses the *latest date both legs share* (``common[-1]``), which can be older than the
+    report date and older than either leg's own newest value (for example when one leg has
+    published a later day than the other). That date is the row's ``as_of`` and is repeated in
+    its qualifier. The change compares it with the previous shared date. A tier-2 or tick yield
+    is never a leg (see ``_official_yields``). No shared date gives a "data unavailable" row.
+    ``value``/``change_value`` are typed floats in bp, so writers need not parse the text.
     """
     ids = {i.id for i in config.instruments}
     if not {"UST_10Y", "UST_2Y"} <= ids:
@@ -417,12 +448,13 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
             as_of_text="n/a",
             qualifiers=(),
         )
-    d = common[-1]
+    d = common[-1]  # the latest ET date on which both legs have an official yield
     spread = (ten[d] - two[d]) * 100.0
     d_text = f"{d.day} {d:%b}"
     label = f"{name} (derived: 10-year minus 2-year official yield)"
     tail = f"{signed(spread, 0)}bp on {d_text}"
     change = "n/a"
+    move: float | None = None
     if len(common) > 1:
         prev = common[-2]
         move = spread - (ten[prev] - two[prev]) * 100.0
@@ -438,6 +470,10 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
         basis=BASIS_OFFICIAL,
         as_of_text=d_text,
         qualifiers=(f"derived from official 10Y and 2Y yields of {d_text}",),
+        value=spread,
+        value_unit="bp",
+        change_value=move,
+        change_value_unit="bp" if move is not None else None,
     )
 
 
@@ -493,26 +529,30 @@ def _notable(
     summary: HealthSummary,
     at: datetime,
 ) -> tuple[Notable, ...]:
-    window = config.checks.anomaly.window_days
-    hist = series_all(duck, window * 2, at)
+    cfg = config.checks.anomaly
+    hist = series_all(duck, cfg.window_days * 2, at)
     moves: list[tuple[float, Notable]] = []
     for ch in changes:
-        if ch.change is None:
-            continue
         past = hist.get(ch.last.instrument_id, ())
-        diffs = [
-            d for a, b in pairwise(past) if (d := measure(ch.last, a.value, b.value)[0]) is not None
-        ]
-        diffs = diffs[-window:]
-        if len(diffs) < MIN_MOVES_FOR_Z or (sd := statistics.stdev(diffs)) == 0:
+        if ch.previous is None or ch.change is None or not past:
             continue
-        z = (ch.change - statistics.fmean(diffs)) / sd
-        if abs(z) >= config.checks.anomaly.z_warn:
+        # the T20 anomaly check's own scoring: |move| against the mean and sample std of the
+        # |daily moves| before it, in the unit the check uses (bp for yields, return otherwise)
+        unit = past[-1].unit
+        series_moves = daily_moves(np.array([p.value for p in past], dtype=float), unit)
+        prior = series_moves[-cfg.window_days :]
+        prior = prior[np.isfinite(prior)]
+        last = float(daily_moves(np.array([ch.previous.value, ch.last.value]), unit)[0])
+        std = float(prior.std(ddof=1)) if len(prior) > 1 else 0.0
+        if len(prior) < MIN_MOVES or not np.isfinite(last) or std < 1e-12:
+            continue
+        z = (last - float(prior.mean())) / std
+        if z >= cfg.z_warn:
             text = (
-                f"{_short(ch.last.instrument_id)} {change_text(ch)} is {abs(z):.1f}σ "
-                f"vs prior {len(diffs)} daily moves"
+                f"{_short(ch.last.instrument_id)} {change_text(ch)} is {z:.1f}σ "
+                f"vs prior {len(prior)} daily moves"
             )
-            moves.append((abs(z), Notable("move", text, ch.last.instrument_id)))
+            moves.append((z, Notable("move", text, ch.last.instrument_id)))
     ordered = [n for _, n in sorted(moves, key=lambda m: (-m[0], m[1].instrument_id or ""))]
     crosschecks = [
         Notable("crosscheck", _crosscheck_text(i), i.instrument_id, _ref_label(i))

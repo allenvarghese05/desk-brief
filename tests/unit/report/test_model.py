@@ -12,13 +12,15 @@ import os
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import brief_synth
 from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, fixture_config, monday_rows, tick
 from deskbrief.config import Config, config_hash
-from deskbrief.report.model import BriefModel, Row, signed
+from deskbrief.query import ValueRow, latest_snapshot
+from deskbrief.report.model import BriefModel, Row, _qualifiers, signed
 
 GOLDEN = Path(__file__).parent / "golden" / "brief_model.json"
 
@@ -367,3 +369,127 @@ def test_model_records_the_real_config_hash(world: World) -> None:
 
 def _reject_constant(name: str) -> None:
     raise AssertionError(f"non-finite number in JSON: {name}")
+
+
+# -- T09B: typed values, dq_flag, latest-run health, anomaly reuse -------------------------
+
+FLAGGED = {"WTI", "VIX", "ES_F", "SPY", "EURUSD", "UST_10Y", "UST_2S10S"}
+
+
+def query_row(w: World, iid: str) -> ValueRow:
+    return next(r for r in latest_snapshot(w.connect(), MON_0700) if r.instrument_id == iid)
+
+
+def test_derived_row_has_typed_value_and_unit(world: World, tmp_path: Path) -> None:
+    m = build(world)
+    r = row(m, "UST_2S10S")
+    assert r.value == pytest.approx(22.0)  # 10Y 4.40 minus 2Y 4.18 on 13 Nov, in bp
+    assert r.value_unit == "bp"
+    assert r.change_value == pytest.approx(-3.0)
+    assert r.change_value_unit == "bp"
+    es = row(m, "ES_F")  # ordinary rows carry the number behind the text too
+    assert (es.value, es.value_unit) == (5976.0, "index_pts")
+    assert es.change_value == pytest.approx(-0.4, abs=0.01)
+    assert es.change_value_unit == "pct"
+    gone = row(build(World(tmp_path / "empty")), "WTI")  # no data at all
+    assert (gone.value, gone.value_unit, gone.change_value) == (None, None, None)
+
+
+def test_2s10s_ignores_a_tier_two_daily_yield(tmp_path: Path) -> None:
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    yh = {"source": "yahoo", "dataset": "history", "field": "yield", "unit": "pct", "tier": 2}
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_10Y", THU, 4.45, **tsy),
+            daily("UST_2Y", THU, 4.20, **tsy),
+            daily("UST_10Y", FRI, 4.90, **yh),  # a ^TNX-style 1d yield: newer, but not official
+            daily("UST_2Y", FRI, 4.18, **tsy),
+        ]
+    )
+    r = row(build(w), "UST_2S10S")
+    assert r.value == pytest.approx(25.0)  # Thursday's two official legs, not 4.90 - 4.18
+    assert r.as_of_text == "12 Nov"
+    assert r.change_text == "n/a"
+    assert r.change_value is None
+
+
+def test_future_dated_quote_warns_instead_of_zero_minutes_old(world: World) -> None:
+    # the store never returns an as_of after report_time, so this guards the formatter itself
+    last = replace(query_row(world, "ES_F"), as_of=MON_0700 + timedelta(minutes=5))
+    (q,) = _qualifiers(last, MON_0700)
+    assert "future" in q
+    assert "0 min old" not in q
+    assert _qualifiers(replace(last, as_of=MON_0700), MON_0700) == ("delayed quote, 0 min old",)
+
+
+def test_dq_flag_is_the_worst_result_for_the_instrument(world: World) -> None:
+    world.dq(
+        MON,
+        [
+            ("range", "fail", "stooq", "WTI"),
+            ("fresh", "pass", "stooq", "WTI"),
+            ("fresh", "pass", "yahoo", "VIX"),
+            ("anom", "warn", None, "VIX"),
+            ("fresh", "pass", "yahoo", "ES_F"),
+            ("anom", "skip", None, "EURUSD"),
+            ("fresh", "fail", "stooq", None),
+        ],
+    )
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)])
+    m = build(world)
+    assert {r.instrument_id: r.dq_flag for r in m.rows() if r.instrument_id in FLAGGED} == {
+        "WTI": "fail",
+        "VIX": "warn",
+        "ES_F": "warn",  # dq pass, but a cross-check warn
+        "SPY": "warn",
+        "EURUSD": "none",  # skip is no result
+        "UST_10Y": "none",
+        "UST_2S10S": "none",  # derived: the worst of its two legs, and neither has a result
+    }
+
+
+def test_dq_flag_of_the_spread_follows_its_worst_leg(world: World) -> None:
+    world.dq(MON, [("range", "warn", None, "UST_2Y"), ("fresh", "pass", None, "UST_10Y")])
+    m = build(world)
+    assert row(m, "UST_2S10S").dq_flag == "warn"
+    assert row(m, "UST_10Y").dq_flag == "pass"
+    assert row(m, "ES_F").dq_flag == "none"
+
+
+def test_health_and_crosscheck_items_use_the_latest_run_only(world: World) -> None:
+    world.dq(MON, [("fresh", "fail", "yahoo", None)], run_id="R1")
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)], run_id="R1")
+    world.dq(MON, [("fresh", "pass", "yahoo", None)], at="08:00", run_id="R2")
+    world.xchecks(MON, [("sp500_spy_es", "pass", 1.0)], at="08:00", run_id="R2")
+    m = build(world)
+    assert (m.health.status, m.health.text) == ("ok", "2/2 checks pass")
+    assert m.notable == ()
+    assert not {k.kind for k in m.known_limits} & {"dq_fail", "crosscheck_warn"}
+
+
+def _trend_rows(last_move: float) -> list[dict[str, Any]]:
+    hist = {"source": "yahoo", "dataset": "history", "tier": 2, "unit": "index_pts"}
+    rows, d, v, n = [], date(2026, 10, 1), 6000.0, 0
+    while d < FRI:
+        if d.weekday() < 5:
+            v += (4.0, 5.0, 6.0, 5.0)[n % 4]  # a steady climb of about 5 points a day
+            n += 1
+            rows.append(daily("ES_F", d, v, **hist))
+        d += timedelta(days=1)
+    rows.append(daily("ES_F", FRI, v, **hist))
+    rows.append(tick("ES_F", et(MON, "06:59"), v + last_move, unit="index_pts"))
+    return rows
+
+
+def test_notable_scores_the_size_of_a_move_like_the_anomaly_check(tmp_path: Path) -> None:
+    # T20's z uses |move| against |daily moves|: a drop as big as a usual daily rise is not
+    # notable, though it has the opposite sign (a signed z would call it a 13-sigma event)
+    w = World(tmp_path / "normal")
+    w.observations(_trend_rows(-5.5))
+    assert [n for n in build(w).notable if n.kind == "move"] == []
+    w2 = World(tmp_path / "big")
+    w2.observations(_trend_rows(-60.0))
+    (move,) = [n for n in build(w2).notable if n.kind == "move"]
+    assert move.instrument_id == "ES_F"
+    assert "σ" in move.text
