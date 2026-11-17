@@ -166,9 +166,12 @@ def test_oserror_shows_error_without_message(
 
 
 def test_known_limits_list_dashboard_limits(run_home: Run) -> None:
+    from app.components.data import DASHBOARD_LIMITS
+
+    assert len(DASHBOARD_LIMITS) == 5
     text = page(run_home("hosted"))
-    for phrase in ("stale", "z", "curve", "polling", "30-day"):
-        assert phrase in text.lower()
+    for limit in DASHBOARD_LIMITS:
+        assert f"- {limit}" in text
 
 
 def test_provenance_drawer_lists_lineage(run_home: Run) -> None:
