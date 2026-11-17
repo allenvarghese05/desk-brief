@@ -370,3 +370,21 @@ def test_instrument_flags_take_the_worst_status_and_ignore_skip(tmp_path: Path) 
         "ES_F": "warn",
     }
     assert query.instrument_flags(w.connect(), THU) == {}
+
+
+def test_dq_and_crosschecks_come_from_one_run(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(MON, [("fresh_a", "fail", "stooq", None)], run_id="R1")
+    w.xchecks(MON, [("sp500_return", "warn", 7.0)], run_id="R1")
+    # a later run wrote only cross-checks: it is the one run for both tables
+    w.xchecks(MON, [("sp500_return", "pass", 1.0)], at="08:00", run_id="R2")
+    h = query.health_summary(w.connect(), MON)
+    assert (h.n_pass, h.n_warn, h.n_fail) == (0, 0, 0)  # nothing of R1's dq counts
+    assert (h.n_xcheck_pass, h.n_xcheck_warn, h.n_xcheck_fail) == (1, 0, 0)
+    assert h.issues == ()
+    assert query.instrument_flags(w.connect(), MON) == {"SPY": "pass", "ES_F": "pass"}
+    # and the other way round: a later dq-only run hides the earlier run's cross-checks
+    w.dq(MON, [("fresh_a", "pass", "stooq", None)], at="09:00", run_id="R3")
+    h = query.health_summary(w.connect(), MON)
+    assert (h.n_pass, h.n_xcheck_pass, h.n_xcheck_warn) == (1, 0, 0)
+    assert query.instrument_flags(w.connect(), MON) == {}

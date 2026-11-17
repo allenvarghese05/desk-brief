@@ -25,9 +25,10 @@ is picked, so a hosted deployment that may not show tier 1 falls back to the bes
 value (a tier 2 or 3 row, even an older one) instead of hiding the instrument. An instrument whose
 every row is excluded is absent, as if it had no data. Baselines honour the same exclusion.
 
-Health (``health_summary``, ``instrument_flags``) reads only the latest run for the date: re-runs
-keep every run's rows (P-008), but the report shows the newest run's checks, so a check that
-failed in a superseded run does not count.
+Health (``health_summary``, ``instrument_flags``, the cross-check items) reads one run for the
+date: the newest run that wrote any row to ``dq_results`` or ``crosscheck_results`` (one run id
+for both tables). Re-runs keep every run's rows (P-008), but a check that failed in a superseded
+run does not count.
 
 Overnight change (P-009)
 ------------------------
@@ -60,6 +61,9 @@ VALUE_INTERVALS: tuple[str, ...] = ("tick", "1m", "1d", "1mo")
 OFFICIAL_INTERVALS: tuple[str, ...] = ("1d", "1mo")
 #: how far back a baseline is searched (monthly macro needs two releases)
 BASELINE_LOOKBACK_DAYS = 100
+
+#: decimals kept in a computed change (see :func:`measure`)
+CHANGE_DECIMALS = 9
 
 BASIS_NYSE_CLOSE = "previous NYSE close"
 BASIS_OFFICIAL = "previous official value"
@@ -285,16 +289,20 @@ def family_of(row: ValueRow) -> str:
 def measure(row: ValueRow, previous: float, last: float) -> tuple[float | None, str]:
     """The change from ``previous`` to ``last`` in the unit used to display ``row``.
 
-    The change is None (missing) when a percentage is asked of a zero baseline.
+    The change is None (missing) when a percentage is asked of a zero baseline. Results are
+    rounded to ``CHANGE_DECIMALS`` so float noise (``22.000000000000064``) never reaches the
+    serialised model; that is far below any displayed precision.
     """
     family = family_of(row)
     if family == "yield":
-        return (last - previous) * 100.0, "bp"
+        return round((last - previous) * 100.0, CHANGE_DECIMALS), "bp"
     if row.asset_class == "vol":
-        return last - previous, "pts"
+        return round(last - previous, CHANGE_DECIMALS), "pts"
     if family in ("price", "rate") and (row.unit != "pct" or family == "price"):
-        return ((last / previous - 1.0) * 100.0 if previous else None), "pct"
-    return last - previous, "pp" if row.unit == "pct" else "pts"
+        return (
+            round((last / previous - 1.0) * 100.0, CHANGE_DECIMALS) if previous else None
+        ), "pct"
+    return round(last - previous, CHANGE_DECIMALS), "pp" if row.unit == "pct" else "pts"
 
 
 def _change(
@@ -472,11 +480,12 @@ def health_summary(
 ) -> HealthSummary:
     """Quality-check and source status for ``target_date`` (empty tables give zero counts).
 
-    Only the latest run for ``target_date`` is read (see the module docstring); within it a
-    re-evaluated check counts once (the latest evaluation). Each cross-check is mirrored into
-    ``dq_results`` as a ``consistency`` row (spec §7.2); those rows are left out of the DQ counts
-    so a cross-check counts once, from ``crosscheck_results``. ``expected_sources`` defaults to
-    every source with a feed in the config; a source with no fetch that day is ``missing``.
+    Only the latest run for ``target_date`` is read, one run id for both tables (see the module
+    docstring); within it a re-evaluated check counts once (the latest evaluation). Each
+    cross-check is mirrored into ``dq_results`` as a ``consistency`` row (spec §7.2); those rows
+    are left out of the DQ counts so a cross-check counts once, from ``crosscheck_results``.
+    ``expected_sources`` defaults to every source with a feed in the config; a source with no
+    fetch that day is ``missing``.
     """
     dq = _latest_dq(duck, target_date)
     xc = _latest_xchecks(duck, target_date)
@@ -535,32 +544,45 @@ def health_summary(
     )
 
 
+def _latest_run(duck: duckdb.DuckDBPyConnection, target_date: date) -> str | None:
+    """The newest run that wrote any check row (``dq_results`` or ``crosscheck_results``).
+
+    One run id serves both tables, so the DQ counts, the cross-check items and the instrument
+    flags always describe the same run. A newer run that wrote only one of the two tables still
+    wins: the other table then contributes nothing for that date.
+    """
+    row = duck.execute(
+        "SELECT run_id FROM ("
+        "SELECT run_id, evaluated_at AS ts, result_id FROM dq WHERE target_date = ? "
+        "UNION ALL SELECT run_id, at_time, result_id FROM xchecks WHERE target_date = ?"
+        ") ORDER BY ts DESC, result_id DESC LIMIT 1",
+        [target_date, target_date],
+    ).fetchone()
+    return row[0] if row else None
+
+
 def _latest_dq(duck: duckdb.DuckDBPyConnection, target_date: date) -> list[tuple[Any, ...]]:
-    """Single-source results of the newest run for ``target_date`` (mirrored rows left out)."""
+    """Single-source results of the latest run for ``target_date`` (mirrored rows left out)."""
     return duck.execute(
         "SELECT check_name, check_type, source, instrument_id, status, observed, threshold "
-        "FROM dq WHERE target_date = ? AND check_type <> 'consistency' "
-        "AND run_id = (SELECT run_id FROM dq WHERE target_date = ? "
-        "AND check_type <> 'consistency' ORDER BY evaluated_at DESC, result_id DESC LIMIT 1) "
+        "FROM dq WHERE target_date = ? AND check_type <> 'consistency' AND run_id = ? "
         "QUALIFY row_number() OVER (PARTITION BY check_name, "
         "coalesce(source, ''), coalesce(instrument_id, '') ORDER BY evaluated_at DESC, "
         "result_id DESC) = 1",
-        [target_date, target_date],
+        [target_date, _latest_run(duck, target_date)],
     ).fetchall()
 
 
 def _latest_xchecks(duck: duckdb.DuckDBPyConnection, target_date: date) -> list[tuple[Any, ...]]:
-    """Cross-check results of the newest run for ``target_date``."""
+    """Cross-check results of the latest run for ``target_date``."""
     return duck.execute(
         "SELECT check_name, group_id, left_source, right_source, status, diff_bps, "
         "warn_bps, fail_bps, left_instrument, right_instrument, details_json "
-        "FROM xchecks WHERE target_date = ? "
-        "AND run_id = (SELECT run_id FROM xchecks WHERE target_date = ? "
-        "ORDER BY at_time DESC, result_id DESC LIMIT 1) "
+        "FROM xchecks WHERE target_date = ? AND run_id = ? "
         "QUALIFY row_number() OVER (PARTITION BY check_name, coalesce(group_id, ''), "
         "left_instrument, right_instrument, left_source, right_source "
         "ORDER BY at_time DESC, result_id DESC) = 1",
-        [target_date, target_date],
+        [target_date, _latest_run(duck, target_date)],
     ).fetchall()
 
 

@@ -139,7 +139,7 @@ class World:
         results: list[tuple[str, str, str | None, str | None]],
         at: str = "07:00",
         check_type: str = "freshness",
-        run_id: str = "RUNDQ",
+        run_id: str = "RUN1",  # one default run for dq and cross-checks
     ) -> None:
         """``(check_name, status, source, instrument_id)`` rows for ``target`` (run ``run_id``)."""
         rows = [
@@ -168,7 +168,7 @@ class World:
         *,
         ref: date | None = None,
         mirror: bool = False,
-        run_id: str = "RUNXC",
+        run_id: str = "RUN1",
         at: str = "07:00",
     ) -> None:
         """``(check_name, status, diff_bps)`` rows for ``target``, written by run ``run_id``.

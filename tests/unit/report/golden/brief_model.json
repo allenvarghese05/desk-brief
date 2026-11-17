@@ -119,7 +119,7 @@
             },
             "family": "yield",
             "basis": "previous official value",
-            "change": -3.000000000000025,
+            "change": -3.0,
             "change_unit": "bp",
             "status": "ok",
             "note": "yahoo tick value against an official treasury baseline"
@@ -129,7 +129,7 @@
           ],
           "value": 4.37,
           "value_unit": "pct",
-          "change_value": -3.000000000000025,
+          "change_value": -3.0,
           "change_value_unit": "bp",
           "dq_flag": "none"
         },
@@ -198,7 +198,7 @@
             },
             "family": "yield",
             "basis": "previous official value",
-            "change": -2.000000000000046,
+            "change": -2.0,
             "change_unit": "bp",
             "status": "ok",
             "note": null
@@ -206,7 +206,7 @@
           "qualifiers": [],
           "value": 4.18,
           "value_unit": "pct",
-          "change_value": -2.000000000000046,
+          "change_value": -2.0,
           "change_value_unit": "bp",
           "dq_flag": "none"
         },
@@ -230,9 +230,9 @@
           "qualifiers": [
             "derived from official 10Y and 2Y yields of 13 Nov"
           ],
-          "value": 22.000000000000064,
+          "value": 22.0,
           "value_unit": "bp",
-          "change_value": -2.999999999999936,
+          "change_value": -3.0,
           "change_value_unit": "bp",
           "dq_flag": "none"
         }
@@ -307,7 +307,7 @@
             },
             "family": "rate",
             "basis": "previous official value",
-            "change": 0.38888888888888307,
+            "change": 0.388888889,
             "change_unit": "pct",
             "status": "ok",
             "note": null
@@ -315,7 +315,7 @@
           "qualifiers": [],
           "value": 1.0842,
           "value_unit": "fx_rate",
-          "change_value": 0.38888888888888307,
+          "change_value": 0.388888889,
           "change_value_unit": "pct",
           "dq_flag": "none"
         }
@@ -390,7 +390,7 @@
             },
             "family": "price",
             "basis": "previous NYSE close",
-            "change": -1.1111111111111072,
+            "change": -1.111111111,
             "change_unit": "pct",
             "status": "ok",
             "note": null
@@ -400,7 +400,7 @@
           ],
           "value": 71.2,
           "value_unit": "USD",
-          "change_value": -1.1111111111111072,
+          "change_value": -1.111111111,
           "change_value_unit": "pct",
           "dq_flag": "fail"
         }
@@ -475,7 +475,7 @@
             },
             "family": "price",
             "basis": "previous NYSE close",
-            "change": -0.40000000000000036,
+            "change": -0.4,
             "change_unit": "pct",
             "status": "ok",
             "note": null
@@ -485,7 +485,7 @@
           ],
           "value": 5976.0,
           "value_unit": "index_pts",
-          "change_value": -0.40000000000000036,
+          "change_value": -0.4,
           "change_value_unit": "pct",
           "dq_flag": "warn"
         },
@@ -554,7 +554,7 @@
             },
             "family": "price",
             "basis": "previous NYSE close",
-            "change": 0.25062656641603454,
+            "change": 0.250626566,
             "change_unit": "pct",
             "status": "ok",
             "note": null
@@ -564,7 +564,7 @@
           ],
           "value": 600.0,
           "value_unit": "USD",
-          "change_value": 0.25062656641603454,
+          "change_value": 0.250626566,
           "change_value_unit": "pct",
           "dq_flag": "warn"
         },

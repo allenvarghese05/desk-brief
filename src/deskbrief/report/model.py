@@ -38,6 +38,7 @@ from deskbrief.checks.anomaly import MIN_MOVES, daily_moves
 from deskbrief.config import Config, Instrument, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
+    CHANGE_DECIMALS,
     ChangeRow,
     CheckItem,
     HealthSummary,
@@ -326,7 +327,7 @@ def _qualifiers(last: ValueRow, report_time: datetime) -> tuple[str, ...]:
         age = (report_time - last.as_of).total_seconds()
         if age < 0:  # a timestamp after the report time is a bad clock, not a fresh quote
             out.append(
-                f"delayed quote dated {int(-age // 60) + 1} min in the future: "
+                f"delayed quote dated {max(1, int(-age // 60))} min in the future: "
                 "check the source's timestamp"
             )
         else:
@@ -449,7 +450,7 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
             qualifiers=(),
         )
     d = common[-1]  # the latest ET date on which both legs have an official yield
-    spread = (ten[d] - two[d]) * 100.0
+    spread = round((ten[d] - two[d]) * 100.0, CHANGE_DECIMALS)
     d_text = f"{d.day} {d:%b}"
     label = f"{name} (derived: 10-year minus 2-year official yield)"
     tail = f"{signed(spread, 0)}bp on {d_text}"
@@ -457,7 +458,7 @@ def _spread_row(duck: duckdb.DuckDBPyConnection, config: Config, at: datetime) -
     move: float | None = None
     if len(common) > 1:
         prev = common[-2]
-        move = spread - (ten[prev] - two[prev]) * 100.0
+        move = round(spread - (ten[prev] - two[prev]) * 100.0, CHANGE_DECIMALS)
         change = signed(move, 0) + "bp"
         tail += f", {change} since previous official value ({prev.day} {prev:%b})"
     return Row(
@@ -540,6 +541,10 @@ def _notable(
         # |daily moves| before it, in the unit the check uses (bp for yields, return otherwise)
         unit = past[-1].unit
         series_moves = daily_moves(np.array([p.value for p in past], dtype=float), unit)
+        if past[-1].as_of == ch.last.as_of:
+            # the scored move is the series' own last move (official-last yields, rates, FX
+            # fixes): leave it out of its baseline, like T20's moves[-(window+1):-1]
+            series_moves = series_moves[:-1]
         prior = series_moves[-cfg.window_days :]
         prior = prior[np.isfinite(prior)]
         last = float(daily_moves(np.array([ch.previous.value, ch.last.value]), unit)[0])

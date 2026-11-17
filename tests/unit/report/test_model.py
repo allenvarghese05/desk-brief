@@ -418,8 +418,10 @@ def test_future_dated_quote_warns_instead_of_zero_minutes_old(world: World) -> N
     # the store never returns an as_of after report_time, so this guards the formatter itself
     last = replace(query_row(world, "ES_F"), as_of=MON_0700 + timedelta(minutes=5))
     (q,) = _qualifiers(last, MON_0700)
-    assert "future" in q
+    assert q == "delayed quote dated 5 min in the future: check the source's timestamp"
     assert "0 min old" not in q
+    ahead = replace(last, as_of=MON_0700 + timedelta(seconds=90))
+    assert "1 min in the future" in _qualifiers(ahead, MON_0700)[0]  # whole minutes, rounded down
     assert _qualifiers(replace(last, as_of=MON_0700), MON_0700) == ("delayed quote, 0 min old",)
 
 
@@ -493,3 +495,27 @@ def test_notable_scores_the_size_of_a_move_like_the_anomaly_check(tmp_path: Path
     (move,) = [n for n in build(w2).notable if n.kind == "move"]
     assert move.instrument_id == "ES_F"
     assert "σ" in move.text
+
+
+def test_notable_window_excludes_the_scored_official_move(tmp_path: Path) -> None:
+    # official-last yield: the 15bp jump is both the scored move and the last daily move of the
+    # series; T20 excludes it from its own window (moves[-(window+1):-1]), so must we
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    days: list[date] = []
+    d = FRI
+    while len(days) < 32:  # 31 earlier moves + the jump
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
+    v, rows = 4.00, []
+    for n, day in enumerate(days[:-1]):
+        v += (0.01, 0.02)[n % 2] if n else 0.0  # steady 1-2bp moves
+        rows.append(daily("UST_10Y", day, v, **tsy))
+    rows.append(daily("UST_10Y", days[-1], v + 0.15, **tsy))  # the 15bp jump on Friday
+    w = World(tmp_path)
+    w.observations(rows)
+    (move,) = [n for n in build(w).notable if n.kind == "move"]
+    assert move.text.endswith("vs prior 30 daily moves")
+    z = float(move.text.split(" is ")[1].split("σ")[0])
+    assert z > 20  # 15bp against ~1.5bp +/- 0.5; with itself in the window it would be ~5
