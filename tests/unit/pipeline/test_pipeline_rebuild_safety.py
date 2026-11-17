@@ -93,21 +93,28 @@ def test_the_flip_abort_names_the_marker_key_and_the_operator_step(tmp_path: Pat
     env.store.put_bytes("clean/_flips/from-v1", b"{}")
     note = next(n for n in run_rebuild(env).notes if "already flipped" in n)
     assert "clean/_flips/from-v1" in note
-    assert "delete" in note
+    assert "delete clean/_flips/from-v1" in note
     assert "rolling back" in note
+    assert "if you did not roll back by hand, check `flipped_at` in the marker body first" in note
 
 
 def test_the_flip_marker_records_utc_flip_time_and_new_version(tmp_path: Path) -> None:
     env = make_env(tmp_path, [FakeSource("stooq")])
     first_run(env)
+    fixed = datetime(2026, 11, 17, 12, 34, 56, tzinfo=UTC)
+    env.clock = lambda: fixed  # the rebuild's injected clock
     assert run_rebuild(env).status is RunStatus.OK
     body = json.loads(env.store.get_bytes("clean/_flips/from-v1"))
     assert body["new_version"] == "v2"
+    assert body["flipped_at"] == fixed.isoformat()
     flipped = datetime.fromisoformat(body["flipped_at"])
     assert flipped.utcoffset() == timedelta(0)
     assert body["flipped_at"].endswith("+00:00")
 
 
+# The two cases assert different things on purpose: a failed _CLAIM means the version was never
+# writable, so nothing may be flushed and the abort says "could not claim"; a failed flip marker
+# comes after the flushes, so flushing is expected and only the marker and pointer are checked.
 @pytest.mark.parametrize("failing", ["clean/v2/_CLAIM", "clean/_flips/from-v1"])
 def test_a_non_key_exists_claim_failure_fails_without_flush_or_flip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
