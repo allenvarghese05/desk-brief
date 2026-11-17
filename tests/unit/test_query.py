@@ -259,6 +259,45 @@ def test_zero_baseline_gives_missing_change(tmp_path: Path) -> None:
     assert ch.status == "no_baseline"
 
 
+def test_health_summary_counts_a_mirrored_crosscheck_once(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(MON, [("fresh_a", "pass", "treasury", None)])
+    w.xchecks(MON, [("sp500_spy_es", "warn", 7.0), ("iex_vs_sip", "pass", 0.6)], mirror=True)
+    h = query.health_summary(w.connect(), MON)
+    assert (h.n_pass, h.n_warn, h.n_fail, h.n_skip) == (1, 0, 0, 0)  # mirrors left out of dq
+    assert (h.n_xcheck_pass, h.n_xcheck_warn, h.n_xcheck_fail) == (1, 1, 0)
+    assert h.n_checks == 3
+    assert [(i.kind, i.name) for i in h.issues] == [("crosscheck", "sp500_spy_es")]
+
+
+def test_crosscheck_item_carries_ref_date_not_target_date(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.xchecks(MON, [("a", "warn", 7.0)], ref=THU)
+    w.xchecks(MON, [("b", "fail", 9.0)])  # default ref: previous NYSE session
+    issues = {i.name: i for i in query.health_summary(w.connect(), MON).issues}
+    assert issues["a"].ref_date == THU
+    assert issues["b"].ref_date == FRI
+    w2 = World(tmp_path / "none")
+    w2.dq(MON, [("fresh", "warn", "yahoo", None)])
+    assert query.health_summary(w2.connect(), MON).issues[0].ref_date is None
+
+
+def test_tick_against_official_baseline_is_noted(world: World) -> None:
+    changes = query.overnight_changes(world.connect(), MON, MON_0700)
+    note = change_of(changes, "UST_10Y").note
+    assert note is not None
+    assert "yahoo" in note
+    assert "treasury" in note
+    assert change_of(changes, "UST_2Y").note is None  # official against official: nothing to say
+
+
+def test_lineage_rows_have_a_role(world: World) -> None:
+    conn = world.connect()
+    snap = query.latest_snapshot(conn, MON_0700)
+    assert {x.role for x in query.lineages(conn, snap)} == {"value"}
+    assert {x.role for x in query.lineages(conn, snap, role="baseline")} == {"baseline"}
+
+
 def test_baseline_from_another_source_is_noted(tmp_path: Path) -> None:
     w = World(tmp_path)
     ecb = {"dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}

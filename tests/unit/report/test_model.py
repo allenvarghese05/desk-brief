@@ -9,13 +9,15 @@ from __future__ import annotations
 import itertools
 import json
 import os
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
 import brief_synth
-from brief_synth import FRI, MON, MON_0700, World, daily, et, monday_rows, tick
+from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, fixture_config, monday_rows, tick
+from deskbrief.config import Config, config_hash
 from deskbrief.report.model import BriefModel, Row, signed
 
 GOLDEN = Path(__file__).parent / "golden" / "brief_model.json"
@@ -66,8 +68,114 @@ def test_thanksgiving_gap_skips_the_holiday(tmp_path: Path) -> None:
 
 def test_yield_label_is_basis_points_since_previous_official_value(world: World) -> None:
     r = row(build(world), "UST_10Y")
-    assert r.description == "US 10-year Treasury yield, −3bp since previous official value (13 Nov)"
+    assert r.description.startswith(
+        "US 10-year Treasury yield, −3bp since previous official value (13 Nov); "
+    )
     assert r.value_text == "4.37%"
+
+
+def test_tick_against_official_baseline_says_so_in_the_row(world: World) -> None:
+    r = row(build(world), "UST_10Y")
+    assert "yahoo" in r.description
+    assert "official treasury baseline" in r.description
+    assert "baseline" not in row(build(world), "UST_2Y").description
+
+
+def test_zero_baseline_says_it_was_found_and_is_zero(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations([daily("WTI", FRI, 0.0), tick("WTI", et(MON, "06:58"), 5.0)])
+    r = row(build(w), "WTI")
+    assert r.change_text == "n/a"
+    assert "found" in r.description
+    assert "is zero" in r.description
+    assert "13 Nov" in r.description
+    assert "not found" not in r.description
+
+
+def test_missing_baseline_still_says_not_found(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations([tick("WTI", et(MON, "06:58"), 5.0)])
+    assert "not found" in row(build(w), "WTI").description
+
+
+def test_rows_carry_their_own_qualifiers(tmp_path: Path, world: World) -> None:
+    m = build(world)
+    assert row(m, "ES_F").qualifiers == ("delayed quote, 1 min old",)
+    assert row(m, "SPY").qualifiers == ("IEX: single exchange, not the consolidated tape",)
+    assert row(m, "EURUSD").qualifiers == ()
+    w = World(tmp_path / "fallback")
+    w.observations(
+        [
+            daily("WTI", FRI, 72.0, source="yahoo", dataset="history", tier=2),
+            tick("WTI", et(MON, "06:30"), 71.2, source="stooq", tier=3, is_fallback=True),
+        ]
+    )
+    assert row(build(w), "WTI").qualifiers == ("fallback source: stooq",)
+    w2 = World(tmp_path / "stale")
+    w2.observations([tick("ES_F", et(MON, "05:00"), 6000.0, unit="index_pts")])
+    assert row(build(w2), "ES_F").qualifiers == ("delayed quote, 120 min old",)
+
+
+def test_crosscheck_rows_are_labelled_with_ref_date(world: World) -> None:
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)], ref=FRI)
+    m = build(world)
+    assert "13 Nov" in m.notable[0].text
+    assert "16 Nov" not in m.notable[0].text
+    assert m.notable[0].ref_label == "13 Nov"
+    limit = next(k.text for k in m.known_limits if k.kind == "crosscheck_warn")
+    assert "13 Nov" in limit
+
+
+def test_mirrored_crosscheck_is_counted_and_listed_once(world: World) -> None:
+    world.dq(MON, [("fresh", "pass", "yahoo", None)])
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)], mirror=True)
+    m = build(world)
+    assert m.health.text == "1/2 checks pass (0 fail, 1 warn)"
+    assert [k.kind for k in m.known_limits if k.kind.startswith(("dq_", "crosscheck_"))] == [
+        "crosscheck_warn"
+    ]
+
+
+def test_2s10s_is_derived_from_two_official_yields_of_one_date(world: World) -> None:
+    m = build(world)
+    r = row(m, "UST_2S10S")
+    assert r.available
+    assert r.value_text == "+22bp"  # 4.40 - 4.18 on Fri 13 Nov, not the 4.37 tick
+    assert r.change_text == "−3bp"  # vs Thu 12 Nov: 4.45 - 4.20 = 25bp
+    assert r.tier_name == "official"
+    assert r.as_of_text == "13 Nov"
+    assert "derived" in r.label
+    assert r.qualifiers == ("derived from official 10Y and 2Y yields of 13 Nov",)
+    assert next(s for s in m.sections if s.asset_class == "rates").rows[-1] is r
+    assert "UST_2S10S" in {k.kind: k.text for k in m.known_limits}["derived"]
+
+
+def test_2s10s_rejects_a_tick_leg(tmp_path: Path) -> None:
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    w = World(tmp_path)
+    w.observations(
+        [
+            tick("UST_10Y", et(MON, "06:58"), 4.37, unit="pct"),  # a ^TNX-style tick, not official
+            daily("UST_2Y", FRI, 4.18, **tsy),
+        ]
+    )
+    r = row(build(w), "UST_2S10S")
+    assert not r.available
+    assert r.value_text == "data unavailable"
+
+
+def test_2s10s_needs_the_same_et_date_on_both_legs(tmp_path: Path) -> None:
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    w = World(tmp_path)
+    w.observations([daily("UST_10Y", FRI, 4.40, **tsy), daily("UST_2Y", THU, 4.20, **tsy)])
+    assert not row(build(w), "UST_2S10S").available
+
+
+def test_lineage_lists_baseline_fetches(world: World) -> None:
+    m = build(world)
+    es = [x for x in m.lineage if x.value.instrument_id == "ES_F"]
+    assert [(x.role, x.value.value) for x in es] == [("value", 5976.0), ("baseline", 6000.0)]
+    assert {x.role for x in m.lineage} == {"value", "baseline"}
 
 
 def test_ecb_rate_is_labelled_reference_rate_not_close(world: World) -> None:
@@ -221,18 +329,40 @@ def test_derived_cross_is_a_known_limit(tmp_path: Path) -> None:
     assert "GBPUSD" in {k.kind: k.text for k in m.known_limits}["derived"]
 
 
-def test_golden_json_snapshot(tmp_path: Path) -> None:
+def _golden_text(tmp_path: Path, config: Config) -> str:
     brief_synth._ids = itertools.count(1)  # ids appear in lineage: make them order-independent
-    world = World(tmp_path)
+    world = World(tmp_path, config)
     world.observations(monday_rows())
     world.dq(MON, [("fresh", "pass", "yahoo", None), ("range", "fail", "stooq", "WTI")])
-    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)])
+    world.xchecks(MON, [("sp500_spy_es", "warn", 7.0)], mirror=True)
     world.fetches(MON, [("yahoo", "ok")])
-    text = build(world).to_json()
+    model = BriefModel.from_store(world.connect(), world.config, MON, MON_0700)
+    # config_hash is masked: it changes with any config edit and says nothing about the brief
+    return replace(model, config_hash="MASKED").to_json()
+
+
+def test_golden_json_snapshot(tmp_path: Path) -> None:
+    # built from the frozen fixture config, not config.yaml, so unrelated config edits are safe
+    text = _golden_text(tmp_path, fixture_config())
     json.loads(text, parse_constant=_reject_constant)
     if os.environ.get("UPDATE_GOLDEN"):
         GOLDEN.write_text(text, encoding="utf-8")
     assert text == GOLDEN.read_text(encoding="utf-8")
+
+
+def test_golden_survives_a_config_only_edit(tmp_path: Path) -> None:
+    base = fixture_config()
+    edited = base.model_copy(
+        update={"checks": base.checks.model_copy(update={"anomaly": base.checks.anomaly.model_copy(
+            update={"z_fail": 9.0})})}
+    )  # fmt: skip
+    assert config_hash(edited) != config_hash(base)
+    assert _golden_text(tmp_path / "a", edited) == _golden_text(tmp_path / "b", base)
+    assert _golden_text(tmp_path / "c", base) == GOLDEN.read_text(encoding="utf-8")
+
+
+def test_model_records_the_real_config_hash(world: World) -> None:
+    assert build(world).config_hash == config_hash(world.config)
 
 
 def _reject_constant(name: str) -> None:
