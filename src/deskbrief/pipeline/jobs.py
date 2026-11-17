@@ -33,6 +33,7 @@ from deskbrief.config import CalendarName, Config
 from deskbrief.crosschecks.base import run_crosschecks
 from deskbrief.logging import get_logger
 from deskbrief.models import JobKind, RunContext, Trigger
+from deskbrief.pipeline.serving import serving_step
 from deskbrief.report.notify import report_steps
 from deskbrief.sources.http import BudgetTracker, CallableBudgetStore, DefaultHttpClient
 from deskbrief.store.backend import KeyNotFoundError, StorageBackend, budget_key
@@ -111,8 +112,13 @@ def steps_for(job: JobKind) -> JobSteps:
     """Hooks for ``job``. Later cards edit this table (T31 is allowed to edit the morning row)."""
     if job is JobKind.MORNING:
         build_report, notify = report_steps()  # fresh per run: notify only sends this run's report
-        return JobSteps(run_checks=run_checks_step, build_report=build_report, notify=notify)
-    return JobSteps(run_checks=run_checks_step)
+        return JobSteps(
+            run_checks=run_checks_step,
+            build_serving=serving_step,
+            build_report=build_report,
+            notify=notify,
+        )
+    return JobSteps(run_checks=run_checks_step, build_serving=serving_step)
 
 
 # ---------------------------------------------------------------------------------------------
