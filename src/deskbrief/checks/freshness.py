@@ -1,11 +1,13 @@
 """Freshness: did each scheduled dataset deliver its data day on time? (spec §8.1)
 
 Status ladder, in minutes past ``expected_by_et``: data present -> pass; missing and within
-``grace_minutes`` -> pass (still waiting); missing beyond grace -> warn; beyond 2x grace ->
-fail. Before the due time, or on a closed publication day, the result is ``skip``. On a SIFMA
-recommended early close a missing Treasury/FRED value is capped at ``warn``.
+``grace_minutes`` -> ``skip`` with reason "waiting" (completeness says the same, so the two
+checks agree); missing beyond grace -> warn; beyond 2x grace -> fail. Before the due time, or on
+a closed publication day, the result is ``skip``. On a SIFMA recommended early close a missing
+Treasury/FRED value is capped at ``warn`` (P-011).
 
-Intraday tick-age freshness is not implemented: ``config.datasets`` has no schedule for it.
+Intraday tick-age freshness is not implemented: ``config.datasets`` has no per-dataset intraday
+schedule (needs a contract change, see the T07 PR).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from deskbrief.checks.base import (
     minutes_late,
     query,
     register,
+    within_grace,
 )
 from deskbrief.config import DatasetSchedule
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
@@ -75,7 +78,15 @@ class FreshnessCheck:
             else:
                 late = minutes_late(ctx, exp)
                 status = late_status(late, exp.grace_minutes)
-                state = "waiting" if status is DQStatus.PASS else "late"
+                if within_grace(ctx, exp):  # due but within grace: same answer as completeness
+                    out.append(
+                        make_result(
+                            ctx, self, DQStatus.SKIP, source=sched.source, observed=late,
+                            threshold=float(exp.grace_minutes), reason="waiting", **base,
+                        )
+                    )  # fmt: skip
+                    continue
+                state = "late"
                 if status is DQStatus.FAIL and exp.early_close:
                     status, state = DQStatus.WARN, "late_early_close"
             out.append(
