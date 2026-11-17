@@ -22,6 +22,7 @@ same run (never a stale one from an earlier run). The runner gives hooks only th
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import smtplib
@@ -39,13 +40,19 @@ from deskbrief.models import RunContext, Trigger
 from deskbrief.report.excel import write_workbook
 from deskbrief.report.html import render_html, render_text
 from deskbrief.report.model import BriefModel
-from deskbrief.store.backend import REPORTS_PREFIX, StorageBackend, report_key
+from deskbrief.store.backend import (
+    REPORTS_PREFIX,
+    KeyExistsError,
+    StorageBackend,
+    report_key,
+)
 from deskbrief.store.duck import connect
 
 DEFAULT_SMTP_HOST = "smtp.gmail.com"
 DEFAULT_SMTP_PORT = 465
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _TIMEOUT_S = 30
+ARCHIVE_ATTEMPTS = 5
 
 
 class NotifyError(Exception):
@@ -138,6 +145,17 @@ def _connect(s: SmtpSettings) -> smtplib.SMTP:
     return smtp
 
 
+def _secret_forms(s: SmtpSettings) -> list[str]:
+    """The password plus its base64 forms, as ``AUTH PLAIN`` (``\\0user\\0password``) and
+    ``AUTH LOGIN`` (the password alone) put them on the wire; padded and unpadded."""
+    forms = [s.password]
+    for raw in (f"\0{s.user}\0{s.password}", s.password):
+        for encode in (base64.b64encode, base64.urlsafe_b64encode):
+            b64 = encode(raw.encode()).decode()
+            forms += [b64, b64.rstrip("=")]
+    return forms
+
+
 class SmtpNotifier:
     """Sends a multipart (text + HTML) message with optional attachments over SMTP."""
 
@@ -164,8 +182,8 @@ class SmtpNotifier:
             with self._connect(s) as smtp:
                 smtp.login(s.user, s.password)
                 smtp.send_message(msg)
-        except (smtplib.SMTPException, OSError) as exc:
-            detail = redact_text(f"{type(exc).__name__}: {exc}", [s.password])
+        except Exception as exc:  # any failure, not only SMTP/OSError: never leak the password
+            detail = redact_text(f"{type(exc).__name__}: {exc}", _secret_forms(s))
             raise NotifyError(f"SMTP send failed: {detail}") from None
 
 
@@ -184,13 +202,29 @@ def notifier_for(ctx: RunContext, env: Mapping[str, str]) -> Notifier:
 
 
 def archive_report(store: StorageBackend, report_date: date, files: Mapping[str, bytes]) -> str:
-    """Write ``files`` to the next free ``reports/date={d}/v{n}/``; returns ``brief.html``'s key."""
+    """Write ``files`` to the next free ``reports/date={d}/v{n}/``; returns ``brief.html``'s key.
+
+    Finding the next version is list-then-write, so two archivers can pick the same ``n``. Every
+    write is write-once (``overwrite=False``): the loser gets ``KeyExistsError`` (``brief.html``
+    goes first, so it is the claim on the version), lists again and takes the next free ``n``.
+    Gives up, re-raising, after ``ARCHIVE_ATTEMPTS`` tries.
+    """
     prefix = f"{REPORTS_PREFIX}/date={report_date.isoformat()}/"
-    seen = [int(m[1]) for k in store.list(prefix) if (m := re.match(r"v(\d+)/", k[len(prefix) :]))]
-    version = max(seen, default=0) + 1
-    for name, data in files.items():
-        store.put_bytes(report_key(report_date, version, name), data)
-    return report_key(report_date, version, "brief.html")
+    ordered = sorted(files.items(), key=lambda kv: kv[0] != "brief.html")  # the claim goes first
+    for attempt in range(ARCHIVE_ATTEMPTS):
+        seen = [
+            int(m[1]) for k in store.list(prefix) if (m := re.match(r"v(\d+)/", k[len(prefix) :]))
+        ]
+        version = max(seen, default=0) + 1
+        try:
+            for name, data in ordered:
+                store.put_bytes(report_key(report_date, version, name), data, overwrite=False)
+        except KeyExistsError:
+            if attempt == ARCHIVE_ATTEMPTS - 1:
+                raise
+            continue
+        return report_key(report_date, version, "brief.html")
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _workbook_bytes(model: BriefModel) -> bytes:
@@ -244,6 +278,10 @@ def report_steps(
     def notify(ctx: RunContext) -> None:
         log = get_logger(run_id=ctx.run_id)
         if not built:
+            # Deliberate: no report was built this run (build failed or was skipped), so there is
+            # nothing true to send. Never fall back to an older archived report: a stale brief
+            # that looks current is worse than no email. The runner already records the build
+            # failure; this warning is the trace.
             log.warning("report.email_skipped", reason="no report was built in this run")
             return
         mail = built[-1]
