@@ -29,11 +29,13 @@ from datetime import date, datetime
 
 import pandas as pd
 
+from deskbrief.checks.base import expected_for
 from deskbrief.config import Config, config_hash
 from deskbrief.ids import new_id
 from deskbrief.logging import get_logger, redact
 from deskbrief.models import (
     CheckType,
+    DQStatus,
     FetchRequest,
     FetchStatus,
     JobKind,
@@ -72,7 +74,6 @@ from deskbrief.timeutil import Clock, et_date, utc_now
 #: A failed flush of one of these loses data (raw may still hold it): the run is ``failed`` so
 #: catch-up treats the date as missed (spec §2.4 item 5). A lost dq_results partition degrades.
 _DATA_TABLES = frozenset({"observations", "source_log", "quarantine"})
-_DATA_FLUSH = frozenset({"observations", "source_log", "quarantine"})
 #: flushed after the checks hook, so the runner's own DQ rows and the hook's rows share one file
 _CHECK_FLUSH = frozenset({"dq_results", "revisions", "crosscheck_results"})
 _FAILED_FETCH = frozenset(
@@ -148,7 +149,7 @@ def execute_run(env: RunEnv, ctx: RunContext) -> RunManifest:
             try:
                 _fetch_all(env, ctx, buf, manifest)
             finally:
-                _flush(buf, datasets, ctx, manifest, _DATA_FLUSH)
+                _flush(buf, datasets, ctx, manifest, _DATA_TABLES)
             degraded += _run_steps(env, ctx, manifest, buf)
         finally:  # the one dq_results/revisions/crosscheck_results append of the run (P-008)
             _flush(buf, datasets, ctx, manifest, _CHECK_FLUSH)
@@ -194,6 +195,20 @@ def _fetch_all(env: RunEnv, ctx: RunContext, buf: RunBuffer, manifest: RunManife
             continue
         for req in requests:
             _process_request(env, ctx, source, req, buf, manifest, stats, writer)
+
+
+def _unexpected_empty_day(ctx: RunContext, req: FetchRequest) -> str | None:
+    """Data day (ISO) the dataset should have published when an empty fetch is a surprise.
+
+    Uses the per-dataset schedules of T20 (``config.datasets``) and their calendar rules: an
+    empty answer on a weekend, a holiday or before the publication time is expected. A dataset
+    with no schedule entry has no expectation, so it never warns (gap noted in the PR).
+    """
+    for sched in ctx.config.datasets:
+        if (sched.source, sched.dataset) == (req.source, req.dataset):
+            exp = expected_for(ctx, sched)
+            return None if exp.skip_reason else exp.data_day.isoformat()
+    return None
 
 
 def _crash_response(req: FetchRequest, exc: Exception, at: datetime) -> RawResponse:
@@ -264,6 +279,19 @@ def _process_request(
     elif status in _FAILED_FETCH:
         failure = f"fetch {status.value}: {raw.error or raw.http_status}"
         _dq_fail(env, ctx, buf, "runner.fetch", CheckType.COMPLETENESS, raw, status=status.value)
+    elif status is FetchStatus.EMPTY and (day := _unexpected_empty_day(ctx, req)):
+        why = "empty response on an expected publication day"
+        _dq_fail(
+            env,
+            ctx,
+            buf,
+            "runner.empty",
+            CheckType.COMPLETENESS,
+            raw,
+            level=DQStatus.WARN,
+            data_day=day,
+            reason=why,
+        )
 
     if failure is None:
         stats.succeeded += 1
@@ -284,9 +312,11 @@ def _dq_fail(
     name: str,
     check_type: CheckType,
     raw: RawResponse,
+    *,
+    level: DQStatus = DQStatus.FAIL,
     **details: object,
 ) -> None:
-    """One DQ ``fail`` row per (check, source, reason); repeats only bump ``count``.
+    """One DQ row (``fail`` unless ``level``) per (check, source, reason); repeats bump ``count``.
 
     A source with many requests (one per series) and a missing key would otherwise write N
     identical rows; the first row keeps its fetch_id and gains ``count`` and ``datasets``.
@@ -316,6 +346,7 @@ def _dq_fail(
         source=raw.request.source,
         at=env.clock(),
         details=info,
+        status=level,
     )
     row = dq_row(result)
     buf.add("dq_results", row)
@@ -554,6 +585,8 @@ def run_rebuild(
                 f"{result.no_target_date} raw objects had no recoverable target_date"
             )
         manifest.notes.extend(f"flush failed: {e}" for e in result.errors)
+        if result.abort_reason:
+            manifest.notes.append(f"rebuild not flipped: {result.abort_reason}")
         if result.flip_done:
             manifest.status = RunStatus.DEGRADED if result.quarantined else RunStatus.OK
     except Exception as exc:  # storage unreadable: report failed, exit 1
