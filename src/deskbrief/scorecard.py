@@ -41,8 +41,10 @@ import pandas as pd
 
 from deskbrief.models import RunContext
 from deskbrief.schemas import to_frame
-from deskbrief.store.datasets import Datasets
-from deskbrief.store.duck import connect
+from deskbrief.store.datasets import Datasets, current_clean_version
+from deskbrief.store.duck import connect, table_source_sql
+from deskbrief.store.local import LocalBackend
+from deskbrief.store.r2 import R2Backend
 
 # $1 date, $2-$4 the run in progress (no ``runs`` row yet: the runner writes it after the hooks)
 _SQL = """
@@ -101,16 +103,38 @@ def compute_scorecard(
     return to_frame("scorecard_daily", rows)
 
 
-def write_scorecard(ctx: RunContext) -> str | None:
+def _refresh_view(duck: duckdb.DuckDBPyConnection, ctx: RunContext) -> None:
+    """Point the ``scorecard`` view at the file just written (it was empty if none existed)."""
+    store = ctx.store
+    base = store.root.as_posix() if isinstance(store, LocalBackend) else None
+    if base is None and isinstance(store, R2Backend):
+        base = f"r2://{store.bucket}"
+    if base is None:
+        raise TypeError(f"cannot refresh the scorecard view over {type(store)!r}")
+    source = table_source_sql("scorecard_daily", base, current_clean_version(store), has_files=True)
+    duck.execute(f"CREATE OR REPLACE VIEW scorecard AS {source}")
+
+
+def write_scorecard(ctx: RunContext, duck: duckdb.DuckDBPyConnection | None = None) -> str | None:
     """Score ``ctx.target_date`` and overwrite that day's file (spec §6).
 
-    Returns the key, or ``None`` when there was nothing to score (an earlier file is kept).
+    Returns the key, or ``None`` when there was nothing to score (an earlier file is kept). With
+    ``duck`` (the serving hook's shared connection) no connection is opened, and the ``scorecard``
+    view is re-pointed at the new file so the caller's next read sees it; without it the
+    connection is opened and closed here.
     """
-    duck = connect(ctx.store, ctx.config)
+    own = duck is None
+    conn = connect(ctx.store, ctx.config) if duck is None else duck
     try:
-        df = compute_scorecard(duck, ctx.target_date, current=ctx)
+        df = compute_scorecard(conn, ctx.target_date, current=ctx)
+        if df.empty:
+            return None
+        key = Datasets(ctx.store).append(
+            "scorecard_daily", df, ctx, ctx.target_date, overwrite=True
+        )
+        if not own:
+            _refresh_view(conn, ctx)
+        return key
     finally:
-        duck.close()
-    if df.empty:
-        return None
-    return Datasets(ctx.store).append("scorecard_daily", df, ctx, ctx.target_date, overwrite=True)
+        if own:
+            conn.close()

@@ -19,6 +19,13 @@ yields every row. Only `close` is emitted: unit `index_pts`, interval `1d`, tier
 ## Failure modes
 
 HTML/error pages served with status 200, a missing header, a bad date or number raise `ParseError`.
+Only rows inside the requested window are validated, so one bad historical row (bad number, wrong
+column count) is skipped instead of failing every daily run; a bad row inside the window, or an
+unparsable date, still raises (a request without `lookback_days` validates every row). A body that
+does not end in a newline, when its last row is inside the window, is treated as a truncated
+download (a cut such as `16.` would otherwise parse as 16.0) and raises `ParseError`. `csv.Error`
+and an out-of-range `lookback_days` (`OverflowError`) also become `ParseError`. The URL constant is
+marked `# UNVERIFIED` in code until the live probe below has run.
 An empty or header-only body, or a window with no rows, is a legitimate empty result. Up to four
 title lines before the header and lines starting with `#` are tolerated.
 
