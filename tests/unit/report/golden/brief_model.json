@@ -131,7 +131,8 @@
           "value_unit": "pct",
           "change_value": -3.0,
           "change_value_unit": "bp",
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": "2026-11-16T11:58:00+00:00"
         },
         {
           "instrument_id": "UST_2Y",
@@ -208,7 +209,8 @@
           "value_unit": "pct",
           "change_value": -2.0,
           "change_value_unit": "bp",
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": "2026-11-13T05:00:00+00:00"
         },
         {
           "instrument_id": "UST_2S10S",
@@ -234,7 +236,8 @@
           "value_unit": "bp",
           "change_value": -3.0,
           "change_value_unit": "bp",
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": "2026-11-13T05:00:00+00:00"
         }
       ]
     },
@@ -317,7 +320,8 @@
           "value_unit": "fx_rate",
           "change_value": 0.388888889,
           "change_value_unit": "pct",
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": "2026-11-13T05:00:00+00:00"
         }
       ]
     },
@@ -402,7 +406,8 @@
           "value_unit": "USD",
           "change_value": -1.111111111,
           "change_value_unit": "pct",
-          "dq_flag": "fail"
+          "dq_flag": "fail",
+          "as_of": "2026-11-16T11:58:00+00:00"
         }
       ]
     },
@@ -487,7 +492,8 @@
           "value_unit": "index_pts",
           "change_value": -0.4,
           "change_value_unit": "pct",
-          "dq_flag": "warn"
+          "dq_flag": "warn",
+          "as_of": "2026-11-16T11:59:00+00:00"
         },
         {
           "instrument_id": "SPY",
@@ -566,7 +572,8 @@
           "value_unit": "USD",
           "change_value": 0.250626566,
           "change_value_unit": "pct",
-          "dq_flag": "warn"
+          "dq_flag": "warn",
+          "as_of": "2026-11-16T11:59:00+00:00"
         },
         {
           "instrument_id": "QQQ",
@@ -590,7 +597,8 @@
           "value_unit": null,
           "change_value": null,
           "change_value_unit": null,
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": null
         }
       ]
     },
@@ -651,7 +659,8 @@
           "value_unit": "index_pts",
           "change_value": null,
           "change_value_unit": null,
-          "dq_flag": "none"
+          "dq_flag": "none",
+          "as_of": "2026-11-13T05:00:00+00:00"
         }
       ]
     }
@@ -770,6 +779,10 @@
     {
       "kind": "unavailable",
       "text": "Data unavailable: QQQ"
+    },
+    {
+      "kind": "checks_scope",
+      "text": "Check results are those of the latest run for 2026-11-16: a partial re-run supersedes both check tables (data quality and cross-checks) for the date, so a check it did not repeat is not counted"
     },
     {
       "kind": "dq_fail",
