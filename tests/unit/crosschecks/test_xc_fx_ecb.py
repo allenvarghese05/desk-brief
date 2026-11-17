@@ -7,20 +7,25 @@ ECB rows are ``field=rate``, ``interval=1d``, ``as_of`` 00:00 ET of the referenc
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from xc_fakes import DAY_FRI, duck_for, make_ctx, minutes, obs, put, td_bar, yahoo_tick
+from xc_fakes import DAY_FRI, NOW, duck_for, make_ctx, minutes, obs, put, td_bar, yahoo_tick
 
 from deskbrief.config import Config
+from deskbrief.crosschecks import fx_ecb
 from deskbrief.crosschecks.base import registered
 from deskbrief.crosschecks.fx_ecb import FxVsEcb
 from deskbrief.models import DQStatus, XResult
 from deskbrief.store.local import LocalBackend
 
 FIX = datetime(2026, 11, 13, 13, 15, tzinfo=UTC)
+BAR = datetime(
+    2026, 11, 13, 13, 14, tzinfo=UTC
+)  # the 1m bar *ending* at the fix starts 1 min earlier
 SUMMER_FIX = datetime(2026, 7, 15, 12, 15, tzinfo=UTC)
+SUMMER_BAR = datetime(2026, 7, 15, 12, 14, tzinfo=UTC)
 SUMMER_DAY = datetime(2026, 7, 15, 4, 0, tzinfo=UTC)  # 00:00 EDT
 SUMMER_NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 SUMMER_INGESTED = datetime(2026, 7, 15, 20, 0, tzinfo=UTC)
@@ -70,7 +75,7 @@ def run(store: LocalBackend, config: Config, **kw: object) -> dict[tuple[str, st
 def test_twelvedata_boundaries(
     store: LocalBackend, config: Config, bar: float, diff_bps: float, status: DQStatus
 ) -> None:
-    put(store, config, [ecb("EURUSD", 1.0), td("EURUSD", FIX, bar)])
+    put(store, config, [ecb("EURUSD", 1.0), td("EURUSD", BAR, bar)])
     r = run(store, config)[("EURUSD", "twelvedata")]
     assert r.status is status
     assert r.diff_bps == pytest.approx(diff_bps, abs=1e-6)
@@ -86,7 +91,7 @@ def test_ecb_side_is_a_reference_rate_not_a_close(store: LocalBackend, config: C
     put(
         store,
         config,
-        [ecb("GBPUSD", 1.25), td("GBPUSD", FIX, 1.25), ecb("EURUSD", 1.1), td("EURUSD", FIX, 1.1)],
+        [ecb("GBPUSD", 1.25), td("GBPUSD", BAR, 1.25), ecb("EURUSD", 1.1), td("EURUSD", BAR, 1.1)],
     )
     out = run(store, config)
     gbp, eur = out[("GBPUSD", "twelvedata")].details, out[("EURUSD", "twelvedata")].details
@@ -102,20 +107,29 @@ def test_ecb_side_is_a_reference_rate_not_a_close(store: LocalBackend, config: C
     assert gbp["ref_date"] == "2026-11-13"
 
 
-def test_only_the_bar_starting_at_the_fix_counts(store: LocalBackend, config: Config) -> None:
+def test_only_the_bar_ending_at_the_fix_counts(store: LocalBackend, config: Config) -> None:
+    # Twelve Data `as_of` is the bar start (P-006), so the bar ending at the fix (14:15) starts
+    # at 14:14. The bar starting at 14:15 closes at 14:16, after the fix, and must not be used.
     put(
         store,
         config,
         [
             ecb("EURUSD", 1.0),
-            td("EURUSD", minutes(FIX, -1), 1.0100),
-            td("EURUSD", minutes(FIX, 1), 1.0100),
-            td("EURUSD", FIX, 1.0001),
+            td("EURUSD", minutes(BAR, -1), 1.0100),
+            td("EURUSD", FIX, 1.0100),
+            td("EURUSD", BAR, 1.0001),
         ],
     )
     r = run(store, config)[("EURUSD", "twelvedata")]
     assert r.left_value == pytest.approx(1.0001)
+    assert r.details["left"]["as_of"] == BAR.isoformat()
+    assert r.at_time == FIX  # the comparison is still stamped with the fix itself
     assert r.details["n_twelvedata_bars"] == 3
+
+
+def test_bar_starting_at_the_fix_alone_is_skip(store: LocalBackend, config: Config) -> None:
+    put(store, config, [ecb("EURUSD", 1.0), td("EURUSD", FIX, 1.0)])
+    assert run(store, config)[("EURUSD", "twelvedata")].status is DQStatus.SKIP
 
 
 def test_missing_bar_at_the_fix_is_skip(store: LocalBackend, config: Config) -> None:
@@ -128,12 +142,12 @@ def test_missing_bar_at_the_fix_is_skip(store: LocalBackend, config: Config) -> 
 
 
 def test_twelvedata_mid_is_not_a_field(store: LocalBackend, config: Config) -> None:
-    put(store, config, [ecb("EURUSD", 1.0), td("EURUSD", FIX, 1.0, field="mid")])
+    put(store, config, [ecb("EURUSD", 1.0), td("EURUSD", BAR, 1.0, field="mid")])
     assert run(store, config)[("EURUSD", "twelvedata")].status is DQStatus.SKIP
 
 
 def test_missing_ecb_is_skip(store: LocalBackend, config: Config) -> None:
-    put(store, config, [td("EURUSD", FIX, 1.0)])
+    put(store, config, [td("EURUSD", BAR, 1.0)])
     r = run(store, config)[("EURUSD", "twelvedata")]
     assert r.status is DQStatus.SKIP
     assert "EURUSD/ecb/eurofxref" in r.details["reason"]
@@ -160,11 +174,103 @@ def test_yahoo_tick_nearest_to_the_fix(store: LocalBackend, config: Config) -> N
     assert r.details["right_is_derived"] is True
 
 
-def test_yahoo_without_a_tick_near_the_fix_is_skip(store: LocalBackend, config: Config) -> None:
+def test_yahoo_without_any_tick_is_skip_with_its_own_reason(
+    store: LocalBackend, config: Config
+) -> None:
+    put(store, config, [ecb("EURUSD", 1.0)])
+    r = run(store, config)[("EURUSD", "yahoo")]
+    assert r.status is DQStatus.SKIP
+    assert r.details["reason"] == "no Yahoo ticks around the fix (EURUSD)"
+    assert r.details["n_yahoo_ticks"] == 0
+
+
+def test_yahoo_ticks_only_outside_tolerance_is_skip_with_its_own_reason(
+    store: LocalBackend, config: Config
+) -> None:
     put(store, config, [ecb("EURUSD", 1.0), yh("EURUSD", minutes(FIX, 5), 1.0)])
     r = run(store, config)[("EURUSD", "yahoo")]
     assert r.status is DQStatus.SKIP
-    assert "yahoo/quote" in r.details["reason"]
+    assert (
+        r.details["reason"] == "no Yahoo tick within +-1m of the fix (EURUSD; nearest 300 s away)"
+    )
+    assert r.details["n_yahoo_ticks"] == 1
+
+
+@pytest.mark.parametrize(("offset_s", "used"), [(-60, True), (60, True), (-61, False), (61, False)])
+def test_yahoo_tolerance_is_exactly_60_seconds(
+    store: LocalBackend, config: Config, offset_s: int, used: bool
+) -> None:
+    put(store, config, [ecb("EURUSD", 1.0), yh("EURUSD", FIX + timedelta(seconds=offset_s), 1.0)])
+    r = run(store, config)[("EURUSD", "yahoo")]
+    assert (r.status is DQStatus.PASS) is used
+    assert (r.status is DQStatus.SKIP) is not used
+
+
+def test_rows_ingested_after_now_are_ignored(store: LocalBackend, config: Config) -> None:
+    late = NOW + timedelta(minutes=1)
+    put(
+        store,
+        config,
+        [
+            ecb("EURUSD", 1.0),
+            td("EURUSD", BAR, 1.0),
+            yh("EURUSD", FIX, 1.0),
+            ecb("EURUSD", 2.0, ingested_at=late),  # revisions published after the run
+            td("EURUSD", BAR, 2.0, ingested_at=late),
+            yh("EURUSD", FIX, 2.0, ingested_at=late),
+        ],
+    )
+    out = run(store, config)
+    for source in ("twelvedata", "yahoo"):
+        assert out[("EURUSD", source)].status is DQStatus.PASS
+        assert out[("EURUSD", source)].right_value == pytest.approx(1.0)
+        assert out[("EURUSD", source)].left_value == pytest.approx(1.0)
+
+
+def test_rows_ingested_only_after_now_are_not_seen(store: LocalBackend, config: Config) -> None:
+    late = NOW + timedelta(minutes=1)
+    put(
+        store,
+        config,
+        [ecb("EURUSD", 1.0, ingested_at=late), td("EURUSD", BAR, 1.0, ingested_at=late)],
+    )
+    assert run(store, config)[("EURUSD", "twelvedata")].status is DQStatus.SKIP
+
+
+def test_latest_version_wins(store: LocalBackend, config: Config) -> None:
+    older = NOW - timedelta(hours=2)
+    newer = NOW - timedelta(hours=1)
+    put(
+        store,
+        config,
+        [
+            ecb("EURUSD", 9.0, ingested_at=older),
+            ecb("EURUSD", 1.0, ingested_at=newer),
+            td("EURUSD", BAR, 9.0, ingested_at=older),
+            td("EURUSD", BAR, 1.0002, ingested_at=newer),
+            yh("EURUSD", FIX, 9.0, ingested_at=older),
+            yh("EURUSD", FIX, 1.0003, ingested_at=newer),
+        ],
+    )
+    out = run(store, config)
+    assert out[("EURUSD", "twelvedata")].diff_bps == pytest.approx(2.0, abs=1e-6)
+    assert out[("EURUSD", "yahoo")].diff_bps == pytest.approx(3.0, abs=1e-6)
+    assert out[("EURUSD", "twelvedata")].right_value == pytest.approx(1.0)
+
+
+def test_is_derived_is_looked_up_once_per_pair(
+    store: LocalBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real = fx_ecb._is_derived
+
+    def spy(ctx: Any, duck: Any, o: Any) -> bool | None:
+        calls.append(o.instrument_id if o else "none")
+        return real(ctx, duck, o)
+
+    monkeypatch.setattr(fx_ecb, "_is_derived", spy)
+    run(store, config)
+    assert sorted(calls) == sorted(["none"] * len(config.crosschecks.fx_vs_ecb.pairs))
 
 
 def test_summer_fix_is_12_15_utc(store: LocalBackend, config: Config) -> None:
@@ -174,7 +280,7 @@ def test_summer_fix_is_12_15_utc(store: LocalBackend, config: Config) -> None:
         config,
         [
             ecb("EURUSD", 1.0, as_of=SUMMER_DAY, **kw),
-            td("EURUSD", SUMMER_FIX, 1.0003, **kw),
+            td("EURUSD", SUMMER_BAR, 1.0003, **kw),
             td(
                 "EURUSD", datetime(2026, 7, 15, 13, 15, tzinfo=UTC), 2.0, **kw
             ),  # winter-style 13:15Z
@@ -191,7 +297,7 @@ def test_winter_fix_is_13_15_utc_not_12_15(store: LocalBackend, config: Config) 
     put(
         store,
         config,
-        [ecb("EURUSD", 1.0), td("EURUSD", FIX, 1.0), td("EURUSD", minutes(FIX, -60), 2.0)],
+        [ecb("EURUSD", 1.0), td("EURUSD", BAR, 1.0), td("EURUSD", minutes(BAR, -60), 2.0)],
     )
     r = run(store, config)[("EURUSD", "twelvedata")]
     assert r.status is DQStatus.PASS
@@ -208,7 +314,7 @@ def test_target_holiday_rolls_back_to_the_last_ecb_day(store: LocalBackend, conf
         config,
         [
             ecb("EURUSD", 1.0, as_of=datetime(2026, 4, 2, 4, 0, tzinfo=UTC), **kw),
-            td("EURUSD", fix, 1.0, **kw),
+            td("EURUSD", minutes(fix, -1), 1.0, **kw),
         ],
     )
     r = run(store, config, target=now.date(), now=now)[("EURUSD", "twelvedata")]
@@ -223,9 +329,9 @@ def test_current_unfinished_date_is_excluded(store: LocalBackend, config: Config
         config,
         [
             ecb("EURUSD", 1.0),
-            td("EURUSD", FIX, 1.0),
+            td("EURUSD", BAR, 1.0),
             ecb("EURUSD", 1.0, as_of=datetime(2026, 11, 16, 5, 0, tzinfo=UTC)),
-            td("EURUSD", mon_fix, 5.0),
+            td("EURUSD", minutes(mon_fix, -1), 5.0),
         ],
     )
     r = run(store, config)[("EURUSD", "twelvedata")]
