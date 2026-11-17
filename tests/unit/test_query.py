@@ -311,3 +311,80 @@ def test_baseline_from_another_source_is_noted(tmp_path: Path) -> None:
     assert ch.previous is not None
     assert ch.note is not None
     assert "ecb" in ch.note
+
+
+def test_exclude_tiers_falls_back_to_the_best_remaining_value(world: World) -> None:
+    db = world.connect()
+    assert {r.instrument_id: r.tier for r in query.latest_snapshot(db, MON_0700)}["SPY"] == 1
+    snap = {r.instrument_id: r for r in query.latest_snapshot(db, MON_0700, exclude_tiers=(1,))}
+    spy = snap["SPY"]  # hidden tier-1 tick: the Friday official close stands in, not "no data"
+    assert (spy.tier, spy.value, spy.interval) == (3, 598.50, "1d")
+    assert snap["ES_F"].tier == 2  # tiers that are not excluded are untouched
+    rest = {r.instrument_id for r in query.latest_snapshot(db, MON_0700, exclude_tiers=(1, 2))}
+    assert "ES_F" not in rest  # every ES_F row is tier 2: absent, as if it had no data
+    assert "EURUSD" in rest
+
+
+def test_exclude_tiers_applies_to_overnight_changes_and_baselines(world: World) -> None:
+    db = world.connect()
+    spy = change_of(query.overnight_changes(db, MON, MON_0700, exclude_tiers=(1,)), "SPY")
+    assert (spy.last.tier, spy.status) == (3, "no_move_yet")  # last value is Friday's close
+    ten = change_of(query.overnight_changes(db, MON, MON_0700, exclude_tiers=(3,)), "UST_10Y")
+    assert ten.last.tier == 2  # the ^TNX-style tick
+    assert (ten.previous, ten.status) == (None, "no_baseline")  # official baselines are tier 3
+    assert change_of(query.overnight_changes(db, MON, MON_0700), "UST_10Y").status == "ok"
+
+
+def test_health_summary_reads_only_the_latest_run(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(MON, [("fresh_a", "fail", "stooq", None), ("old_only", "warn", None, "WTI")], run_id="R1")
+    w.dq(MON, [("fresh_a", "pass", "stooq", None)], at="08:00", run_id="R2")
+    w.xchecks(MON, [("sp500_return", "fail", 12.0)], run_id="R1")
+    w.xchecks(MON, [("sp500_return", "pass", 1.0)], at="08:00", run_id="R2")
+    h = query.health_summary(w.connect(), MON)
+    # the rows of run R1 stay in the store (P-008) but R1 is superseded: nothing of it counts
+    assert (h.n_pass, h.n_warn, h.n_fail, h.n_skip) == (1, 0, 0, 0)
+    assert (h.n_xcheck_pass, h.n_xcheck_warn, h.n_xcheck_fail) == (1, 0, 0)
+    assert h.issues == ()
+    assert query.instrument_flags(w.connect(), MON) == {"SPY": "pass", "ES_F": "pass"}
+
+
+def test_instrument_flags_take_the_worst_status_and_ignore_skip(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(
+        MON,
+        [
+            ("range", "fail", "stooq", "WTI"),
+            ("fresh", "pass", "stooq", "WTI"),
+            ("fresh", "pass", "yahoo", "VIX"),
+            ("anom", "warn", None, "VIX"),
+            ("anom", "skip", None, "EURUSD"),
+            ("fresh", "fail", "stooq", None),  # a source-level check belongs to no instrument
+        ],
+    )
+    w.xchecks(MON, [("sp500_return", "warn", 7.0)])  # SPY (left) against ES_F (right)
+    assert query.instrument_flags(w.connect(), MON) == {
+        "WTI": "fail",
+        "VIX": "warn",
+        "SPY": "warn",
+        "ES_F": "warn",
+    }
+    assert query.instrument_flags(w.connect(), THU) == {}
+
+
+def test_dq_and_crosschecks_come_from_one_run(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(MON, [("fresh_a", "fail", "stooq", None)], run_id="R1")
+    w.xchecks(MON, [("sp500_return", "warn", 7.0)], run_id="R1")
+    # a later run wrote only cross-checks: it is the one run for both tables
+    w.xchecks(MON, [("sp500_return", "pass", 1.0)], at="08:00", run_id="R2")
+    h = query.health_summary(w.connect(), MON)
+    assert (h.n_pass, h.n_warn, h.n_fail) == (0, 0, 0)  # nothing of R1's dq counts
+    assert (h.n_xcheck_pass, h.n_xcheck_warn, h.n_xcheck_fail) == (1, 0, 0)
+    assert h.issues == ()
+    assert query.instrument_flags(w.connect(), MON) == {"SPY": "pass", "ES_F": "pass"}
+    # and the other way round: a later dq-only run hides the earlier run's cross-checks
+    w.dq(MON, [("fresh_a", "pass", "stooq", None)], at="09:00", run_id="R3")
+    h = query.health_summary(w.connect(), MON)
+    assert (h.n_pass, h.n_xcheck_pass, h.n_xcheck_warn) == (1, 0, 0)
+    assert query.instrument_flags(w.connect(), MON) == {}

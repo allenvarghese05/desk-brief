@@ -139,12 +139,13 @@ class World:
         results: list[tuple[str, str, str | None, str | None]],
         at: str = "07:00",
         check_type: str = "freshness",
+        run_id: str = "RUN1",  # one default run for dq and cross-checks
     ) -> None:
-        """``(check_name, status, source, instrument_id)`` rows for ``target``."""
+        """``(check_name, status, source, instrument_id)`` rows for ``target`` (run ``run_id``)."""
         rows = [
             {
                 "result_id": f"DQ{next(_ids)}",
-                "run_id": "RUNDQ",
+                "run_id": run_id,
                 "check_name": name,
                 "check_type": check_type,
                 "source": source,
@@ -167,8 +168,10 @@ class World:
         *,
         ref: date | None = None,
         mirror: bool = False,
+        run_id: str = "RUN1",
+        at: str = "07:00",
     ) -> None:
-        """``(check_name, status, diff_bps)`` rows for ``target``.
+        """``(check_name, status, diff_bps)`` rows for ``target``, written by run ``run_id``.
 
         ``ref`` is the data date the check compared (``details.ref_date``; default: the
         previous NYSE session, so it differs from ``target`` on purpose). ``mirror`` also writes
@@ -178,11 +181,11 @@ class World:
         rows = [
             {
                 "result_id": f"XC{next(_ids)}",
-                "run_id": "RUNXC",
+                "run_id": run_id,
                 "check_name": name,
                 "group_id": "sp500",
                 "target_date": target,
-                "at_time": et(target, "07:00"),
+                "at_time": et(target, at),
                 "relation": "return",
                 "left_instrument": "SPY",
                 "left_source": "alpaca",
@@ -205,6 +208,8 @@ class World:
                 target,
                 [(name, status, None, "SPY") for name, status, _ in results],
                 check_type="consistency",
+                run_id=run_id,
+                at=at,
             )
 
     def fetches(self, target: date, results: list[tuple[str, str]]) -> None:
