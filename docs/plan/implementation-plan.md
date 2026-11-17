@@ -335,6 +335,83 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 | Morning cron form | P-013: two morning crons, one per fire time | spec §5.4; T24A |
 | Agent-log location | P-014: one file per card, `docs/agent-log/T{id}.md` | workflow §8.2, §9; definition of done |
 
+
+### Review follow-ups, wave 2 (from PRs #24–#35)
+
+Non-blocking findings deferred in the second wave. Each bullet links its source. As before, a follow-up card may own files of a merged card, and no two open cards own the same file.
+
+Order:
+- T07A (contract) before T07B.
+- T09B before T32B, and T32B before T33.
+- T22B, T26 and T06D are independent of each other and of the rest.
+
+#### T07A — `contract:` per-dataset intraday schedule
+- **Depends:** T07 merged · **Blocks:** T07B
+- **Owns:** `src/deskbrief/config.py` (one new model and one `Config` field only), as a planner-approved `contract:` PR (Contracts rule); `config.yaml` values via the planner (P-004); config tests
+- Deliverables: `IntradaySchedule(source, dataset, calendar="XNYS", grace_minutes=30)` and `Config.intraday: tuple[IntradaySchedule, ...] = ()`, cross-referenced against feeds like `datasets`. Values: `alpaca/iex_latest`, `yahoo/quote` and `twelvedata/fx_quote`, each with 30 minutes grace (two missed 15-minute polls).
+- Source: the T07 implementer's proposal in the [PR #27 description](https://github.com/allenvarghese05/desk-brief/pull/27) and the [PR #27 round-2 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/27#pullrequestreview-5932068771).
+
+- Changelog: card created from PR #27.
+
+#### T07B — Intraday tick-age freshness
+- **Depends:** T07A · **Owns:** `src/deskbrief/checks/*`, `tests/unit/checks/*`
+- Deliverables: age of the newest tick against `grace_minutes` for each `Config.intraday` entry. It runs only inside the session (early-close aware, P-011) and at least one grace period after the open, and gives `skip` otherwise. It uses the existing warn/fail ladder.
+- Acceptance: tests for in-session fresh and stale ticks, pre-open, an early close and a holiday.
+
+- Changelog: card created from PR #27 (the deferred T07 bullet).
+
+#### T09B — Brief-model follow-ups 2
+- **Depends:** T07, T09 merged · **Blocks:** T32B · **Owns:** `src/deskbrief/report/model.py`, `src/deskbrief/query.py`, `tests/unit/report/*`, `tests/unit/test_query.py`, `tests/brief_synth.py`
+- Deliverables:
+  - Reuse T20/T07's anomaly logic for notable moves (the deferred T09 bullet).
+  - `health_summary` and the cross-check items read only the latest run for each `target_date`. Re-runs keep both runs' rows under P-008. Source: [PR #32 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/32#pullrequestreview-5932131226).
+  - `Row.dq_flag`: the worst check or cross-check status for the instrument on the report date, for T32B (P-015).
+  - Typed numeric `value` and `value_unit` on derived rows (the 2s10s spread in bp), so writers stop parsing text. Source: [PR #33 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409).
+  - `exclude_tiers=` on `latest_snapshot` and `overnight_changes`, so hosted mode falls back to a tier 2/3 value instead of hiding the instrument. Source: the T34 implementer's note in the [PR #37 description](https://github.com/allenvarghese05/desk-brief/pull/37).
+  - A test that the 2s10s spread ignores a tier-2 `1d` yield. A future-dated quote shows a warning instead of "0 min old". A docstring on the spread's shared date. Source: [PR #28 review, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/28#pullrequestreview-5931993002).
+- Acceptance: a test per bullet; `SCHEMA_VERSION` stays 1 if every new field has a default.
+
+- Changelog: card created from the PR #28, #32, #33 and #37 sources linked above.
+
+#### T32B — Excel columns before T33
+- **Depends:** T09B · **Blocks:** T33 · **Owns:** `src/deskbrief/report/excel.py`, `tests/contract/test_excel_tables.py`, `tests/unit/report/test_excel.py`, `tests/xlsx_read.py`
+- Deliverables:
+  - Append `dq_flag` and `as_of_utc` to the five market tables exactly as spec §9.2 lists them (P-015).
+  - Write typed derived values from T09B, and remove `_parse_bp`.
+  - Export the placeholder label as a constant and set the placeholder's `status` to `empty`.
+  - Replace the FX-format magic number with a named constant.
+  - Cover Notable, the IEX and fallback qualifiers, and lineage `is_fallback` in tests. Source: [PR #33 review, findings 2, 3, 5 and 6](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409).
+- Acceptance: the contract test pins the new headers; a negative-spread test.
+
+- Changelog: card created from the PR #33 review and P-015.
+
+#### T22B — Cross-check follow-ups 2
+- **Depends:** T22 merged · **Owns:** `src/deskbrief/crosschecks/{fx_ecb.py,iex_sip.py}`, their tests
+- Deliverables:
+  - fx_vs_ecb: the Twelve Data price comes from the bar starting at 14:15, which closes about a minute after the fix. Use the bar ending at the fix, or document the offset. Give a specific Yahoo skip reason ("no ticks" vs "no tick within ±1m"). Pin the ±1-minute tolerance with ticks at +60 s, +61 s and −60 s. Add tests that rows ingested after `now_utc` are ignored and that the latest version wins. Compute `_is_derived` once per pair. Source: [PR #30 review, findings 1–5](https://github.com/allenvarghese05/desk-brief/pull/30#pullrequestreview-5932010935).
+  - iex_vs_sip: add `left_label`/`right_label` saying IEX is a single venue and SIP is consolidated. Add a p95 nearest-rank test with 95 clean and 5 bad minutes. Clamp or comment `n_missing_both`. Source: [PR #29 review, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/29#pullrequestreview-5932008561).
+- Acceptance: a test per bullet.
+
+- Changelog: card created from the PR #29 and #30 reviews.
+
+#### T26 — Futures roll calendar
+- **Depends:** T22 merged · **Owns:** `src/deskbrief/crosschecks/proxy_exact.py`, its tests, a `crosschecks.roll_calendar` block in `config.yaml` via the planner (P-004)
+- Deliverables: replace the ES_F and BRENT roll-window approximations with rules taken from the exchange calendars (CME for ES and CL, ICE for Brent, COMEX for GC), and model WTI and GOLD_F too. Record the source URL and date in `docs/sources/` (VERIFY by the owner).
+- Acceptance: a window-length test per contract over a year, and each roll date checked against the cited calendar.
+- Source: [PR #31 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/31#pullrequestreview-5932027859) and [round 2, nit 3](https://github.com/allenvarghese05/desk-brief/pull/31#pullrequestreview-5932099384).
+
+- Changelog: card created from the PR #31 reviews.
+
+#### T06D — Rebuild follow-ups
+- **Depends:** T06 merged · **Owns:** `src/deskbrief/pipeline/clean.py`, `tests/unit/pipeline/*`
+- Deliverables:
+  - The abort reason names the `clean/_flips/from-{previous}` marker key and the operator step, and the marker stores the flip time.
+  - A test that a non-`KeyExistsError` claim-write failure gives `failed`, no flush and an unchanged pointer.
+  - Optional cleanup of abandoned version directories.
+- Source: [PR #35 review, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/35#pullrequestreview-5932290937).
+
+- Changelog: card created from the PR #35 review.
+
 ### Phase 2 — Scheduling, quality, cross-checks
 
 #### T24A — `morning.yml` v0 (ship first)
@@ -342,10 +419,12 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - **Owns:** `.github/workflows/morning.yml`, `docs/runbook.md`
 - Deliverables: two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013; DST-safe, code gates) + `workflow_dispatch`; concurrency group; uv cache; secrets env; runs `deskbrief run morning`; pings healthcheck on success, `/fail` on failure; uploads logs as artifact (7-day retention, contains no provider data beyond counts).
 - The job sets `GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}` in its environment, so the morning gate's `scheduled_for` sees the exact fire (P-013). Test or dispatch evidence: a scheduled run's step summary shows the fire time it gated on.
+- `docs/runbook.md` covers manual rollback of `clean/_CURRENT`: delete `clean/_flips/from-{previous}` before rebuilding from a rolled-back version. Source: [PR #35 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/35#pullrequestreview-5932290937).
+- The job passes the T31 SMTP settings (`SMTP_USER`, `SMTP_APP_PASSWORD`, `REPORT_RECIPIENTS`, optional `SMTP_HOST`/`SMTP_PORT`) as secrets. Source: the [PR #36 description](https://github.com/allenvarghese05/desk-brief/pull/36).
 - **Depends also on T05** (R2 checksum config). Gate: the owner runs `tests/integration/test_r2.py` with real keys **on `main` at or after the T05 merge**, and the commit SHA plus the pass output are pasted into the T24A PR description.
 - Acceptance: workflow sets `DESKBRIEF_STORAGE_BACKEND=r2` (config default is `local` for dev); manual dispatch run green against real sources writes raw/clean/runs to R2 (screenshot/log excerpt in PR); job shows step summary. Report generation is a no-op until T31.
 
-- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review; two morning crons from P-013; `GITHUB_EVENT_SCHEDULE` mapping from [PR #23 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588).
+- Changelog: PR #6: depends on T05; R2 gate from the T02 review (PR #5) finding 5; gate wording from the PR #6 round-1 review; two morning crons from P-013; runbook and SMTP lines from PRs #35 and #36; `GITHUB_EVENT_SCHEDULE` mapping from [PR #23 round 2, finding 3](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588).
 #### T20 — DQ framework + single-source checks
 - P-009: checks needing reproducible daily values read `obs_pit`, never `daily_close`, and exclude the current unfinished ET date.
 - **Depends:** T02, T04 · **Parallel with:** T21, T30, T34
@@ -374,12 +453,17 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - Acceptance: scorecard numbers correct on synthetic log; compaction preserves all distinct versions; serving snapshot contains tier/as-of/source for every headline instrument.
 - Cross-check rows carry the run's `target_date`; label them with `details.ref_date`, the date actually compared.
 
-- Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).
+- Compaction must accept rebuild files named `run={run_id}-{YYYY-MM}.parquet` (T06 part 2; rows keep the real `run_id`). The scorecard reads only the latest run for each `target_date`. Source: [PR #35 review, finding 4](https://github.com/allenvarghese05/desk-brief/pull/35#pullrequestreview-5932290937) and [PR #32 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/32#pullrequestreview-5932131226).
+
+- Changelog: depends on T06 (real runs write the check tables it reads), and the `jobs.py` serving-step edit made explicit, from [PR #22 round 2](https://github.com/allenvarghese05/desk-brief/pull/22#pullrequestreview-5925693019); `ref_date` labelling from [PR #18 round 2, finding 7](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053) and [author response](https://github.com/allenvarghese05/desk-brief/pull/18#issuecomment-6906900231).; rebuild file names and latest-run reading from the PR #35 and #32 reviews
 
 #### T24B — Remaining workflows
 - **Depends:** T14, T15, T19 · **Owns:** `.github/workflows/{intraday,eod,sla,backfill,rebuild}.yml`; edits the intraday branch of `evaluate_gate` in `pipeline/jobs.py` (allowed; shared file, see Review follow-ups); only if needed for Yahoo-only enforcement, a small edit in `pipeline/runner.py` after T06 merges
 - Acceptance: each dispatches green; intraday exits early outside session; sla fails if report missing; backfill accepts inputs.
 - `sla.yml` catches a missing report for any cause, such as a morning run that never starts.
+- From the [PR #24 review](https://github.com/allenvarghese05/desk-brief/pull/24#pullrequestreview-5931869851), findings 1–2:
+  - `Gate` carries a source restriction that `run_job` applies, so the `--sources yahoo` flag is needed only on the 12:15 cron.
+  - The intraday gate uses `scheduled_for`, and `intraday.yml` maps `github.event.schedule` into `GITHUB_EVENT_SCHEDULE`, with a delayed-run test (scheduled 12:15, now 12:40 CEST, proceeds).
 - ECB-fix FX fetch (P-012):
   - `intraday.yml` adds cron `15 12 * * 1-5`.
   - The fix-window rule lives in one place, the intraday branch of `evaluate_gate`: a run proceeds outside the NYSE session when its `scheduled_for` time (wall clock if unknown, as for the morning gate) is within ±10 min of 14:15 Europe/Berlin on a TARGET business day. This check comes before the "not an XNYS business day" check, so it also covers US holidays when TARGET is open (Thanksgiving, July 4 and similar).
@@ -394,7 +478,7 @@ The four open questions from the follow-up reviews are now ratified rulings in `
     - a 13:45 UTC CET run outside the session is still `skipped`;
     - an exempted run leaves freshness results for other sources unchanged and the serving view intact.
 
-- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; single window rule, US-holiday order, `scheduled_for` gating, Yahoo-only planning and hook safety from [PR #23 round 2, findings 1, 2, 4 and 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588); `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).
+- Changelog: late-cron safety net from the [PR #16 author's note on finding 4](https://github.com/allenvarghese05/desk-brief/pull/16#issuecomment-6906415315); summer FX run from [PR #18 round 2, confirmation list finding 1](https://github.com/allenvarghese05/desk-brief/pull/18#pullrequestreview-5914906053), ruled in P-012 (winter half from [PR #23 round 1, finding 1](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510)); `evaluate_gate` edit for it; single window rule, US-holiday order, `scheduled_for` gating, Yahoo-only planning and hook safety from [PR #23 round 2, findings 1, 2, 4 and 6](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926563588); `sla.yml` wording from [PR #23 round 1, finding 5](https://github.com/allenvarghese05/desk-brief/pull/23#pullrequestreview-5926433510).; Gate source restriction and intraday `scheduled_for` from the PR #24 review
 
 ### Phase 3 — Outputs
 
@@ -419,10 +503,10 @@ The four open questions from the follow-up reviews are now ratified rulings in `
 - Changelog: PR #6: P-009 line.
 #### T33 — VBA `.xlsm`
 - P-009: macros never relabel values; the `label`/`field` column from T32 is kept visible.
-- **Depends:** T32, H6 · **Owns:** `vba/*`, `report/vba.py`, `tests/contract/test_vba_manifest.py`, CI step in `ci.yml` (allowed edit: add `vba-manifest` job)
+- **Depends:** T32, T32B, H6 · **Owns:** `vba/*`, `report/vba.py`, `tests/contract/test_vba_manifest.py`, CI step in `ci.yml` (allowed edit: add `vba-manifest` job)
 - Acceptance: `.bas` modules reference only §9.2 names; `.xlsm` produced when `vbaProject.bin` exists, skipped with warning otherwise; manifest check fails on drift; README macro-unblock note.
 
-- Changelog: PR #6 round 2: P-009 line.
+- Changelog: PR #6 round 2: P-009 line.; depends on T32B and uses the spec §9.2 headers per P-015 ([PR #33 review](https://github.com/allenvarghese05/desk-brief/pull/33#pullrequestreview-5932128409))
 #### T34 — Dashboard shell, query wiring, hosting
 - P-009: the value component shows the field label next to tier and as-of.
 - **Depends:** T02, T30 (`query.py`) — may start on `query.py` stub interface agreed in T30 PR · **Owns:** `app/Home.py`, `app/theme.py`, `app/components/*`, `.streamlit/config.toml`, `tests/unit/app/test_home.py`
