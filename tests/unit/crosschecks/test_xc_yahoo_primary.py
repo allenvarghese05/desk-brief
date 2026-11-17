@@ -339,3 +339,171 @@ def test_current_unfinished_date_is_excluded(store: LocalBackend, config: Config
     assert r.status is DQStatus.PASS
     assert r.details["ref_date"] == "2026-11-13"
     assert NOW > mon_tick > CLOSE_FRI
+
+
+# -- T17: session-boundary rules (SYNTHETIC ticks/bars; close 21:00Z, open 14:30Z in winter) --
+
+
+def test_tick_exactly_at_the_close_is_excluded(store: LocalBackend, config: Config) -> None:
+    # A tick stamped at 16:00:00 ET would otherwise pair with the 15:59 bar (offset -1) and warn.
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", TICK, 100.0),
+            yahoo_tick("SPY", "SPY", CLOSE_FRI, 150.0),
+            sip_bar("SPY", MIN, 100.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.left_value == pytest.approx(100.0)
+    assert r.at_time == TICK
+    assert r.status is DQStatus.PASS
+
+
+def test_only_a_tick_at_the_close_is_skip_with_close_reason(
+    store: LocalBackend, config: Config
+) -> None:
+    put(store, config, [yahoo_tick("SPY", "SPY", CLOSE_FRI, 150.0), sip_bar("SPY", MIN, 100.0)])
+    r = run(store, config)["SPY"]
+    assert r.status is DQStatus.SKIP
+    assert "inside the regular session" in r.details["reason"]
+    assert r.left_value is None
+
+
+def test_early_close_tick_exactly_at_13_00_et_is_excluded(
+    store: LocalBackend, config: Config
+) -> None:
+    before = datetime(2026, 11, 27, 17, 59, 30, tzinfo=UTC)
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", before, 100.0),
+            yahoo_tick("SPY", "SPY", datetime(2026, 11, 27, 18, 0, tzinfo=UTC), 200.0),
+            sip_bar("SPY", datetime(2026, 11, 27, 17, 59, tzinfo=UTC), 100.0),
+        ],
+    )
+    r = run(store, config, target=EARLY_NOW.date(), now=EARLY_NOW)["SPY"]
+    assert r.left_value == pytest.approx(100.0)
+    assert r.status is DQStatus.PASS
+    assert r.details["session_close_utc"] == "2026-11-27T18:00:00+00:00"
+
+
+def test_pre_market_tick_is_not_picked_when_it_is_the_only_candidate(
+    store: LocalBackend, config: Config
+) -> None:
+    # Pre-market and after-close ticks, none in-session. Without the open bound the pre-market
+    # tick (with a matching bar) would be paired and pass; it must be skipped instead.
+    pre = datetime(2026, 11, 13, 13, 0, 5, tzinfo=UTC)  # 08:00 ET
+    after = datetime(2026, 11, 13, 21, 5, tzinfo=UTC)
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", pre, 100.0),
+            yahoo_tick("SPY", "SPY", after, 150.0),
+            sip_bar("SPY", datetime(2026, 11, 13, 13, 0, tzinfo=UTC), 100.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.status is DQStatus.SKIP
+    assert r.left_value is None
+    assert "inside the regular session" in r.details["reason"]
+
+
+def test_tick_exactly_at_the_open_is_in_session(store: LocalBackend, config: Config) -> None:
+    pre = datetime(2026, 11, 13, 13, 0, 5, tzinfo=UTC)
+    open_ = datetime(2026, 11, 13, 14, 30, tzinfo=UTC)
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", pre, 90.0),
+            yahoo_tick("SPY", "SPY", open_, 100.0),
+            sip_bar("SPY", open_, 100.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.left_value == pytest.approx(100.0)
+    assert r.status is DQStatus.PASS
+
+
+def test_pre_market_only_day_has_specific_skip_reason(store: LocalBackend, config: Config) -> None:
+    pre = datetime(2026, 11, 13, 13, 0, 5, tzinfo=UTC)
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("SPY", "SPY", pre, 90.0),
+            sip_bar("SPY", datetime(2026, 11, 13, 13, 0, tzinfo=UTC), 90.0),
+        ],
+    )
+    r = run(store, config)["SPY"]
+    assert r.status is DQStatus.SKIP
+    assert "pre-market" in r.details["reason"]
+    assert r.left_value is None
+
+
+# FX at the ECB fix (P-012): the fix-time run is 12:15Z in summer (CEST) and 13:15Z in winter.
+# Twelve Data bars cover fix +-10 min. Summer dates are SYNTHETIC: Friday 2026-07-17 (EDT).
+SUMMER_NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("season", "day", "fix_hour", "now"),
+    [
+        ("winter", (2026, 11, 13), 13, NOW),
+        ("summer", (2026, 7, 17), 12, SUMMER_NOW),
+    ],
+)
+def test_fx_pairs_a_fix_time_tick_in_both_seasons(
+    store: LocalBackend,
+    config: Config,
+    season: str,
+    day: tuple[int, int, int],
+    fix_hour: int,
+    now: datetime,
+) -> None:
+    y, m, d = day
+    tick = datetime(y, m, d, fix_hour, 15, 20, tzinfo=UTC)
+    bars = [datetime(y, m, d, fix_hour, mi, tzinfo=UTC) for mi in range(5, 26)]
+    ing = datetime(y, m, d, 22, 0, tzinfo=UTC)  # ingested after the fix, before `now`
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("EURUSD", "EURUSD=X", tick, 1.0804, unit="fx_rate", ingested_at=ing),
+            *[td_bar("EURUSD", "EUR/USD", b, 1.0800, ingested_at=ing) for b in bars],
+        ],
+    )
+    r = run(store, config, target=datetime(y, m, d, tzinfo=UTC).date(), now=now)["EURUSD"]
+    assert r.status is DQStatus.PASS, season
+    assert r.at_time == tick
+    assert r.details["minute_offset"] == 0
+    assert r.details["right"]["as_of"] == datetime(y, m, d, fix_hour, 15, tzinfo=UTC).isoformat()
+
+
+@pytest.mark.parametrize(
+    ("day", "fix_hour", "now"),
+    [((2026, 11, 13), 13, NOW), ((2026, 7, 17), 12, SUMMER_NOW)],
+)
+def test_fx_without_a_tick_in_the_fix_window_skips_in_both_seasons(
+    store: LocalBackend, config: Config, day: tuple[int, int, int], fix_hour: int, now: datetime
+) -> None:
+    y, m, d = day
+    # Yahoo ticks exist only at the other fix hour (13:15 in summer, 12:15 in winter): no pairing.
+    other = datetime(y, m, d, 25 - fix_hour, 15, 20, tzinfo=UTC)
+    bars = [datetime(y, m, d, fix_hour, mi, tzinfo=UTC) for mi in range(5, 26)]
+    ing = datetime(y, m, d, 22, 0, tzinfo=UTC)  # ingested after the fix, before `now`
+    put(
+        store,
+        config,
+        [
+            yahoo_tick("EURUSD", "EURUSD=X", other, 1.0800, unit="fx_rate", ingested_at=ing),
+            *[td_bar("EURUSD", "EUR/USD", b, 1.0800, ingested_at=ing) for b in bars],
+        ],
+    )
+    r = run(store, config, target=datetime(y, m, d, tzinfo=UTC).date(), now=now)["EURUSD"]
+    assert r.status is DQStatus.SKIP
+    assert r.details["reason"] == "no Yahoo tick within ±1m of the ECB-fix bars"
