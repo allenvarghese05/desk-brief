@@ -18,7 +18,7 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
 from t23_synth import ctx_for
 
-from brief_synth import FRI, MON, MON_0700, World, monday_rows
+from brief_synth import FRI, MON, MON_0700, World, et, monday_rows, tick
 from deskbrief.models import JobKind, RunContext
 from deskbrief.pipeline import serving
 from deskbrief.pipeline.jobs import steps_for
@@ -119,6 +119,40 @@ def test_a_backfill_of_an_old_date_still_serves_todays_window(tmp_path: Path) ->
     assert len(frame(w, "runs_14d.parquet")) == 1  # today's run is still in the window
     assert len(frame(w, "crosschecks_7d.parquet")) == 1
     assert health["n_checks"] >= 2
+
+
+def test_only_eod_compacts(tmp_path: Path) -> None:
+    w = build(tmp_path)
+    w.observations([tick("ES_F", et(MON, "06:30"), 5970.0)])  # a second Monday file to compact
+    serving.serving_step(ctx(w, JobKind.MORNING))
+    assert not any("compacted" in k for k in w.store.list("clean/v1/observations/"))
+    serving.serving_step(ctx(w, JobKind.EOD))
+    assert any("run=compacted-2026-11-16" in k for k in w.store.list("clean/v1/observations/"))
+
+
+def test_eod_runs_scorecard_then_compaction_then_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    for name in ("write_scorecard", "compact_recent", "build_serving_files"):
+        monkeypatch.setattr(serving, name, lambda *a, _n=name, **k: calls.append(_n))
+    serving.serving_step(ctx(World(tmp_path), JobKind.EOD))
+    assert calls == ["write_scorecard", "compact_recent", "build_serving_files"]
+
+
+def test_a_failing_compaction_does_not_stop_serving_but_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = build(tmp_path)
+
+    def boom(*a: object, **k: object) -> None:
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(serving, "compact_recent", boom)
+    with pytest.raises(RuntimeError, match="compaction: OSError"):
+        serving.serving_step(ctx(w, JobKind.EOD))
+    assert w.store.exists("serving/latest_snapshot.parquet")
+    assert w.store.exists("derived/scorecard_daily/date=2026-11-16.parquet")
 
 
 def test_a_failing_scorecard_does_not_stop_serving_but_is_reported(
