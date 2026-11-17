@@ -175,3 +175,52 @@ def test_registered_and_conforms(config: Config) -> None:
     built = registry.get_sources(config)
     assert [s.name for s in built] == ["cboe"]
     assert isinstance(built[0], Source)
+
+
+# -- T08 follow-ups (PR #11 review findings 2-5) -------------------------------------------
+
+
+def test_bad_row_outside_the_window_does_not_break_the_run(src: CboeSource) -> None:
+    """Finding 2: only rows inside the requested window are validated."""
+    body = (
+        HDR
+        + b"01/02/1990,1,2,0.5,n/a\n"  # historical row with a bad CLOSE
+        + b"01/03/1990,1,2,0.5\n"  # historical row with a missing column
+        + b"11/13/2026,1,2,0.5,16.85\n"
+    )
+    assert src.parse(raw_for(body))["value"].tolist() == [16.85]
+
+
+def test_bad_row_inside_the_window_still_raises(src: CboeSource) -> None:
+    with pytest.raises(ParseError):
+        src.parse(raw_for(HDR + b"11/13/2026,1,2,0.5,n/a\n"))
+
+
+def test_bad_historical_row_still_fails_a_backfill_without_window(src: CboeSource) -> None:
+    with pytest.raises(ParseError):
+        src.parse(raw_for(HDR + b"01/02/1990,1,2,0.5,n/a\n", lookback=None))
+
+
+def test_truncated_download_ending_mid_number_raises(src: CboeSource) -> None:
+    """Finding 3: a body cut mid-number (no trailing newline) would parse '16.' as 16.0."""
+    body = HDR + b"11/12/2026,1,2,0.5,17.10\n11/13/2026,1,2,0.5,16."
+    with pytest.raises(ParseError, match="truncated"):
+        src.parse(raw_for(body))
+
+
+def test_truncation_outside_the_window_is_ignored(src: CboeSource) -> None:
+    body = HDR + b"11/13/2026,1,2,0.5,16.85\n01/02/1990,1,2,0.5,17."
+    assert src.parse(raw_for(body))["value"].tolist() == [16.85]
+
+
+def test_url_is_marked_unverified() -> None:
+    """Finding 4: the endpoint has not been live-probed yet."""
+    code = (ROOT / "src" / "deskbrief" / "sources" / "cboe.py").read_text()
+    assert any("URL" in ln and "# UNVERIFIED" in ln for ln in code.splitlines())
+
+
+@pytest.mark.parametrize("lookback", ["99999999999", "-99999999999"])
+def test_overflowing_lookback_is_a_parse_error(src: CboeSource, lookback: str) -> None:
+    """Finding 5: date arithmetic overflow becomes ParseError, not OverflowError."""
+    with pytest.raises(ParseError):
+        src.parse(raw_for(HDR + b"11/13/2026,1,2,0.5,16.85\n", lookback=lookback))

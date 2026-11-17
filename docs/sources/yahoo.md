@@ -46,8 +46,11 @@ next scheduled run tries again.
 yfinance 1.8 defaults to `config.debug.hide_exceptions = True`: rate limits and blocks are logged
 and come back as empty data. `fetch` sets it to `False` around its calls (restored in `finally`)
 so they raise and become per-symbol errors. Because Yahoo can still return nothing for a bad
-symbol, "every requested symbol returned no data" is an `error` on an XNYS business day (ET date
-of the fetch) and `empty` only on weekends and NYSE holidays.
+symbol, "every requested symbol returned no data" is an `error` when at least one requested symbol
+normally has data on that day (ET date of the fetch), and `empty` otherwise. The symbol set decides
+(`YahooSource._expects_data`): `etf`/`stock` symbols expect data on XNYS business days only;
+every other kind (futures, indices, yields, FX, unconfigured symbols) expects data on any weekday,
+so a NYSE holiday does not excuse an empty answer for `ES=F` or `^TNX`. A weekend is `empty`.
 
 ## Which daily bars are kept
 
@@ -58,6 +61,9 @@ of the fetch) and `empty` only on weekends and NYSE holidays.
 - Everything else (futures, indices, yields): no exchange calendar is modelled. Saturday and
   Sunday bars are dropped (e.g. the `ES=F` Sunday-evening session bar), and so is any bar dated
   today or later in the exchange's own timezone (taken from the history index, ET if unknown),
+  **even after that session has ended** (known limit: without a calendar the bar is emitted from
+  the next day's run; the test `test_non_xnys_bar_dated_today_is_dropped_even_after_its_session_ends`
+  pins it),
   because that session may still be running. Holidays on other exchanges are not filtered; Yahoo
   normally returns no bar for them.
 

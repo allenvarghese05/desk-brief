@@ -287,3 +287,71 @@ def test_structured_keys_stay_precise() -> None:
         "private_key_path": "/x",
     }
     assert redact_value(fields) == fields
+
+
+# --- T08: the two known gaps from the PR #15 review (findings 1-2), both tightened ------------
+# Built from pieces so gitleaks' generic-api-key rule does not flag these synthetic probes.
+WEAK_UPPERCASE_PROBES = [
+    "token" + "=GHP_ABCD1234",
+    "token" + "=SK_LIVE_ABC123",
+    "key" + "=A1B2C3D4:E5F6G7H8",
+    "key" + "=AAAA_BBBB_CCCC_DDDD",
+    "token" + "=AB12:CD34",
+    "key" + "=1234:5678",
+    "key" + "=12:34:56",
+    "key" + "=PK12_AB34",
+]
+SHORT_NUMERIC_PROBES = [
+    "password" + "=123",
+    "secret" + ": 999",
+    "api_key" + "=12",
+    "passwd" + "=007",
+    "cookie" + ": 123",
+    "Authorization" + ": 1234",
+    "client_secret" + "=42",
+]
+
+
+@pytest.mark.parametrize("text", WEAK_UPPERCASE_PROBES)
+def test_weak_tier_all_uppercase_credentials_are_masked(text: str) -> None:
+    out = redact_text(text)
+    assert out.endswith(MASK), out
+
+
+@pytest.mark.parametrize("text", SHORT_NUMERIC_PROBES)
+def test_short_numeric_values_after_strong_names_are_masked(text: str) -> None:
+    out = redact_text(text)
+    assert out.endswith(MASK), out
+
+
+@pytest.mark.parametrize("text", ["key_id: 12", "key_id=007", "access_key_id: 5"])
+def test_short_numeric_ids_stay_readable_for_id_names_only(text: str) -> None:
+    assert redact_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "key=SPY:1m:2026-11-14",
+        "cache_key=EURUSD_2026-11-14",
+        "key=SPY:2026-11-14T13:30:00Z",
+        "key=ES_1d",
+        "key=SPY:QQQ:IWM:1m:1d",
+    ],
+)
+def test_market_keys_with_a_date_or_interval_stay_readable(text: str) -> None:
+    assert redact_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password" + "=ok",  # a status word, not a credential
+        "secret" + ": true",
+        "key_id" + ": 12",  # short number after a key-id name
+        "token" + "=AB12_1d",  # weak tier: has an interval segment, so it reads as a market key
+    ],
+)
+def test_known_unmasked(text: str) -> None:
+    """Documented limits in the ``logging.py`` docstring: kept readable on purpose."""
+    assert redact_text(text) == text

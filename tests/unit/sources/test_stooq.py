@@ -173,3 +173,22 @@ def test_registered_and_conforms(config: Config) -> None:
     built = registry.get_sources(config)
     assert [s.name for s in built] == ["stooq"]
     assert isinstance(built[0], Source)
+
+
+def test_csv_error_becomes_parse_error(src: StooqSource, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T08 (PR #11 finding 5): csv.Error from the reader is a ParseError."""
+    import csv
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise csv.Error("field larger than field limit (131072)")
+
+    monkeypatch.setattr("deskbrief.sources.stooq.csv.reader", boom)
+    with pytest.raises(ParseError):
+        src.parse(raw_for(FIXTURE.read_bytes()))
+
+
+def test_oversized_field_is_a_parse_error(src: StooqSource) -> None:
+    huge = b"x" * 200_000
+    body = b"Date,Open,High,Low,Close,Volume\n2026-11-09,1,2,3,4," + huge + b"\n"
+    with pytest.raises(ParseError):
+        src.parse(raw_for(body))

@@ -24,7 +24,7 @@ from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, Ru
 from deskbrief.schemas import validate
 from deskbrief.sources import registry
 from deskbrief.sources.base import ParseError, Source
-from deskbrief.sources.fred import ENDPOINT, FredSource
+from deskbrief.sources.fred import ENDPOINT, SERIES_SPECS, FredSource
 from deskbrief.sources.http import DefaultHttpClient
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -140,11 +140,26 @@ def test_plan_empty_for_jobs_without_fred(src: FredSource, config: Config, job: 
     assert src.plan(job, ctx_for(config, job)) == []
 
 
-def test_plan_skips_series_without_a_spec(config: Config, caplog: pytest.LogCaptureFixture) -> None:
+def test_plan_skips_series_without_a_spec(config: Config) -> None:
+    stream = io.StringIO()
+    configure_logging(stream=stream)
     src = FredSource(config)
     src._specs = {k: v for k, v in src._specs.items() if k != "UNRATE"}
     reqs = src.plan(JobKind.MORNING, ctx_for(config))
     assert "UNRATE" not in [r.symbols[0] for r in reqs] and len(reqs) == 8
+    # T08: the skip is a config bug, so it is logged at error level and the log line is asserted
+    logged = [json.loads(ln) for ln in stream.getvalue().splitlines() if ln.strip()]
+    skips = [r for r in logged if r.get("event") == "fred.plan.skip"]
+    assert len(skips) == 1
+    assert skips[0]["series"] == "UNRATE" and skips[0]["level"] == "error"
+
+
+def test_every_configured_fred_series_has_a_spec(config: Config) -> None:
+    """T08: a series added to config.yaml without a SERIES_SPECS entry must fail CI."""
+    configured = set(config.feed_index("fred", "series"))
+    assert configured, "config has no FRED series"
+    missing = sorted(configured - set(SERIES_SPECS))
+    assert not missing, f"FRED series without a SERIES_SPECS entry: {missing}"
 
 
 # ---------------------------------------------------------------------------------------------
