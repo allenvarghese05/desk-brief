@@ -7,6 +7,7 @@ chosen so a wrong baseline (e.g. Thursday instead of Friday) gives a visibly dif
 from __future__ import annotations
 
 import itertools
+import json
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 
 import duckdb
 
+from deskbrief.calendars import prev_business_day
 from deskbrief.config import Config, load_config
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.schemas import to_frame
@@ -28,6 +30,11 @@ _ids = itertools.count(1)
 
 def load() -> Config:
     return load_config(REPO_ROOT / "config.yaml")
+
+
+def fixture_config() -> Config:
+    """A small frozen config (independent of ``config.yaml``) for golden snapshots."""
+    return load_config(REPO_ROOT / "tests" / "unit" / "report" / "golden" / "config.fixture.yaml")
 
 
 def et(d: date, hhmm: str = "00:00") -> datetime:
@@ -131,6 +138,7 @@ class World:
         target: date,
         results: list[tuple[str, str, str | None, str | None]],
         at: str = "07:00",
+        check_type: str = "freshness",
     ) -> None:
         """``(check_name, status, source, instrument_id)`` rows for ``target``."""
         rows = [
@@ -138,7 +146,7 @@ class World:
                 "result_id": f"DQ{next(_ids)}",
                 "run_id": "RUNDQ",
                 "check_name": name,
-                "check_type": "freshness",
+                "check_type": check_type,
                 "source": source,
                 "instrument_id": inst,
                 "target_date": target,
@@ -152,8 +160,21 @@ class World:
         ]
         self._append("dq_results", rows, lambda r: r["target_date"])
 
-    def xchecks(self, target: date, results: list[tuple[str, str, float]]) -> None:
-        """``(check_name, status, diff_bps)`` rows for ``target``."""
+    def xchecks(
+        self,
+        target: date,
+        results: list[tuple[str, str, float]],
+        *,
+        ref: date | None = None,
+        mirror: bool = False,
+    ) -> None:
+        """``(check_name, status, diff_bps)`` rows for ``target``.
+
+        ``ref`` is the data date the check compared (``details.ref_date``; default: the
+        previous NYSE session, so it differs from ``target`` on purpose). ``mirror`` also writes
+        the ``consistency`` ``dq_results`` row the runner mirrors for each cross-check (spec §7.2).
+        """
+        ref = ref or prev_business_day("XNYS", target)
         rows = [
             {
                 "result_id": f"XC{next(_ids)}",
@@ -174,11 +195,17 @@ class World:
                 "warn_bps": 5.0,
                 "fail_bps": 10.0,
                 "status": status,
-                "details_json": "{}",
+                "details_json": json.dumps({"ref_date": ref.isoformat()}),
             }
             for name, status, diff in results
         ]
         self._append("crosscheck_results", rows, lambda r: r["target_date"])
+        if mirror:
+            self.dq(
+                target,
+                [(name, status, None, "SPY") for name, status, _ in results],
+                check_type="consistency",
+            )
 
     def fetches(self, target: date, results: list[tuple[str, str]]) -> None:
         """``(source, status)`` fetch attempts requested at 06:00 ET on ``target``."""
