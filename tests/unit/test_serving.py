@@ -121,6 +121,30 @@ def test_a_backfill_of_an_old_date_still_serves_todays_window(tmp_path: Path) ->
     assert health["n_checks"] >= 2
 
 
+def test_only_eod_compacts_and_it_does_so_before_serving(tmp_path: Path) -> None:
+    w = build(tmp_path)
+    serving.serving_step(ctx(w, JobKind.MORNING))
+    assert not any("compacted" in k for k in w.store.list("clean/v1/observations/"))
+    serving.serving_step(ctx(w, JobKind.EOD))
+    assert any("run=compacted-2026-11-16" in k for k in w.store.list("clean/v1/observations/"))
+    assert w.store.exists("serving/latest_snapshot.parquet")
+
+
+def test_a_failing_compaction_does_not_stop_serving_but_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = build(tmp_path)
+
+    def boom(*a: object, **k: object) -> None:
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(serving, "compact_day", boom)
+    with pytest.raises(RuntimeError, match="compaction: OSError"):
+        serving.serving_step(ctx(w, JobKind.EOD))
+    assert w.store.exists("serving/latest_snapshot.parquet")
+    assert w.store.exists("derived/scorecard_daily/date=2026-11-16.parquet")
+
+
 def test_a_failing_scorecard_does_not_stop_serving_but_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

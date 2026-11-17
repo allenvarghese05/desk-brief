@@ -22,10 +22,10 @@ not move the dashboard's view. Written under ``serving/``:
 
 :func:`serving_step` is the ``build_serving`` hook. In every job it first (re)writes the
 scorecard of ``ctx.target_date`` (an idempotent overwrite of that date's partition; spec §5.4:
-"scorecard → compaction → serving", compaction being card T23B), so a morning run rescores the
-day it targets including its own fetches. Each part is isolated: a failing one is reported by
-raising after the others ran, so the run is ``degraded`` and the dashboard still gets fresh
-files.
+"scorecard → compaction → serving"), so a morning run rescores the day it targets including its
+own fetches. At ``eod`` it then compacts that day's clean files (``store.compaction``). Each part
+is isolated: a failing one is reported by raising after the others ran, so the run is
+``degraded`` and the dashboard still gets fresh files.
 """
 
 from __future__ import annotations
@@ -42,11 +42,12 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from deskbrief.logging import redact
-from deskbrief.models import RunContext
+from deskbrief.models import JobKind, RunContext
 from deskbrief.query import ValueRow, health_summary, latest_snapshot, series_all, value_label
 from deskbrief.schemas import columns
 from deskbrief.scorecard import write_scorecard
 from deskbrief.store.backend import StorageBackend, serving_key
+from deskbrief.store.compaction import compact_day
 from deskbrief.store.datasets import arrow_schema
 from deskbrief.store.duck import connect
 from deskbrief.timeutil import et_date
@@ -206,6 +207,8 @@ def serving_step(ctx: RunContext) -> None:
     """``build_serving`` hook: (eod) the day's scorecard, then every serving file."""
     parts: list[tuple[str, Callable[[], object]]] = []
     parts.append(("scorecard", lambda: write_scorecard(ctx)))
+    if ctx.job is JobKind.EOD:  # spec §5.4: scorecard -> compaction -> serving
+        parts.append(("compaction", lambda: compact_day(ctx.store, ctx.target_date)))
     parts.append(("serving", lambda: build_serving_files(ctx)))
     errors = []
     for name, part in parts:

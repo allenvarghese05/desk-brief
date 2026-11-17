@@ -81,3 +81,14 @@ def xcheck(run_id: str, n: int, status: str, left: str, right: str) -> dict[str,
         "diff_bps": 1.0, "warn_bps": 5.0, "fail_bps": 10.0, "status": status,
         "details_json": json.dumps({"ref_date": "2026-11-13"}),
     }  # fmt: skip
+
+
+def obs_row(
+    iid: str, value: float, as_of: datetime, run_id: str, fetch_id: str, **kw: Any
+) -> dict[str, Any]:
+    return {
+        "instrument_id": iid, "source": "stooq", "dataset": "daily", "symbol": "SYN", "tier": 3,
+        "field": "close", "interval": "1d", "as_of": as_of, "value": value, "unit": "USD",
+        "is_derived": False, "is_fallback": False, "fetch_id": fetch_id, "run_id": run_id,
+        "ingested_at": as_of + timedelta(hours=20), "parser_version": "synthetic-1",
+    } | kw  # fmt: skip
