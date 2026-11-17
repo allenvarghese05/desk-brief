@@ -190,16 +190,21 @@ def test_anomaly_skips_short_history_and_zero_variance(store, config) -> None:  
             symbol="qqq.us",
             as_of=as_of_1d(date(2026, 10, 1) + timedelta(days=i)),
             value=50.0,
+            ingested_at=datetime(2026, 9, 1, tzinfo=UTC),
         )
         for i in range(20)
     ]
     write_obs(store, config, [*rows, *flat])
-    ctx = ctx_at(config, store, ET_NOW(date(2026, 11, 20), "07:00"))
-    by = {r.instrument_id: r for r in AnomalyCheck().evaluate(ctx, duck_for(store, config))}
-    assert by["SPY"].status is S.SKIP
-    assert by["SPY"].details["reason"] == "history too short"
-    assert by["QQQ"].status is S.SKIP
-    assert by["QQQ"].details["reason"] == "zero variance in window"
+    duck = duck_for(store, config)
+    # each series is judged the morning after its newest day, so neither is stale
+    spy = ctx_at(config, store, ET_NOW(date(2026, 9, 11), "07:00"))
+    qqq = ctx_at(config, store, ET_NOW(date(2026, 10, 21), "07:00"))
+    by_spy = {r.instrument_id: r for r in AnomalyCheck().evaluate(spy, duck)}
+    by_qqq = {r.instrument_id: r for r in AnomalyCheck().evaluate(qqq, duck)}
+    assert by_spy["SPY"].status is S.SKIP
+    assert by_spy["SPY"].details["reason"] == "history too short"
+    assert by_qqq["QQQ"].status is S.SKIP
+    assert by_qqq["QQQ"].details["reason"] == "zero variance in window"
 
 
 def test_anomaly_yield_uses_bp_and_x10_flip_fails(store, config) -> None:  # type: ignore[no-untyped-def]

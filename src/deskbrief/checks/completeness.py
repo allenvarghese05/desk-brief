@@ -4,15 +4,21 @@
   data day (see :func:`expected_for`). Missing -> fail, or warn on a SIFMA early close.
   Skipped on closed days and until ``expected_by_et`` + grace has passed. Monthly FRED series
   are not daily feeds and are not evaluated.
+  A feed still within grace without data is ``skip`` with reason "waiting" (freshness agrees).
+  FRED oil series (DCOILWTICO, DCOILBRENTEU) are ``skip`` on data days when the oil market is
+  shut although SIFMA is open (see ``base.OIL_CALENDARS``).
 * Alpaca minute bars need >= 95% of the session's minutes on the last finished XNYS session
   (early closes use their shorter session): 100% pass, [95%, 100%) warn, below fail.
 
-Not covered: Yahoo and Twelve Data feeds (no schedule in config; Twelve Data FX has no session).
+P-009 consequence for the eod run: it fires at 22:30 UTC (17:30 ET), when the target date is
+still "today" in ET and so unfinished. The minute-bar rule therefore judges the *previous*
+session's bars at eod, not the one that just closed; that session's bars are judged by the next
+run. The same ``finished_session_date`` rule applies to the Yahoo and Twelve Data checks in
+:mod:`deskbrief.checks.feed_completeness`.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -25,10 +31,12 @@ from deskbrief.checks.base import (
     expected_for,
     finished_session_date,
     make_result,
+    market_closed,
     query,
     records,
     register,
 )
+from deskbrief.checks.feed_completeness import evaluate_feeds
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
 from deskbrief.sources.fred import SERIES_SPECS
 
@@ -43,16 +51,19 @@ class CompletenessCheck:
     check_type = CheckType.COMPLETENESS
 
     def evaluate(self, ctx: RunContext, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
-        return [*self._daily(ctx, duck), *self._minutes(ctx, duck)]
+        return [
+            *self._daily(ctx, duck),
+            *self._minutes(ctx, duck),
+            *evaluate_feeds(ctx, self, duck),
+        ]
 
     def _daily(self, ctx: RunContext, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
         out: list[DQResult] = []
         for sched in ctx.config.datasets:
             exp = expected_for(ctx, sched)
-            if exp.skip_reason is None and ctx.now_utc < exp.due_utc + timedelta(
+            waiting = exp.skip_reason is None and ctx.now_utc < exp.due_utc + timedelta(
                 minutes=exp.grace_minutes
-            ):
-                exp = replace(exp, skip_reason="within grace of due time")
+            )
             feeds = [
                 (inst, feed)
                 for inst, feed in ctx.config.feeds_for(sched.source, sched.dataset)
@@ -68,16 +79,21 @@ class CompletenessCheck:
                     [ctx.now_utc, sched.source, sched.dataset, exp.data_day],
                 )
                 present = set(df["instrument_id"])
-            for inst, _feed in feeds:
+            for inst, feed in feeds:
                 info: dict[str, Any] = {
                     "dataset": sched.dataset,
                     "data_day": exp.data_day.isoformat(),
                 }
-                if exp.skip_reason:
+                reason = exp.skip_reason
+                if reason is None and market_closed(feed.symbol, exp.data_day):
+                    reason = "oil market closed"  # SIFMA open, oil shut (e.g. Good Friday)
+                elif reason is None and waiting and inst.id not in present:
+                    reason = "waiting"  # same wording as freshness
+                if reason:
                     out.append(
                         make_result(
                             ctx, self, DQStatus.SKIP, source=sched.source,
-                            instrument_id=inst.id, reason=exp.skip_reason, **info,
+                            instrument_id=inst.id, reason=reason, **info,
                         )
                     )  # fmt: skip
                     continue

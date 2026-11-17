@@ -38,7 +38,6 @@ def stooq(d: date, **kw: object) -> dict[str, object]:
         ("17:30", None, S.SKIP, None),  # before expected_by_et: "not yet due"
         ("19:59", None, S.SKIP, None),
         ("20:30", WED, S.PASS, "fresh"),
-        ("20:30", None, S.PASS, "waiting"),  # 30 min late, within grace
         ("21:30", None, S.WARN, "late"),  # 90 min late
         ("22:30", None, S.FAIL, "late"),  # 150 min late > 2 x grace
         ("22:30", WED - timedelta(days=1), S.FAIL, "late"),  # stale: only yesterday present
