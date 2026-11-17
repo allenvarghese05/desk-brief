@@ -16,13 +16,15 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
-from t23_synth import ctx_for
+from t23_synth import ctx_for, obs_row, put
 
 from brief_synth import FRI, MON, MON_0700, World, et, monday_rows, tick
 from deskbrief.models import JobKind, RunContext
 from deskbrief.pipeline import serving
 from deskbrief.pipeline.jobs import steps_for
+from deskbrief.store import duck as duck_mod
 from deskbrief.store.local import LocalBackend
+from deskbrief.timeutil import et_to_utc
 
 FILES = (
     "latest_snapshot.parquet",
@@ -112,8 +114,13 @@ def test_every_job_rescores_its_target_date_before_serving(tmp_path: Path) -> No
 
 def test_a_backfill_of_an_old_date_still_serves_todays_window(tmp_path: Path) -> None:
     w = build(tmp_path)
-    old = replace(ctx(w, JobKind.BACKFILL), target_date=MON - timedelta(days=20))
+    old_date = MON - timedelta(days=20)
+    w.fetches(old_date, [("stooq", "ok")])  # the backfill fetched something on the old date
+    old = replace(ctx(w, JobKind.BACKFILL), target_date=old_date)
     serving.serving_step(old)
+    card = frame(w, "scorecard_30d.parquet")  # the backfilled date is inside today's 30 days
+    stooq = card[card["source"] == "stooq"]  # (the fixture reuses one run_id, so yahoo rides along)
+    assert [d.isoformat() for d in stooq["date"]] == [old_date.isoformat()]
     health = json.loads(w.store.get_bytes("serving/health.json"))
     assert health["target_date"] == "2026-11-16"  # today's ET date, not the backfilled date
     assert len(frame(w, "runs_14d.parquet")) == 1  # today's run is still in the window
@@ -128,6 +135,44 @@ def test_only_eod_compacts(tmp_path: Path) -> None:
     assert not any("compacted" in k for k in w.store.list("clean/v1/observations/"))
     serving.serving_step(ctx(w, JobKind.EOD))
     assert any("run=compacted-2026-11-16" in k for k in w.store.list("clean/v1/observations/"))
+
+
+def test_eod_compaction_window_counts_back_from_the_et_date_not_the_utc_date(
+    tmp_path: Path,
+) -> None:
+    w = build(tmp_path)
+    late = replace(ctx(w, JobKind.EOD), now_utc=et_to_utc(MON, "21:00"))  # 02:00 UTC on Tuesday
+    assert late.now_utc.date() == MON + timedelta(days=1)
+    for back in (6, 7):  # the oldest ET day inside the window, and one outside it
+        day = MON - timedelta(days=back)
+        for n in (1, 2):
+            row = obs_row("SPY", float(n), et(day), f"RB{back}{n}", f"FB{back}{n}")
+            put(w.store, "observations", [row], f"RB{back}{n}", day)
+    serving.serving_step(late)
+
+    def files(back: int) -> int:
+        day = MON - timedelta(days=back)
+        return len(w.store.list(f"clean/v1/observations/date={day.isoformat()}/"))
+
+    assert (files(6), files(7)) == (1, 2)  # counted back from Monday's ET date, not Tuesday's
+
+
+def test_the_scorecard_and_the_serving_build_share_one_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = build(tmp_path)  # no scorecard file yet: the serving build must still see the new one
+    opened: list[int] = []
+    real = duck_mod.connect
+
+    def counting(*a: Any, **k: Any) -> Any:
+        opened.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(serving, "connect", counting)
+    monkeypatch.setattr("deskbrief.scorecard.connect", counting)
+    serving.serving_step(ctx(w, JobKind.INTRADAY))
+    assert len(opened) == 1
+    assert frame(w, "scorecard_30d.parquet")["source"].tolist() == ["yahoo"]  # re-read after write
 
 
 def test_eod_runs_scorecard_then_compaction_then_serving(
