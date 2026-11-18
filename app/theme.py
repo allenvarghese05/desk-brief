@@ -67,12 +67,15 @@ div[data-testid="stTextInput"] input {{ font-family: {SANS}; font-size: .9rem;
 .db-tiles {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .6rem;
   margin-bottom: .6rem; }}
 @media (max-width: 900px) {{ .db-tiles {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+@media (max-width: 520px) {{ .db-tile-value {{ font-size: 1.1rem; }}
+  .db-tile {{ padding: .55rem .6rem 1.5rem .6rem; }} .db-tile .db-tagline {{ left: .6rem; }} }}
 .db-tile {{ position: relative; display: block; background: {PANEL}; border: 1px solid {RULE};
   border-radius: 8px; padding: .65rem .85rem 1.6rem .85rem; color: {INK}; }}
 .db-tile:hover, .db-tile.is-sel {{ border-color: {ACCENT}; }}
 .db-tile-label {{ color: {MUTED}; font-size: .74rem; font-weight: 600; letter-spacing: .04em;
   text-transform: uppercase; }}
 .db-tile-value {{ font-size: 1.45rem; font-weight: 600; letter-spacing: -.015em;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums; line-height: 1.25; margin-top: .1rem; }}
 .db-tile-row {{ display: flex; align-items: center; justify-content: space-between; gap: .5rem; }}
 .db-tile-chg {{ font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
