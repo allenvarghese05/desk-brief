@@ -11,8 +11,10 @@ Writer keys in the environment are ignored on purpose. Nothing here writes to th
 
 Display mode (spec 10.1): ``hosted`` hides tier-1 rows (licence: provider display terms are
 unverified until H9); ``local`` shows tiers 1-3. Anything but ``local`` means ``hosted``.
-Filtering happens in :func:`overview`, *after* the cache, so a cached snapshot can never leak a
-hidden tier into a hosted page.
+The hidden tiers are passed to ``BriefModel.from_store(exclude_tiers=...)``, so an instrument
+whose latest value is a hidden tier falls back to tier 2 or 3, and they are part of the cache
+key, so hosted and local snapshots never share an entry. :func:`overview` filters again on the
+way out as a second guard.
 """
 
 from __future__ import annotations
@@ -86,11 +88,21 @@ class Snapshot:
     series: dict[str, tuple[tuple[int, float], ...]]  # (tier, value) of official daily values
 
 
-def build_snapshot(config: Config, env: Mapping[str, str], now: datetime) -> Snapshot:
-    """THE adapter: read the store through ``query.py`` (T23 will swap in serving files)."""
+def build_snapshot(
+    config: Config,
+    env: Mapping[str, str],
+    now: datetime,
+    exclude_tiers: frozenset[int] = frozenset(),
+) -> Snapshot:
+    """THE adapter: read the store through ``query.py`` (T23 will swap in serving files).
+
+    ``exclude_tiers`` (the mode's hidden tiers) reaches the latest-value read, so a hidden-tier
+    latest value falls back to the best remaining tier. ``series_all`` stays unfiltered here;
+    :func:`overview` applies the per-mode filter to the history.
+    """
     conn = open_connection(config, env)
     try:
-        model = BriefModel.from_store(conn, config, et_date(now), now)
+        model = BriefModel.from_store(conn, config, et_date(now), now, exclude_tiers=exclude_tiers)
         history = series_all(conn, SPARK_DAYS, now)
     finally:
         conn.close()
@@ -98,14 +110,24 @@ def build_snapshot(config: Config, env: Mapping[str, str], now: datetime) -> Sna
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _cached(_config: Config, backend: str, where: str) -> Snapshot:
-    # backend and where are the cache key; the config itself is not hashed
-    return build_snapshot(_config, os.environ, current_time())
+def _cached(_config: Config, backend: str, where: str, hidden: frozenset[int]) -> Snapshot:
+    # backend, where and hidden are the cache key; the config itself is not hashed
+    return build_snapshot(_config, os.environ, current_time(), hidden)
 
 
-def load_snapshot(config: Config) -> Snapshot:
+def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snapshot:
     s = config.storage
-    return _cached(config, s.backend, s.bucket if s.backend == "r2" else s.local_root)
+    return _cached(config, s.backend, s.bucket if s.backend == "r2" else s.local_root, hidden)
+
+
+#: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
+DASHBOARD_LIMITS = (
+    "Dashboard: no stale greying; the as-of text and health badge carry data age.",
+    "Dashboard: no 30-day z-score column.",
+    "Dashboard: no yield-curve panel.",
+    "Dashboard: no live polling; refresh the page (data cached for 60 s).",
+    f"Dashboard: sparklines cover {SPARK_DAYS} days, not the spec's 1-day sparkline.",
+)
 
 
 @dataclass(frozen=True)
@@ -154,6 +176,7 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
             for k, pts in snap.series.items()
             if k in by_id
         },
-        known_limits=model.known_limits,
+        known_limits=model.known_limits
+        + tuple(KnownLimit("dashboard", t) for t in DASHBOARD_LIMITS),
         withheld=len(model.rows()) - len(keep),
     )

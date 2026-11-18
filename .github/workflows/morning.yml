@@ -57,7 +57,7 @@ jobs:
           set +e -o pipefail
           mkdir -p logs
           # stdout is the run manifest (counts only) -> step summary; stderr is the redacted JSON log.
-          uv run deskbrief run morning 2> logs/morning.log | tee logs/morning-summary.md >> "$GITHUB_STEP_SUMMARY"
+          uv run --no-dev deskbrief run morning 2> logs/morning.log | tee logs/morning-summary.md >> "$GITHUB_STEP_SUMMARY"
           status=$?
           if grep -qF ': **skipped**' logs/morning-summary.md; then
             echo "skipped=true" >> "$GITHUB_OUTPUT"

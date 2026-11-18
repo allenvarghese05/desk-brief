@@ -77,3 +77,35 @@ def test_reader_env_ignores_writer_keys_and_names_gaps_without_values() -> None:
         data.reader_env({"R2_ACCOUNT_ID": "acct", "R2_ACCESS_KEY_ID": "writer-id"})
     assert "R2_READER_SECRET_ACCESS_KEY" in str(err.value)
     assert "writer-id" not in str(err.value)
+
+
+def test_cached_reader_key_includes_hidden_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamlit as st
+
+    st.cache_data.clear()
+    calls: list[frozenset[int]] = []
+
+    def fake(config: object, env: object, now: object, exclude_tiers: frozenset[int]) -> object:
+        calls.append(exclude_tiers)
+        return object()
+
+    monkeypatch.setattr(data, "build_snapshot", fake)
+    cfg = load_config(Path(__file__).resolve().parents[3] / "config.yaml")
+    data.load_snapshot(cfg, frozenset({1}))
+    data.load_snapshot(cfg, frozenset())
+    data.load_snapshot(cfg, frozenset({1}))  # cached
+    assert calls == [frozenset({1}), frozenset()]
+
+
+def test_provenance_of_raises_value_error_not_assert() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.components.panels import provenance_of
+
+    now = datetime(2026, 11, 16, 12, tzinfo=UTC)
+    orphan = SimpleNamespace(instrument_id="UST_10Y", tier=3, change=None, as_of_text="x")
+    with pytest.raises(ValueError, match="UST_10Y"):
+        provenance_of(orphan, now)  # type: ignore[arg-type]
+    spread = SimpleNamespace(instrument_id="UST_2S10S", tier=3, change=None, as_of_text="x")
+    assert provenance_of(spread, now).field == "derived spread"  # type: ignore[arg-type]

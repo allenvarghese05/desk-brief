@@ -412,6 +412,7 @@ def _flush(
     if "dq_results" in tables:  # counts cover the runner's rows and the checks' rows
         dq = buf.dq_status_counts()
         manifest.n_dq_fail, manifest.n_dq_warn = dq.get("fail", 0), dq.get("warn", 0)
+        manifest.check_issues = buf.check_issues()
     manifest.notes.extend(f"flush failed: {e}" for e in report.errors)
 
 
@@ -432,13 +433,19 @@ def _run_steps(
     check_flush: _CheckFlush,
 ) -> list[str]:
     """Checks, serving, report, notify. Each is isolated; failures degrade the run."""
+    # ``ctx.now_utc`` is the run's *start*; this run's observations carry ``ingested_at`` =
+    # ``responded_at``, later than that. Every hook reads point-in-time (``obs_pit(now)``), so
+    # with the start time they would see none of what this run just wrote. Hooks therefore get
+    # a context whose ``now_utc`` is "now, after ingestion" (T25: the first live run's report
+    # showed every instrument as unavailable and the checks failed on missing data).
+    hook_ctx = replace(ctx, now_utc=max(ctx.now_utc, env.clock()))
     steps = env.steps_for(ctx.job)
     failures: list[str] = []
     log = get_logger(run_id=ctx.run_id)
 
     def call(name: str, fn: Callable[[RunContext], object]) -> object:
         try:
-            return fn(ctx)
+            return fn(hook_ctx)
         except Exception as exc:  # the run (and the report) continues without this step
             failures.append(f"{name}: {type(exc).__name__}: {redact(str(exc))}")
             log.error("step.failed", step=name, error=redact(str(exc)))
