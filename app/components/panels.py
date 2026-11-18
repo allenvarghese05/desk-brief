@@ -323,7 +323,10 @@ def chart_header(row: Row, now: datetime) -> str:
 
 
 def _num(v: float, unit: str) -> str:
-    return f"{v:.2f}%" if unit == "pct" else f"{v:,.4f}".rstrip("0").rstrip(".")
+    """Same decimals for both ends of a range: yields 2 (as %), prices 2, FX-sized 4."""
+    if unit == "pct":
+        return f"{v:.2f}%"
+    return f"{v:,.2f}" if abs(v) >= 10 else f"{v:,.4f}"
 
 
 def details(row: Row, bars: pd.DataFrame, now: datetime) -> str:

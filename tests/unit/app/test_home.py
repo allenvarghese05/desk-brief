@@ -313,8 +313,12 @@ def test_hosted_bars_never_read_tier1(run_home: Run) -> None:
     t1 = daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest")
     run_home("hosted", rows=[*monday_rows(), t1])
     config = load_config(os.environ["DESKBRIEF_CONFIG"])
-    hosted = data.build_bars(config, os.environ, MON_0700, "SPY", frozenset({1}))
-    local = data.build_bars(config, os.environ, MON_0700, "SPY", frozenset())
+    conn = data.open_connection(config, os.environ)
+    try:
+        hosted = data.build_bars(conn, MON_0700, "SPY", frozenset({1}))
+        local = data.build_bars(conn, MON_0700, "SPY", frozenset())
+    finally:
+        conn.close()
     assert 590.25 not in hosted["close"].tolist()
     assert set(hosted["tier"]) <= {2, 3}
     assert 590.25 not in local["close"].tolist() or 1 in set(local["tier"])

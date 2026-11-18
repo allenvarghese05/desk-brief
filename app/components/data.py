@@ -20,7 +20,9 @@ way out as a second guard.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import threading
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -87,6 +89,33 @@ def open_connection(config: Config, env: Mapping[str, str]) -> duckdb.DuckDBPyCo
     return duck.connect(LocalBackend(config.storage.local_root), config)
 
 
+@st.cache_resource(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def _shared(
+    _config: Config, backend: str, where: str
+) -> tuple[duckdb.DuckDBPyConnection, threading.Lock]:
+    # backend and where are the cache key; rebuilt every 60 s so new files are seen
+    return open_connection(_config, os.environ), threading.Lock()
+
+
+def _where(config: Config) -> str:
+    s = config.storage
+    return s.bucket if s.backend == "r2" else s.local_root
+
+
+@contextmanager
+def shared_connection(config: Config) -> Iterator[duckdb.DuckDBPyConnection]:
+    """One read-only connection per process for the workspace's small per-click queries.
+
+    Building a connection copies every cached table into a fresh DuckDB (seconds on R2), so the
+    chart, ladder, lineage and checks share one, rebuilt at most once a minute. The lock keeps
+    two browser sessions from using it at the same time (DuckDB connections are not
+    thread-safe; cursors would not see its temporary tables).
+    """
+    conn, lock = _shared(config, config.storage.backend, _where(config))
+    with lock:
+        yield conn
+
+
 @dataclass(frozen=True)
 class Snapshot:
     """Everything the Overview needs, unfiltered (tiers are filtered later, per mode)."""
@@ -132,8 +161,7 @@ def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snaps
 
 
 def build_bars(
-    config: Config,
-    env: Mapping[str, str],
+    conn: duckdb.DuckDBPyConnection,
     now: datetime,
     instrument_id: str,
     exclude_tiers: frozenset[int],
@@ -148,18 +176,14 @@ def build_bars(
     """
     tiers = [t for t in (1, 2, 3) if t not in exclude_tiers] or [0]
     marks = ", ".join(str(int(t)) for t in tiers)
-    conn = open_connection(config, env)
-    try:
-        raw = conn.execute(
-            "SELECT CAST(timezone('America/New_York', as_of) AS DATE) AS d, field, value, tier, "  # noqa: S608 (the interpolated tiers are ints)
-            "source, unit, ingested_at FROM obs_pit(?) WHERE instrument_id = ? "
-            "AND interval = '1d' AND field IN ('open', 'high', 'low', 'close', 'yield', 'rate', "
-            f"'volume') AND as_of > ? AND tier IN ({marks}) "
-            "AND CAST(timezone('America/New_York', as_of) AS DATE) < ?",
-            [now, instrument_id, now - timedelta(days=days), et_date(now)],
-        ).fetchdf()
-    finally:
-        conn.close()
+    raw = conn.execute(
+        "SELECT CAST(timezone('America/New_York', as_of) AS DATE) AS d, field, value, tier, "  # noqa: S608 (the interpolated tiers are ints)
+        "source, unit, ingested_at FROM obs_pit(?) WHERE instrument_id = ? "
+        "AND interval = '1d' AND field IN ('open', 'high', 'low', 'close', 'yield', 'rate', "
+        f"'volume') AND as_of > ? AND tier IN ({marks}) "
+        "AND CAST(timezone('America/New_York', as_of) AS DATE) < ?",
+        [now, instrument_id, now - timedelta(days=days), et_date(now)],
+    ).fetchdf()
     if raw.empty:
         return pd.DataFrame(columns=list(BAR_COLUMNS))
     main = raw[raw["field"].isin(list(_MAIN_RANK))].copy()
@@ -186,13 +210,12 @@ def build_bars(
 def _cached_bars(
     _config: Config, backend: str, where: str, instrument_id: str, hidden: frozenset[int]
 ) -> pd.DataFrame:
-    return build_bars(_config, os.environ, current_time(), instrument_id, hidden)
+    with shared_connection(_config) as conn:
+        return build_bars(conn, current_time(), instrument_id, hidden)
 
 
 def load_bars(config: Config, instrument_id: str, hidden: frozenset[int]) -> pd.DataFrame:
-    s = config.storage
-    where = s.bucket if s.backend == "r2" else s.local_root
-    return _cached_bars(config, s.backend, where, instrument_id, hidden)
+    return _cached_bars(config, config.storage.backend, _where(config), instrument_id, hidden)
 
 
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"

@@ -92,7 +92,6 @@ div[data-testid="stTextInput"] input {{ font-family: {SANS}; font-size: .9rem;
 /* ---- panels: keyed Streamlit containers ---- */
 .st-key-db-watch, .st-key-db-chart, .st-key-db-detail, .st-key-db-overview {{
   background: {PANEL}; border: 1px solid {RULE}; border-radius: 10px; padding: .8rem .9rem; }}
-.st-key-db-watch {{ max-height: 1180px; overflow-y: auto; }}
 
 /* ---- watchlist ---- */
 .db-wl-grp {{ padding: .7rem .25rem .3rem .25rem; border-bottom: 1px solid {RULE}; }}

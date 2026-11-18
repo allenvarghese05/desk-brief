@@ -10,7 +10,6 @@ Every figure goes through ``values.value_cell`` with its full provenance line.
 
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, timedelta
 from html import escape
 
@@ -36,40 +35,31 @@ def _where(config: Config) -> str:
 def _ladder(
     _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
 ) -> list[ValueRow]:
-    conn = data.open_connection(_config, os.environ)
-    try:
-        rows: list[ValueRow] = []
+    rows: list[ValueRow] = []
+    with data.shared_connection(_config) as conn:
         for tier in (1, 2, 3):
             if tier in hidden:
                 continue
             others = {1, 2, 3} - {tier}
             rows += [r for r in latest_snapshot(conn, _now, exclude_tiers=others)
                      if r.instrument_id == iid]  # fmt: skip
-        return rows
-    finally:
-        conn.close()
+    return rows
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _lineage(_config: Config, where: str, row: ValueRow) -> Lineage:
-    conn = data.open_connection(_config, os.environ)
-    try:
+    with data.shared_connection(_config) as conn:
         return lineages(conn, [row])[0]
-    finally:
-        conn.close()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _checks(_config: Config, where: str, iid: str, today: date) -> pd.DataFrame:
-    conn = data.open_connection(_config, os.environ)
-    try:
+    with data.shared_connection(_config) as conn:
         return conn.execute(
             "SELECT target_date, check_name, source, status FROM dq WHERE instrument_id = ? "
             "AND target_date > ? ORDER BY target_date DESC, check_name",
             [iid, today - timedelta(days=CHECK_DAYS)],
         ).fetchdf()
-    finally:
-        conn.close()
 
 
 def exposed_sources(config: Config, hidden: frozenset[int]) -> frozenset[str]:
