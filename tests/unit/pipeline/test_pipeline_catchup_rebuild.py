@@ -10,7 +10,7 @@ import sys
 import tempfile
 import types
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,13 @@ from pipeline_fakes import REPO_ROOT, FakeSource, make_env
 from deskbrief import cli
 from deskbrief.models import JobKind, RunStatus, Trigger
 from deskbrief.pipeline import jobs
-from deskbrief.pipeline.catchup import missed_dates, window
+from deskbrief.pipeline.catchup import (
+    CATCHUP_TIME_BUDGET,
+    MAX_CATCHUP_DAYS_PER_RUN,
+    missed_dates,
+    split_catchup,
+    window,
+)
 from deskbrief.pipeline.clean import next_clean_version
 from deskbrief.pipeline.runner import RunEnv, make_context, run_job, run_rebuild
 from deskbrief.schemas import to_frame
@@ -123,6 +129,67 @@ def test_catch_up_backfills_two_missed_days_before_the_main_run(tmp_path: Path) 
     # the next run finds nothing left to do
     again = run_job(env, JobKind.MORNING, target_date=TUESDAY, trigger=Trigger.MANUAL)
     assert again.catchup_runs == []
+
+
+def test_catch_up_is_bounded_per_run_oldest_first(tmp_path: Path) -> None:
+    """T25c: five missed days at ~5 min each hit the 30-minute timeout (run 44219067732) before
+    the morning report. Each run now backfills at most two, oldest first; later runs finish."""
+    assert MAX_CATCHUP_DAYS_PER_RUN == 2
+    src = FakeSource("stooq")
+    env = make_env(tmp_path, [src])
+    seed_run(env, date(2026, 11, 2))  # history exists, but the whole window was missed
+    missed = window(TUESDAY)
+    first = run_job(env, JobKind.MORNING, target_date=TUESDAY, trigger=Trigger.MANUAL)
+    assert [c.target_date for c in first.catchup_runs] == missed[:2]
+    assert src.plans[-1] == (JobKind.MORNING, TUESDAY)  # the main run still happens
+    assert any(
+        n == "catch-up deferred to the next run: " + ", ".join(d.isoformat() for d in missed[2:])
+        for n in first.notes
+    )
+    second = run_job(env, JobKind.MORNING, target_date=TUESDAY, trigger=Trigger.MANUAL)
+    assert [c.target_date for c in second.catchup_runs] == missed[2:4]
+    third = run_job(env, JobKind.MORNING, target_date=TUESDAY, trigger=Trigger.MANUAL)
+    assert [c.target_date for c in third.catchup_runs] == missed[4:]
+    assert not any("deferred" in n for n in third.notes)
+    assert run_job(env, JobKind.MORNING, target_date=TUESDAY).catchup_runs == []
+
+
+def test_catch_up_stops_starting_days_after_the_time_budget(tmp_path: Path) -> None:
+    """A slow catch-up day (the clock jumps past the budget) defers the rest to the next run."""
+    start = datetime(2026, 11, 17, 11, 0, tzinfo=UTC)
+
+    class SlowClock:
+        def __init__(self) -> None:
+            self.now = start
+
+        def __call__(self) -> datetime:
+            self.now += timedelta(seconds=1)
+            return self.now
+
+    clock = SlowClock()
+
+    class SlowSource(FakeSource):
+        def plan(self, job: JobKind, ctx: Any) -> list[Any]:
+            if job is JobKind.BACKFILL:  # one backfill day eats the whole budget
+                clock.now += CATCHUP_TIME_BUDGET
+            return super().plan(job, ctx)
+
+    src = SlowSource("stooq")
+    env = make_env(tmp_path, [src], clock=clock)
+    seed_run(env, date(2026, 11, 2))
+    m = run_job(env, JobKind.MORNING, target_date=TUESDAY, trigger=Trigger.MANUAL)
+    missed = window(TUESDAY)
+    assert [c.target_date for c in m.catchup_runs] == missed[:1]
+    assert [p[0] for p in src.plans] == [JobKind.BACKFILL, JobKind.MORNING]
+    deferred = ", ".join(d.isoformat() for d in missed[1:])
+    assert f"catch-up deferred to the next run: {deferred}" in m.notes
+
+
+def test_split_catchup_orders_and_limits() -> None:
+    days = [date(2026, 11, 13), date(2026, 11, 9), date(2026, 11, 11)]
+    assert split_catchup(days, 2) == ([date(2026, 11, 9), date(2026, 11, 11)], [date(2026, 11, 13)])
+    assert split_catchup(days, 0) == ([], sorted(days))
+    assert split_catchup([], 2) == ([], [])
 
 
 def test_catch_up_failure_never_blocks_the_main_run(tmp_path: Path) -> None:

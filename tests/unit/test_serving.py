@@ -186,6 +186,28 @@ def test_eod_runs_scorecard_then_compaction_then_serving(
     assert calls == ["write_scorecard", "compact_recent", "build_serving_files"]
 
 
+def test_eod_serving_reconnects_after_compaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T25c: views are bound at connect (tables are cached in process), so the serving build
+    must not reuse the connection opened before compaction rewrote the partitions."""
+    w = build(tmp_path)
+    w.observations([tick("ES_F", et(MON, "06:30"), 5970.0)])  # a second Monday file to compact
+    opened: list[object] = []
+    real = serving.connect
+
+    def counting(*a: object, **k: object) -> object:
+        conn = real(*a, **k)  # type: ignore[arg-type]
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(serving, "connect", counting)
+    monkeypatch.setattr("deskbrief.scorecard.connect", counting)
+    serving.serving_step(ctx(w, JobKind.EOD))
+    assert len(opened) == 2  # scorecard's, closed by compaction, then a fresh one for serving
+    assert any("run=compacted-2026-11-16" in k for k in w.store.list("clean/v1/observations/"))
+
+
 def test_a_failing_compaction_does_not_stop_serving_but_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

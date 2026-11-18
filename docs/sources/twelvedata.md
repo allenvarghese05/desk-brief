@@ -15,7 +15,7 @@ verified against the live service.
 | Item | Value |
 |---|---|
 | Pairs (from `config.yaml`) | EUR/USD, GBP/USD, USD/JPY (datasets `fx_quote`, `fx_series_1m`, tier 1, unit `fx_rate`) |
-| `fx_quote` | one batch request; `last` = quote `close`; `bid`/`ask` only if present; `interval=tick`; `as_of` = quote `timestamp` (unix, UTC) |
+| `fx_quote` | one batch request; `last` = quote `close`; `bid`/`ask` only if present; `interval=tick`; `as_of` = quote `last_quote_at` (unix, UTC; last minute candle), else `timestamp`. Per the Twelve Data OpenAPI spec `timestamp` is the opening of the quote interval (1day by default), so it repeated all day (T25c) |
 | `fx_series_1m` | one batch request, `interval=1min`, `timezone=UTC`, `order=asc`, `outputsize=60`; field `close`; `interval=1m`; `as_of` = bar start |
 | Window | `crosschecks.fx_vs_ecb.fix_time_cet` (14:15) +/- 10 min, via `timeutil.local_to_utc(..., CET)`: 13:05-13:25 UTC in winter, 12:05-12:25 UTC in summer (21 bars; `FetchRequest.window` is `[start, end)` so it ends at 13:26) |
 | Plans | morning, intraday: `fx_quote`. eod: `fx_series_1m` on TARGET business days only (holiday or weekend plans nothing). backfill, rebuild: nothing |

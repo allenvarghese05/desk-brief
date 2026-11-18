@@ -4,7 +4,8 @@ Datasets (symbols and tiers from ``config.feed_index("twelvedata", ...)``):
 
 * ``fx_quote``      one batch ``/quote`` call for the configured pairs. Fields ``last`` (the quote's
   ``close``) and, when the provider returns them, ``bid`` / ``ask``; ``interval=tick``;
-  ``as_of`` is the quote's own unix ``timestamp``.
+  ``as_of`` is the quote's ``last_quote_at`` (last minute candle), falling back to
+  ``timestamp``, which is the *opening* of the quote interval (1day), not the quote time.
 * ``fx_series_1m``  one batch ``/time_series`` call (``interval=1min``, ``timezone=UTC``) for the
   window around the ECB fix: ``crosschecks.fx_vs_ecb.fix_time_cet`` +/- 10 minutes, converted to
   UTC with the DST-aware CET helper (``timeutil.local_to_utc``), so 14:15 CET is 13:15 UTC in
@@ -82,7 +83,7 @@ def credits_for(req: FetchRequest) -> int:
 
 class TwelveDataSource:
     name = "twelvedata"
-    parser_version = "1"
+    parser_version = "2"  # T25c: as_of from last_quote_at
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -315,7 +316,13 @@ def _entry_error(entry: Any) -> None:
 
 def _quote_rows(entry: Any) -> list[tuple[str, str, datetime, float]]:
     _entry_error(entry)
-    stamp = entry.get("timestamp")
+    # ``timestamp`` is the *opening* of the quote's interval (1day by default), so every poll of a
+    # day shared one as_of and each new close looked like a revision (T25c: 3 revision warns in
+    # run 3, and no FX tick ever fell inside the XNYS session). ``last_quote_at`` is the last
+    # minute candle, i.e. the quote instant; ``timestamp`` is only the fallback.
+    stamp = entry.get("last_quote_at")
+    if stamp is None:
+        stamp = entry.get("timestamp")
     if isinstance(stamp, bool) or not isinstance(stamp, int | float | str):
         raise _SymbolError("quote has no timestamp")
     try:

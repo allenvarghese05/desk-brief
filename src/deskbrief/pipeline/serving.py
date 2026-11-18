@@ -216,8 +216,8 @@ def serving_step(ctx: RunContext) -> None:
 
     The scorecard and the serving build share one DuckDB connection, opened on first use, so the
     store's views are set up once per job; the scorecard step re-points its view at the file it
-    wrote. Compaction runs between them and only moves rows between files of the same table, which
-    the views glob again on every query.
+    wrote. Views are bound to the files present at connect (T25c: tables are cached in process),
+    so after compaction the connection is closed and the serving build opens a fresh one.
     """
     shared: list[duckdb.DuckDBPyConnection] = []
 
@@ -226,10 +226,17 @@ def serving_step(ctx: RunContext) -> None:
             shared.append(connect(ctx.store, ctx.config))
         return shared[0]
 
+    def compact() -> object:
+        try:
+            return compact_recent(ctx.store, et_date(ctx.now_utc))
+        finally:  # the next duck() call reconnects and sees the compacted files
+            while shared:
+                shared.pop().close()
+
     parts: list[tuple[str, Callable[[], object]]] = [
         ("scorecard", lambda: write_scorecard(ctx, duck())),
         *(
-            [("compaction", lambda: compact_recent(ctx.store, et_date(ctx.now_utc)))]
+            [("compaction", compact)]
             if ctx.job is JobKind.EOD  # spec §5.4: scorecard -> compaction -> serving
             else []
         ),

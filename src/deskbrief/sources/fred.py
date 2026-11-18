@@ -47,6 +47,16 @@ MISSING = "."
 class SeriesSpec(NamedTuple):
     field: str
     interval: str  # "1d" or "1mo"
+    #: business days between publication and the newest value, when the series lags more than
+    #: the dataset's ``config.datasets`` entry (``lag_bdays: 1``); used by completeness
+    lag_bdays: int | None = None
+
+
+#: The EIA spot prices behind DCOILWTICO / DCOILBRENTEU are released weekly (normally on
+#: Wednesday, through the Monday or Friday before), so the newest value is up to ~6 business
+#: days old before the next release, and a holiday week adds one or two. Run 3 (2026-11-18)
+#: failed both on a 1-day lag. Approximation, not a live-verified schedule (docs/sources/fred.md).
+OIL_LAG_BDAYS = 8
 
 
 #: How each configured FRED series is observed. Unit, tier and scale come from config.
@@ -56,8 +66,8 @@ SERIES_SPECS: dict[str, SeriesSpec] = {
     "DGS20": SeriesSpec("yield", "1d"),
     "DGS30": SeriesSpec("yield", "1d"),
     "DFF": SeriesSpec("rate", "1d"),
-    "DCOILWTICO": SeriesSpec("close", "1d"),
-    "DCOILBRENTEU": SeriesSpec("close", "1d"),
+    "DCOILWTICO": SeriesSpec("close", "1d", OIL_LAG_BDAYS),
+    "DCOILBRENTEU": SeriesSpec("close", "1d", OIL_LAG_BDAYS),
     "CPIAUCSL": SeriesSpec("close", "1mo"),
     "UNRATE": SeriesSpec("rate", "1mo"),
 }
