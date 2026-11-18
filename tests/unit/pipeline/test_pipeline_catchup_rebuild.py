@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import tempfile
 import types
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
@@ -493,7 +494,16 @@ def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     registry.clear()
 
 
-CFG = ["--config", str(REPO_ROOT / "config.yaml")]
+def _all_sources_config() -> Path:
+    """config.yaml with every source enabled (Stooq is off there, but these tests register a
+    fake source under that name)."""
+    path = Path(tempfile.mkdtemp()) / "config.yaml"
+    text = (REPO_ROOT / "config.yaml").read_text().replace(", enabled: false}", "}")
+    path.write_text(text)
+    return path
+
+
+CFG = ["--config", str(_all_sources_config())]
 
 
 def test_cli_version_and_usage(capsys: pytest.CaptureFixture[str]) -> None:

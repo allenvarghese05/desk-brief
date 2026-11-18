@@ -34,6 +34,7 @@ from deskbrief.checks.base import (
     query,
     records,
     register,
+    source_enabled,
     within_grace,
 )
 from deskbrief.checks.feed_completeness import evaluate_feeds
@@ -60,6 +61,8 @@ class CompletenessCheck:
     def _daily(self, ctx: RunContext, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
         out: list[DQResult] = []
         for sched in ctx.config.datasets:
+            if not source_enabled(ctx, sched.source):
+                continue  # switched off in config.yaml: nothing is expected from it
             exp = expected_for(ctx, sched)
             waiting = exp.skip_reason is None and within_grace(ctx, exp)
             feeds = [

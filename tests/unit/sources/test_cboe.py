@@ -213,10 +213,11 @@ def test_truncation_outside_the_window_is_ignored(src: CboeSource) -> None:
     assert src.parse(raw_for(body))["value"].tolist() == [16.85]
 
 
-def test_url_is_marked_unverified() -> None:
-    """Finding 4: the endpoint has not been live-probed yet."""
+def test_url_is_the_cdn_api_host_the_old_host_redirects_to() -> None:
+    """T25: cdn.cboe.com answers 307 with Location cdn-api.cboe.com (probe 2026-11-18)."""
+    assert URL == "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
     code = (ROOT / "src" / "deskbrief" / "sources" / "cboe.py").read_text()
-    assert any("URL" in ln and "# UNVERIFIED" in ln for ln in code.splitlines())
+    assert "UNVERIFIED" not in code
 
 
 @pytest.mark.parametrize("lookback", ["99999999999", "-99999999999"])

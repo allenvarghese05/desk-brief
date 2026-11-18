@@ -15,9 +15,11 @@ sources:
   fred:       {rate_per_min: 100, timeout_s: 15, retries: 3}
   treasury:   {rate_per_min: 30, timeout_s: 20, retries: 3}
   ecb:        {rate_per_min: 30, timeout_s: 15, retries: 3}
-  stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}   # T13: live probe PENDING; if Stooq blocks, set enabled: false (docs/sources/stooq.md)
+  # Stooq is off by owner decision (2026-11-18): every automated request gets a JavaScript
+  # browser-verification page, not the CSV. Details: docs/sources/stooq.md.
+  stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2, enabled: false}
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
-  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T13: live probe PENDING (docs/sources/cboe.md)
+  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T25: live probe done 2026-11-18 (docs/sources/cboe.md)
 
 instruments:
   # ---------------- Equities (ETFs and portfolio stocks) ----------------

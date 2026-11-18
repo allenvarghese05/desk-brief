@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 import respx
 
+from config_support import enable_all_sources
 from deskbrief.config import Config, load_config
 from deskbrief.models import FetchRequest, JobKind, RawResponse, RunContext, Trigger
 from deskbrief.schemas import columns, validate
@@ -25,7 +26,7 @@ NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 
 @pytest.fixture(scope="module")
 def config() -> Config:
-    return load_config(ROOT / "config.yaml")
+    return enable_all_sources(load_config(ROOT / "config.yaml"))
 
 
 @pytest.fixture

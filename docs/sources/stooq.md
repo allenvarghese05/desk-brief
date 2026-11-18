@@ -13,7 +13,21 @@ ending on the run's target date and is skipped for `intraday`.
 `open/high/low/close` (instrument unit, `Feed.scale` applied) and `volume` (unit `shares`),
 interval `1d`, tier 3, `as_of` = 00:00 ET of the row date (P-006).
 
-## Live probe status: PENDING
+## Status: DISABLED (owner decision, 2026-11-18)
+
+Probe, 2026-11-18, reported by the owner from their own machine:
+`curl -s "https://stooq.com/q/d/l/?s=spy.us&i=d"` returns a JavaScript browser-verification page
+(`<noscript>This site requires JavaScript to verify your browser...`), not the CSV. The first live
+run (2026-11-17) saw the same for all 12 fetches (HTML starting `<!DOCTYPE html>`). This is a bot
+check, not a moved URL, so the source was left as is: no attempt is made to get around it.
+
+Decision, owner: asked whether to turn Stooq off and rely on Yahoo and Alpaca for daily closes,
+they answered "Yes, turn it off". `config.yaml` has `sources.stooq.enabled: false`. The registry
+does not build it, freshness and completeness expect nothing from it, and `close_vs_official` and
+the tier-3 daily closes of the affected instruments fall back to the remaining sources. To switch
+it back on, set `enabled: true` after the verification page is gone.
+
+## Earlier status: probe PENDING (before the first live run)
 
 The day-1 probe has **not been run**: the card was built in an environment where outbound requests
 to provider sites were denied by the permission gate. Nothing in this repo has been verified
