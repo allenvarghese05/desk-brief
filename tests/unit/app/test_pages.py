@@ -271,3 +271,34 @@ def test_data_health_quarantine_hosted_withholds_tier1_source(run_page: RunPage)
     assert "negative_price" in hosted
     assert "withheld" in hosted
     assert "tier1_bad_tick" in text(run_page("health", "local"))
+
+
+# --- T36 phase 1: headline numbers first ------------------------------------------------------
+
+
+def test_every_system_page_has_top_bar_navigation(run_page: RunPage) -> None:
+    for page in PAGE_FILES:
+        t = text(run_page(page, "hosted"))
+        assert 'aria-label="Pages"' in t, page
+        assert 'aria-current="page"' in t, page
+
+
+def test_crosschecks_put_problems_first_and_fold_skipped(run_page: RunPage) -> None:
+    t = text(run_page("xchecks", "local"))
+    assert "SPY vs ES" in t  # readable name, raw id kept beside it
+    assert "Show 1 skipped check" in t
+    assert t.index("spy_vs_es") < t.index("es_vs_yahoo")  # warn sorts before pass
+
+
+def test_data_health_leads_with_failing_count(run_page: RunPage) -> None:
+    t = text(run_page("health", "local"))
+    assert "Failing" in t
+    assert t.index("Failing") < t.index("Freshness, last 7 days")
+    assert "Needs attention" in t
+
+
+def test_sources_leave_out_switched_off_sources(run_page: RunPage) -> None:
+    at = run_page("sources", "hosted")
+    df = at.dataframe[0].value
+    assert "stooq" not in set(df["Source"])
+    assert "Median data age" in df.columns

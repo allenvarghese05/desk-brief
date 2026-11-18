@@ -176,7 +176,89 @@ def price_chart(
     return styled
 
 
-def caption(bars: pd.DataFrame) -> str:
+def rebased(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -> pd.DataFrame:
+    """Both series on their common dates, each set to 100 on the first of them (long format)."""
+    m = a[["d", "close"]].merge(b[["d", "close"]], on="d", suffixes=("_a", "_b"))
+    if len(m) < 2:
+        return pd.DataFrame(columns=["d", "series", "index"])
+    m = m.assign(
+        a=m["close_a"] / m["close_a"].iloc[0] * 100, b=m["close_b"] / m["close_b"].iloc[0] * 100
+    )
+    long = pd.concat(
+        [
+            pd.DataFrame({"d": m["d"], "series": name_a, "index": m["a"]}),
+            pd.DataFrame({"d": m["d"], "series": name_b, "index": m["b"]}),
+        ],
+        ignore_index=True,
+    )
+    return long
+
+
+def compare_chart(
+    long: pd.DataFrame, name_a: str, name_b: str, height: int = 380
+) -> alt.TopLevelMixin:
+    """Two series rebased to 100: relative performance at a glance (second series dashed)."""
+    hover = alt.selection_point(
+        fields=["d"], nearest=True, on="pointerover", clear="pointerout", empty=False
+    )
+    base = alt.Chart(long).encode(
+        x=alt.X(
+            "d:T",
+            title=None,
+            axis=alt.Axis(format="%d %b", labelAngle=0, grid=False, tickCount=6),
+        ),
+    )
+    lines = base.mark_line(strokeWidth=1.8).encode(
+        y=alt.Y(
+            "index:Q",
+            scale=alt.Scale(zero=False),
+            title=None,
+            axis=alt.Axis(orient="right", format=".1f"),
+        ),
+        color=alt.Color(
+            "series:N",
+            scale=alt.Scale(domain=[name_a, name_b], range=[theme.ACCENT, theme.WARN]),
+            legend=alt.Legend(orient="top-left", title=None, labelColor=theme.MUTED),
+        ),
+        strokeDash=alt.StrokeDash(
+            "series:N",
+            scale=alt.Scale(domain=[name_a, name_b], range=[[1, 0], [5, 3]]),
+            legend=None,
+        ),
+    )
+    catcher = (
+        base.mark_rule(strokeWidth=12, opacity=0)
+        .encode(
+            tooltip=[
+                alt.Tooltip("d:T", format="%a %d %b %Y"),
+                "series:N",
+                alt.Tooltip("index:Q", title="Rebased (start = 100)", format=".2f"),
+            ]
+        )
+        .add_params(hover)
+    )
+    cross = base.mark_rule(color=theme.MUTED, strokeDash=[3, 3]).encode(
+        opacity=alt.condition(hover, alt.value(0.9), alt.value(0.0))
+    )
+    ref = alt.Chart(pd.DataFrame({"y": [100.0]})).mark_rule(color=theme.RULE).encode(y="y:Q")
+    styled: alt.TopLevelMixin = (
+        alt.layer(ref, lines, cross, catcher)
+        .properties(height=height)
+        .configure(background="transparent", font=theme.SANS)
+        .configure_view(stroke=None)
+        .configure_axis(
+            labelColor=theme.MUTED,
+            labelFontSize=11,
+            gridColor=theme.GRID,
+            domainColor=theme.RULE,
+            tickColor=theme.RULE,
+            labelPadding=6,
+        )
+    )
+    return styled
+
+
+def caption(bars: pd.DataFrame, *, latest_line: bool = True) -> str:
     """One line naming what the chart shows: field, tiers, sources and the date span."""
     if bars.empty:
         return ""
@@ -188,5 +270,5 @@ def caption(bars: pd.DataFrame) -> str:
     a, b = bars["d"].min(), bars["d"].max()
     return (
         f"Daily {field}s · {tiers} · {sources} · {a.day} {a:%b %Y} to {b.day} {b:%b %Y} "
-        f"({len(bars)} days). Dashed line: latest value."
+        f"({len(bars)} days)." + (" Dashed line: latest value." if latest_line else "")
     )

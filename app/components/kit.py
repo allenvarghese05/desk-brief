@@ -59,8 +59,28 @@ PAGE_CSS = f"""
   margin: .2rem 0 .4rem 0; flex-wrap: wrap; }}
 .db-chart text {{ font-size: 11px; fill: {theme.MUTED}; }}
 .db-n {{ color: {theme.MUTED}; font-size: .85rem; }}
+.db-kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: .6rem; margin: .2rem 0 1rem 0; }}
+.db-kpi {{ background: {theme.PANEL}; border: 1px solid {theme.RULE}; border-radius: 8px;
+  padding: .7rem .9rem; border-top: 2px solid {theme.RULE}; }}
+.db-kpi-ok {{ border-top-color: {theme.UP}; }} .db-kpi-warn {{ border-top-color: {theme.WARN}; }}
+.db-kpi-fail {{ border-top-color: {theme.FAIL}; }}
+.db-kpi-label {{ color: {theme.MUTED}; font-size: .7rem; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; }}
+.db-kpi-value {{ font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: {theme.INK}; line-height: 1.3; }}
+.db-kpi-fail .db-kpi-value {{ color: {theme.FAIL}; }}
+.db-kpi-warn .db-kpi-value {{ color: {theme.WARN}; }}
+.db-kpi-note {{ color: {theme.MUTED}; font-size: .76rem; }}
+.db-page-kicker {{ margin: 1.2rem 0 .35rem 0; font-size: .74rem; }}
+.db-xname {{ font-weight: 600; }}
+.db-id {{ color: {theme.MUTED}; font-size: .72rem; font-family: {theme.MONO}; }}
 </style>
 """
+
+
+#: page title -> its label in the top-bar navigation
+NAV_LABEL = {"Cross-checks": "Cross checks"}
 
 
 @dataclass(frozen=True)
@@ -90,7 +110,9 @@ def _config(path: str) -> Config:
 
 def context(title: str) -> Ctx:
     """Common page start: set up the page, read mode and store, or stop with a message."""
-    st.set_page_config(page_title=f"{title} · Desk Brief", layout="wide")
+    st.set_page_config(
+        page_title=f"{title} · Desk Brief", layout="wide", initial_sidebar_state="collapsed"
+    )
     theme.apply()
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
     path = os.environ.get("DESKBRIEF_CONFIG") or str(ROOT / "config.yaml")
@@ -101,11 +123,16 @@ def context(title: str) -> Ctx:
     except StorageError as exc:  # names the missing variables, never their values
         st.error(f"Cannot read the data store: {exc}")
         st.stop()
-    st.markdown(
+    from app.components.panels import nav  # late: panels imports data, not kit
+
+    left, right = st.columns([2, 3], vertical_alignment="center")
+    left.markdown(
         f'<div class="db-top"><span class="db-brand">{escape(title)}</span>'
-        f'<span class="db-mode">{escape(mode)}</span></div><hr class="db-rule">',
+        f'<span class="db-when">Desk Brief · {escape(mode)} mode</span></div>',
         unsafe_allow_html=True,
     )
+    right.markdown(nav(NAV_LABEL.get(title, title)), unsafe_allow_html=True)
+    st.markdown('<hr class="db-rule">', unsafe_allow_html=True)
     return Ctx(config, mode, data.hidden_tiers(mode, config), store, data.current_time())
 
 
@@ -198,6 +225,41 @@ def et_text(ts: object) -> str:
 
 def day_text(d: object) -> str:
     return "n/a" if d is None or pd.isna(d) else f"{pd.Timestamp(d):%d %b}"
+
+
+def duration(seconds: float | None) -> str:
+    """A length of time people read at a glance: 45 s, 12 min, 3.5 h, 4.0 d."""
+    if seconds is None or pd.isna(seconds):
+        return "n/a"
+    s = float(seconds)
+    if s < 90:
+        return f"{s:,.0f} s"
+    if s < 90 * 60:
+        return f"{s / 60:,.0f} min"
+    if s < 48 * 3600:
+        return f"{s / 3600:,.1f} h"
+    return f"{s / 86400:,.1f} d"
+
+
+def kpis(items: list[tuple[str, str, str, str]]) -> str:
+    """Headline numbers ``(label, value, tone, note)``; tone is ok, warn, fail or muted. The
+    answer to "is anything wrong?" comes first on every system page."""
+    cells = "".join(
+        f'<div class="db-kpi db-kpi-{escape(tone)}"><div class="db-kpi-label">{escape(label)}'
+        f'</div><div class="db-kpi-value">{escape(value)}</div>'
+        f'<div class="db-kpi-note">{escape(note)}</div></div>'
+        for label, value, tone, note in items
+    )
+    return f'<div class="db-kpis">{cells}</div>'
+
+
+def section(title: str, note: str = "") -> None:
+    """A quiet section heading (uppercase kicker) with an optional one-line explanation."""
+    extra = f'<div class="db-n">{escape(note)}</div>' if note else ""
+    st.markdown(
+        f'<div class="db-kicker db-page-kicker">{escape(title)}</div>{extra}',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,12 @@ sc = _kit.serving_frame(ctx, "scorecard_30d.parquet")
 if sc.empty:
     st.markdown("No scorecard data yet. It is written at the end of each job.")
     st.stop()
+# a source switched off in config.yaml (stooq, by owner decision) is history, not a live feed
+disabled = sorted(k for k, v in ctx.config.sources.items() if not v.enabled)
+sc = sc[~sc["source"].isin(disabled)]
+if sc.empty:
+    st.markdown("No scorecard data for an enabled source yet.")
+    st.stop()
 
 
 def pct(x: float | None) -> str:
@@ -42,26 +48,47 @@ def weighted(g: pd.DataFrame, rate: str, weight: str) -> float | None:
 
 
 rows = []
+cards = []
 for source, g in sc.groupby("source"):
+    uptime = weighted(g, "ok_rate", "fetches")
+    errors = weighted(g, "error_rate", "fetches")
+    age = g["median_data_age_s"].median()
+    tone = (
+        "muted"
+        if uptime is None
+        else "ok"
+        if uptime >= 0.98
+        else "warn"
+        if uptime >= 0.9
+        else "fail"
+    )
+    cards.append((
+        str(source), pct(uptime), tone,
+        f"uptime · data age {_kit.duration(age)} · {int(g['date'].nunique())} days",
+    ))  # fmt: skip
     rows.append({
         "Source": source,
         "Days of data": int(g["date"].nunique()),
         "Fetches": int(g["fetches"].sum()),
-        "Uptime": pct(weighted(g, "ok_rate", "fetches")),
-        "Median latency (median of days)": num(g["median_latency_ms"].median(), "ms"),
-        "p95 latency (median of days)": num(g["p95_latency_ms"].median(), "ms"),
-        "Median data age (median of days)": num(g["median_data_age_s"].median(), "s"),
-        "Error rate": pct(weighted(g, "error_rate", "fetches")),
+        "Uptime": pct(uptime),
+        "Error rate": pct(errors),
+        "Median latency": num(g["median_latency_ms"].median(), "ms"),
+        "p95 latency": num(g["p95_latency_ms"].median(), "ms"),
+        "Median data age": _kit.duration(age),
         "Disagreement rate": pct(weighted(g, "disagreement_rate", "n_crosschecks")),
     })  # fmt: skip
-table = pd.DataFrame(rows)
+table = pd.DataFrame(rows).sort_values("Source")
 n_days = int(sc["date"].nunique())
-st.markdown(
-    f'<div class="db-n">{n_days} days of data in the window; each source row says how many '
-    "it has. A source with few days is a short sample, not a trend.</div>",
-    unsafe_allow_html=True,
+st.markdown(_kit.kpis(cards), unsafe_allow_html=True)
+_kit.section(
+    "Scorecard",
+    f"{n_days} days of data in the window; each source row says how many it has. Rates are "
+    "weighted by fetches (disagreement by cross-checks); latency and data age are the median "
+    "of the daily medians. A source with few days is a short sample, not a trend.",
 )
 st.dataframe(table, hide_index=True, width="stretch")
+if disabled:
+    st.caption(f"Switched off in config.yaml, so not listed: {', '.join(disabled)}.")
 
 METRICS = {
     "Uptime": ("ok_rate", 100.0, "%"),
@@ -71,6 +98,7 @@ METRICS = {
     "Median data age": ("median_data_age_s", 1.0, "s"),
     "Disagreement rate": ("disagreement_rate", 100.0, "%"),
 }
+_kit.section("Trend")
 left, right = st.columns(2)
 source = left.selectbox("Source", sorted(sc["source"].unique()), key="source")
 metric = right.selectbox("Metric", list(METRICS), key="metric")

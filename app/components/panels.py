@@ -20,7 +20,6 @@ from datetime import date, datetime, timedelta
 from html import escape
 from urllib.parse import urlencode
 
-import pandas as pd
 from app.components.data import CURVE_TENORS, Overview
 from app.components.values import (
     Provenance,
@@ -320,48 +319,6 @@ def chart_header(row: Row, now: datetime) -> str:
         f'<span class="db-ch-chg">{chg}</span></div>'
         + (f'<div class="db-ch-foot">{sub}</div>' if sub else "")
     )
-
-
-def _num(v: float, unit: str) -> str:
-    """Same decimals for both ends of a range: yields 2 (as %), prices 2, FX-sized 4."""
-    if unit == "pct":
-        return f"{v:.2f}%"
-    return f"{v:,.2f}" if abs(v) >= 10 else f"{v:,.4f}"
-
-
-def details(row: Row, bars: pd.DataFrame, now: datetime) -> str:
-    """Key facts of the selection: latest value, change, last close and the range in view."""
-    if not row.available:
-        return '<div class="db-empty">No value for this instrument in this mode.</div>'
-    p = provenance_of(row, now)
-    facts = [("Latest", value_cell(row.value_text, p))]
-    if _has_change(row):
-        facts.append(("Change", change_cell(row.change_text, p, row.basis)))
-    rng = ""
-    if not bars.empty:
-        unit = str(bars["unit"].iloc[-1])
-        last = bars.iloc[-1]
-        bp = Provenance(
-            str(last["source"]), int(last["tier"]), f"{last['d']:%d %b}", str(last["field"])
-        )
-        facts.append((f"Last daily {last['field']}", value_cell(_num(last["close"], unit), bp)))
-        hi_col = "high" if bars["high"].notna().all() else "close"
-        lo_col = "low" if bars["low"].notna().all() else "close"
-        hi, lo = float(bars[hi_col].max()), float(bars[lo_col].min())
-        first = bars.iloc[0]
-        span = f"{first['d']:%d %b} to {last['d']:%d %b}"
-        tiers = sorted({int(t) for t in bars["tier"]})
-        src = ", ".join(sorted({str(s) for s in bars["source"]}))
-        rp = Provenance(src, max(tiers), span, f"daily {last['field']} range")
-        facts.append(("Range in view", value_cell(f"{_num(lo, unit)} – {_num(hi, unit)}", rp)))
-        cur = row.change.last.value if row.change is not None else float(last["close"])
-        pos = 0.0 if hi == lo else min(1.0, max(0.0, (cur - lo) / (hi - lo)))
-        rng = (  # where the latest value sits in the range (the figures are in the row above)
-            f'<div class="db-range" role="img" aria-label="latest value at {pos:.0%} of the '
-            f'range in view"><span style="left:calc({pos * 100:.1f}% - 1px)"></span></div>'
-        )
-    body = "".join(f"<tr><th>{escape(k)}</th><td>{v}</td></tr>" for k, v in facts)
-    return f'<table class="db-dl">{body}</table>{rng}'
 
 
 def overview(ov: Overview, sel: str = "", keep: Mapping[str, str] | None = None) -> str:

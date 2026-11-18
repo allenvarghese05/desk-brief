@@ -38,9 +38,42 @@ df = df.assign(group_id=df["group_id"].fillna(""))
 df = df.sort_values(["ref_date", "at_time"], na_position="first")
 keys = sorted(set(zip(df["group_id"], df["check_name"], strict=True)))
 
-st.markdown(_kit.status_legend(), unsafe_allow_html=True)
-rows = []
-for group, name in keys:
+RANK = {"fail": 0, "warn": 1, "pass": 2, "skip": 3}
+
+
+def readable(name: str) -> str:
+    """``spy_vs_es`` -> ``SPY vs ES``: what the check compares, in words."""
+    parts = name.split("_vs_")
+    if len(parts) == 2:
+        return " vs ".join(p.replace("_", " ").upper() for p in parts)
+    return name.replace("_", " ").capitalize()
+
+
+latest = {
+    k: df[(df["group_id"] == k[0]) & (df["check_name"] == k[1])].iloc[-1]["status"] for k in keys
+}
+ran = [k for k in keys if latest[k] != "skip"]
+skipped = [k for k in keys if latest[k] == "skip"]
+n = {s: sum(1 for k in ran if latest[k] == s) for s in ("fail", "warn", "pass")}
+st.markdown(
+    _kit.kpis(
+        [
+            (
+                "Failing",
+                str(n["fail"]),
+                "fail" if n["fail"] else "ok",
+                "sources disagree past fail",
+            ),
+            ("Warnings", str(n["warn"]), "warn" if n["warn"] else "ok", "gap above the warn line"),
+            ("Agreeing", str(n["pass"]), "ok" if n["pass"] else "muted", "within tolerance"),
+            ("Skipped", str(len(skipped)), "muted", "nothing to compare last time"),
+        ]
+    ),
+    unsafe_allow_html=True,
+)
+
+
+def _row(group: str, name: str) -> str:
     c = df[(df["group_id"] == group) & (df["check_name"] == name)].tail(7)
     items = [
         (
@@ -51,19 +84,45 @@ for group, name in keys:
         )
         for r in c.itertuples()
     ]
-    first, last = _kit.day_text(c["ref_date"].iloc[0]), _kit.day_text(c["ref_date"].iloc[-1])
-    rows.append(
-        f"<tr><td>{_kit.escape(name)}<span class='db-note'> · {_kit.escape(group or 'no group')}"
-        f"</span></td><td>{_kit.status_strip(items)}</td>"
-        f"<td class='db-n'>data {first} to {last}</td></tr>"
+    last = c.iloc[-1]
+    first_d, last_d = _kit.day_text(c["ref_date"].iloc[0]), _kit.day_text(c["ref_date"].iloc[-1])
+    pair = f"{last['left_source']} vs {last['right_source']}"
+    return (
+        f"<tr><td><span class='db-xname'>{_kit.escape(readable(name))}</span>"
+        f"<span class='db-note'> · {_kit.escape(group or 'no group')} · {_kit.escape(pair)}</span>"
+        f"<br><span class='db-id'>{_kit.escape(name)}</span></td>"
+        f"<td>{_kit.status_strip(items)}</td>"
+        f"<td class='num'>{_kit.escape(_gap(last['diff_bps']))}"
+        f"<span class='db-tagline'>warn {last['warn_bps']:g} · fail {last['fail_bps']:g}"
+        "</span></td>"
+        f"<td class='db-n'>data {first_d} to {last_d}</td></tr>"
     )
+
+
+head = (
+    "<thead><tr><th>Check</th><th>Last 7 days</th><th class='num'>Latest gap</th>"
+    "<th>Compared</th></tr></thead>"
+)
+_kit.section("Results, problems first", "Squares are labelled by the date of the data compared.")
+st.markdown(_kit.status_legend(), unsafe_allow_html=True)
+order = sorted(ran, key=lambda k: (RANK.get(str(latest[k]), 9), k[1]))
 st.markdown(
-    '<table class="db-table"><thead><tr><th>Check</th><th>Last 7 days</th><th>Compared</th>'
-    f"</tr></thead><tbody>{''.join(rows)}</tbody></table>",
+    f'<table class="db-table">{head}<tbody>{"".join(_row(*k) for k in order)}</tbody></table>'
+    if order
+    else '<div class="db-n">Every check was skipped last time.</div>',
     unsafe_allow_html=True,
 )
+if skipped:
+    st.markdown(
+        f'<details class="db-more"><summary>Show {len(skipped)} skipped '
+        f"{'check' if len(skipped) == 1 else 'checks'}</summary>"
+        f'<table class="db-table">{head}<tbody>{"".join(_row(*k) for k in skipped)}'
+        "</tbody></table></details>",
+        unsafe_allow_html=True,
+    )
 _kit.withheld_note(withheld, ctx.mode)
 
+_kit.section("Gap chart")
 label = {f"{g or 'no group'} · {n}": (g, n) for g, n in keys}
 pick = st.selectbox("Gap chart", list(label), key="check")
 group, name = label[pick]

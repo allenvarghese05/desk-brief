@@ -1,0 +1,423 @@
+"""Instrument tearsheet (T36 phase 1): what an analyst needs about one instrument on one screen.
+
+* performance over horizons (1D from the report; 1W, 1M, 3M, YTD, 1Y from daily closes),
+* risk and range (realised volatility, today's move in standard deviations, drawdown, 52-week
+  range), each saying how many days it needs when the store holds fewer,
+* every value we hold for the instrument: one line per source, dataset, field and interval,
+  with when it was true (as of) and when we fetched it,
+* source agreement over time (cross-checks naming the instrument) and corrections (revisions).
+
+Every figure is printed through ``values.value_cell`` with a :class:`Provenance` naming its
+source, tier, date and what it is. Derived statistics name the closes they were computed from.
+Hosted mode never reads a hidden tier (SQL excludes them; cross-checks naming a source with a
+hidden-tier feed are withheld whole).
+"""
+# ruff: noqa: RUF001  (minus, sigma and en dash are intentional output)
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from html import escape
+
+import pandas as pd
+import streamlit as st
+from app.components import data
+from app.components.instrument import exposed_sources
+from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell
+
+from deskbrief.config import Config
+from deskbrief.report.model import Row
+from deskbrief.timeutil import et_date, to_et
+
+_MINUS = "−"
+VOL_DAYS = 20  # realised volatility window (trading days)
+SIGMA_MIN_DAYS = 20  # fewest daily moves for a standard deviation
+HORIZONS: tuple[tuple[str, int | None], ...] = (
+    ("1W", 7),
+    ("1M", 30),
+    ("3M", 91),
+    ("YTD", None),
+    ("1Y", 365),
+)
+XCHECK_DAYS = 14
+REVISION_DAYS = 30
+
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+
+
+def _signed(x: float, unit: str) -> str:
+    sign = "+" if x > 0 else _MINUS if x < 0 else ""
+    return f"{sign}{abs(x):,.{1 if unit == '%' else 0}f}{unit}"
+
+
+def _is_yield(bars: pd.DataFrame) -> bool:
+    return not bars.empty and str(bars["unit"].iloc[-1]) == "pct"
+
+
+def _latest(row: Row, bars: pd.DataFrame) -> tuple[float, date] | None:
+    """The latest value and its ET date: the report's (may be intraday), else the last close."""
+    if row.change is not None:
+        return row.change.last.value, et_date(row.change.last.as_of)
+    if bars.empty:
+        return None
+    return float(bars["close"].iloc[-1]), bars["d"].iloc[-1].date()
+
+
+def _bar_prov(bars: pd.DataFrame, what: str, since: date | None = None) -> Provenance:
+    used = bars if since is None else bars[bars["d"].dt.date >= since]
+    used = used if not used.empty else bars
+    tier = int(used["tier"].max())
+    src = ", ".join(sorted({str(s) for s in used["source"]}))
+    a, b = used["d"].iloc[0], used["d"].iloc[-1]
+    span = f"{b:%d %b}" if a == b else f"{a:%d %b} – {b:%d %b}"
+    return Provenance(src, tier, span, what)
+
+
+def _move(now: float, then: float, yields: bool) -> tuple[float, str]:
+    """A change in basis points for yields, in percent otherwise."""
+    if yields:
+        return (now - then) * 100, "bp"
+    return ((now / then) - 1) * 100 if then else 0.0, "%"
+
+
+def _utc(ts: object) -> datetime:
+    """A stored timestamp as an aware UTC datetime (DuckDB may hand back naive UTC)."""
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.to_pydatetime()  # type: ignore[no-any-return]
+
+
+def _need(n_need: int, n_have: int) -> str:
+    return (
+        f'<span class="db-unavailable" title="needs {n_need} days of history, '
+        f'the store holds {n_have}">needs {n_need}d</span>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# performance over horizons
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Horizon:
+    label: str
+    html: str  # a value_cell, or a "needs" note
+
+
+def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
+    """1D from the report (with its basis); longer horizons against the close on or before the
+    horizon's start. Never extrapolated: too little history says so."""
+    out: list[Horizon] = []
+    latest = _latest(row, bars)
+    if row.change is not None and row.change.change is not None and row.change_text:
+        last = row.change.last
+        p = Provenance(
+            last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", f"change vs {row.basis}"
+        )
+        text = row.change_text
+        cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
+        out.append(Horizon("1D", f'<span class="{cls}">{value_cell(text, p, compact=True)}</span>'))
+    else:
+        out.append(Horizon("1D", '<span class="db-unavailable">no change yet</span>'))
+    if latest is None or bars.empty:
+        return out + [Horizon(lab, '<span class="db-unavailable">no history</span>')
+                      for lab, _ in HORIZONS]  # fmt: skip
+    value, day = latest
+    yields = _is_yield(bars)
+    first = bars["d"].iloc[0].date()
+    for label, days in HORIZONS:
+        start = date(day.year - 1, 12, 31) if days is None else day - timedelta(days=days)
+        before = bars[bars["d"].dt.date <= start]
+        if first > start or before.empty:
+            need = (day - start).days
+            out.append(Horizon(label, _need(need, (day - first).days)))
+            continue
+        base = before.iloc[-1]
+        chg, unit = _move(value, float(base["close"]), yields)
+        p = Provenance(
+            str(base["source"]),
+            int(base["tier"]),
+            f"{base['d']:%d %b %Y}",
+            f"change since the {base['field']} of {base['d']:%d %b %Y}",
+        )
+        text = _signed(chg, unit)
+        cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
+        out.append(
+            Horizon(label, f'<span class="{cls}">{value_cell(text, p, compact=True)}</span>')
+        )
+    return out
+
+
+def horizons_html(items: list[Horizon]) -> str:
+    cells = "".join(
+        f'<div class="db-hz"><span class="db-hz-label">{escape(h.label)}</span>{h.html}</div>'
+        for h in items
+    )
+    return f'<div class="db-hzs" aria-label="performance over horizons">{cells}</div>'
+
+
+# ---------------------------------------------------------------------------
+# risk and range
+# ---------------------------------------------------------------------------
+
+
+def _moves(bars: pd.DataFrame) -> pd.Series:
+    closes = bars["close"].astype(float)
+    if _is_yield(bars):
+        return closes.diff().dropna() * 100  # bp
+    return (closes.apply(math.log).diff().dropna()) * 100  # log return in %
+
+
+def _num(v: float, unit: str) -> str:
+    if unit == "pct":
+        return f"{v:.2f}%"
+    return f"{v:,.2f}" if abs(v) >= 10 else f"{v:,.4f}"
+
+
+def risk_html(row: Row, bars: pd.DataFrame) -> str:
+    """Realised vol, today's move in sigmas, max drawdown and the 52-week range, honestly."""
+    if bars.empty:
+        return '<div class="db-empty">No daily history yet.</div>'
+    yields = _is_yield(bars)
+    unit = str(bars["unit"].iloc[-1])
+    moves = _moves(bars)
+    n = len(moves)
+    facts: list[tuple[str, str]] = []
+    if n >= VOL_DAYS:
+        vol = float(moves.tail(VOL_DAYS).std()) * math.sqrt(252)
+        text = f"{vol:,.0f} bp" if yields else f"{vol:.1f}%"
+        p = _bar_prov(bars.tail(VOL_DAYS + 1), f"{VOL_DAYS}-day realised volatility, annualised")
+        facts.append(("Realised vol 20d", value_cell(text, p)))
+    else:
+        facts.append(("Realised vol 20d", _need(VOL_DAYS + 1, n + 1)))
+    latest = _latest(row, bars)
+    if latest is not None and n >= SIGMA_MIN_DAYS:
+        value, day = latest
+        last_close = float(bars["close"].iloc[-1])
+        intraday = day > bars["d"].iloc[-1].date()
+        today = _move(value, last_close, yields)[0] if intraday else float(moves.iloc[-1])
+        hist = moves if intraday else moves.iloc[:-1]
+        sd = float(hist.tail(60).std())
+        if sd > 0:
+            p = _bar_prov(
+                bars.tail(61),
+                f"latest move in standard deviations of {len(hist.tail(60))} daily moves",
+            )
+            facts.append(("Latest move", value_cell(f"{today / sd:+.1f}σ".replace("-", _MINUS), p)))
+    else:
+        facts.append(("Latest move", _need(SIGMA_MIN_DAYS + 1, n + 1)))
+    if not yields and len(bars) >= 2:
+        closes = bars["close"].astype(float)
+        dd = float((closes / closes.cummax() - 1).min()) * 100
+        p = _bar_prov(bars, "largest fall from a high, daily closes")
+        facts.append(("Max drawdown", value_cell(_signed(dd, "%"), p)))
+    year = bars[bars["d"] >= bars["d"].iloc[-1] - pd.Timedelta(days=365)]
+    hi, lo = float(year["close"].max()), float(year["close"].min())
+    days = (year["d"].iloc[-1] - year["d"].iloc[0]).days
+    label = "52-week range" if days >= 360 else f"Range, {len(year)} days"
+    p = _bar_prov(year, f"lowest and highest daily {year['field'].iloc[-1]}")
+    facts.append((label, value_cell(f"{_num(lo, unit)} – {_num(hi, unit)}", p)))
+    body = "".join(f"<tr><th>{escape(k)}</th><td>{v}</td></tr>" for k, v in facts)
+    bar = ""
+    if latest is not None and hi > lo:
+        pos = min(1.0, max(0.0, (latest[0] - lo) / (hi - lo)))
+        bar = (
+            f'<div class="db-range" role="img" aria-label="latest value at {pos:.0%} of the '
+            f'range"><span style="left:calc({pos * 100:.1f}% - 1px)"></span></div>'
+        )
+    return f'<table class="db-dl">{body}</table>{bar}'
+
+
+# ---------------------------------------------------------------------------
+# every value we hold
+# ---------------------------------------------------------------------------
+
+
+def _where(config: Config) -> str:
+    s = config.storage
+    return s.bucket if s.backend == "r2" else s.local_root
+
+
+def _tiers_sql(hidden: frozenset[int]) -> str:
+    return ", ".join(str(int(t)) for t in (1, 2, 3) if t not in hidden) or "0"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _all_values(
+    _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
+) -> pd.DataFrame:
+    with data.shared_connection(_config) as conn:
+        return conn.execute(
+            "SELECT source, dataset, symbol, field, interval, tier, value, unit, as_of, "  # noqa: S608 (tiers are ints)
+            "ingested_at, fetch_id, is_fallback, is_derived FROM obs_pit(?) "
+            f"WHERE instrument_id = ? AND tier IN ({_tiers_sql(hidden)}) "
+            "QUALIFY row_number() OVER (PARTITION BY source, dataset, field, interval "
+            "ORDER BY as_of DESC, ingested_at DESC) = 1 "
+            "ORDER BY tier DESC, field, source, interval",
+            [_now, iid],
+        ).fetchdf()
+
+
+_FIELD_TEXT = {"last": "last trade", "close": "close", "open": "open", "high": "high",
+               "low": "low", "volume": "volume", "yield": "yield", "rate": "rate"}  # fmt: skip
+_INTERVAL_TEXT = {"tick": "quote", "1m": "1-minute bar", "1d": "daily", "1mo": "monthly"}
+
+
+def _age(seconds: float) -> str:
+    m = max(0, int(seconds // 60))
+    if m < 60:
+        return f"{m}m ago"
+    if m < 48 * 60:
+        return f"{m // 60}h ago"
+    return f"{m // 1440}d ago"
+
+
+def _value_text(v: float, unit: str, field: str) -> str:
+    if field == "volume" or unit == "shares":
+        return f"{v:,.0f}"
+    if unit == "pct":
+        return f"{v:.3f}%"
+    return f"{v:,.4f}".rstrip("0").rstrip(".") if abs(v) < 10 else f"{v:,.2f}"
+
+
+def all_values_html(
+    config: Config, iid: str, hidden: frozenset[int], now: datetime
+) -> tuple[str, int]:
+    """One line per source, dataset, field and interval: value, as of, fetched. (html, count)"""
+    df = _all_values(config, _where(config), iid, hidden, now)
+    if df.empty:
+        return '<div class="db-empty">No values stored for this instrument.</div>', 0
+    rows = []
+    for r in df.itertuples():
+        as_of = to_et(_utc(r.as_of))
+        fetched = _utc(r.ingested_at)
+        field = _FIELD_TEXT.get(str(r.field), str(r.field))
+        daily = str(r.interval) in ("1d", "1mo")  # a day's value has a date, not a time
+        when = f"{as_of:%d %b %Y}" if daily else f"{as_of:%d %b %H:%M}"
+        p = Provenance(
+            str(r.source), int(r.tier), when, field,
+            f"as of {when}{'' if daily else ' ET'}; fetched {to_et(fetched):%d %b %H:%M} ET",
+        )  # fmt: skip
+        text = _value_text(float(r.value), str(r.unit), str(r.field))
+        flags = " · fallback" if r.is_fallback else ""
+        flags += " · derived" if r.is_derived else ""
+        rows.append(
+            f"<tr><td>{escape(field)}<span class='db-tagline'>"
+            f"{escape(_INTERVAL_TEXT.get(str(r.interval), str(r.interval)))}{flags}</span></td>"
+            f"<td class='num'>{value_cell(text, p, compact=True)}</td>"
+            f"<td>{escape(str(r.source))}<span class='db-tagline'>{escape(str(r.dataset))}"
+            f" · {escape(str(r.symbol))}</span></td>"
+            f"<td class='num'>{when}<span class='db-tagline'>"
+            f"fetched {_age((now - fetched).total_seconds())}</span></td></tr>"
+        )
+    head = (
+        "<thead><tr><th>Field</th><th class='num'>Value</th><th>Source</th>"
+        "<th class='num'>As of (ET)</th></tr></thead>"
+    )
+    return f'<table class="db-table db-values">{head}<tbody>{"".join(rows)}</tbody></table>', len(
+        df
+    )
+
+
+# ---------------------------------------------------------------------------
+# source agreement and corrections
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _xchecks(_config: Config, where: str, iid: str, today: date) -> pd.DataFrame:
+    with data.shared_connection(_config) as conn:
+        return conn.execute(
+            "SELECT check_name, target_date, status, diff_bps, warn_bps, fail_bps, "
+            "left_instrument, left_source, right_instrument, right_source, details_json "
+            "FROM xchecks WHERE (left_instrument = ? OR right_instrument = ?) "
+            "AND target_date > ? ORDER BY target_date, at_time",
+            [iid, iid, today - timedelta(days=XCHECK_DAYS)],
+        ).fetchdf()
+
+
+_STATUS_MARK = {"pass": "✓", "warn": "!", "fail": "✕", "skip": "–"}
+
+
+def agreement_html(config: Config, iid: str, hidden: frozenset[int], today: date) -> str:
+    """Each cross-check naming the instrument: the last 14 days as marks, the latest gap."""
+    df = _xchecks(config, _where(config), iid, today)
+    exposed = exposed_sources(config, hidden)
+    if not df.empty and exposed:
+        df = df[~(df["left_source"].isin(exposed) | df["right_source"].isin(exposed))]
+    df = df[df["status"] != "skip"] if not df.empty else df
+    if df.empty:
+        return f'<div class="db-empty">No cross-checks in the last {XCHECK_DAYS} days.</div>'
+    lines = []
+    for name, g in df.groupby("check_name", sort=False):
+        marks = "".join(
+            f'<span class="db-st-{escape(str(s))}" title="{r.target_date:%d %b}: {escape(str(s))}">'
+            f"{_STATUS_MARK.get(str(s), '?')}</span>"
+            for r, s in zip(g.itertuples(), g["status"], strict=True)
+        )
+        last = g.iloc[-1]
+        gap = (
+            f"{last['diff_bps']:+.1f} bp (warn {last['warn_bps']:g})"
+            if pd.notna(last["diff_bps"])
+            else "no gap"
+        )
+        pair = f"{last['left_source']} vs {last['right_source']}"
+        lines.append(
+            f"<div><span>{escape(str(name).replace('_', ' '))}"
+            f'<span class="db-note"> · {escape(pair)}</span></span>'
+            f'<span class="db-marks">{marks}</span></div>'
+            f'<div class="db-note db-gapline">latest gap {escape(gap)}</div>'
+        )
+    return f'<div class="db-checks">{"".join(lines)}</div>'
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _revisions(
+    _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
+) -> pd.DataFrame:
+    with data.shared_connection(_config) as conn:
+        return conn.execute(
+            "SELECT source, field, interval, as_of, count(*) AS versions, "  # noqa: S608 (tiers are ints)
+            "arg_min(value, ingested_at) AS first_value, arg_max(value, ingested_at) AS "
+            "last_value, max(ingested_at) AS revised_at, max(unit) AS unit, max(tier) AS tier "
+            "FROM obs_all "
+            f"WHERE instrument_id = ? AND tier IN ({_tiers_sql(hidden)}) AND as_of > ? "
+            "AND ingested_at <= ? GROUP BY source, dataset, field, interval, as_of "
+            "HAVING count(DISTINCT value) > 1 ORDER BY revised_at DESC LIMIT 20",
+            [iid, _now - timedelta(days=REVISION_DAYS), _now],
+        ).fetchdf()
+
+
+def revisions_html(config: Config, iid: str, hidden: frozenset[int], now: datetime) -> str:
+    df = _revisions(config, _where(config), iid, hidden, now)
+    if df.empty:
+        return f'<div class="db-empty">No corrections in the last {REVISION_DAYS} days.</div>'
+    lines = []
+    for r in df.itertuples():
+        as_of = to_et(_utc(r.as_of))
+        at = to_et(_utc(r.revised_at))
+        unit, field = str(r.unit), str(r.field)
+        p_old = Provenance(str(r.source), int(r.tier), f"{as_of:%d %b}", f"first reported {field}")
+        p_new = Provenance(
+            str(r.source), int(r.tier), f"{as_of:%d %b}", f"{field} as revised {at:%d %b %H:%M}"
+        )
+        old = value_cell(_value_text(float(r.first_value), unit, field), p_old, compact=True)
+        new = value_cell(_value_text(float(r.last_value), unit, field), p_new, compact=True)
+        lines.append(
+            f"<div><span>{escape(field)} of {as_of:%d %b}"
+            f'<span class="db-note"> · {escape(str(r.source))} · {r.versions} versions'
+            f"</span></span><span>{old} → {new}</span></div>"
+        )
+    return f'<div class="db-checks">{"".join(lines)}</div>'
+
+
+def tier_names(bars: pd.DataFrame) -> str:
+    return " ".join(
+        f"{TIER_GLYPH[int(t)]} {TIER_NAME[int(t)]}" for t in sorted(bars["tier"].unique())
+    )

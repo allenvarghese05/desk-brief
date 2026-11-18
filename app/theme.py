@@ -93,7 +93,7 @@ div[data-testid="stTextInput"] input {{ font-family: {SANS}; font-size: .9rem;
 .db-move + .db-move::before {{ content: "·"; color: {MUTED}; margin-right: .6rem; }}
 
 /* ---- panels: keyed Streamlit containers ---- */
-.st-key-db-watch, .st-key-db-chart, .st-key-db-detail, .st-key-db-overview {{
+.st-key-db-watch, .st-key-db-chart, .st-key-db-detail, .st-key-db-overview, .st-key-db-values {{
   background: {PANEL}; border: 1px solid {RULE}; border-radius: 10px; padding: .8rem .9rem; }}
 
 /* ---- watchlist ---- */
@@ -129,6 +129,24 @@ details.db-more[open] summary::before {{ content: "\\2212  "; }}
 .db-ch .db-meta {{ display: block; margin-top: .15rem; }}
 .db-ch-foot {{ color: {MUTED}; font-size: .76rem; margin-top: .2rem; }}
 div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
+
+/* ---- performance over horizons ---- */
+.db-hzs {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .4rem;
+  margin: .55rem 0 .65rem 0; }}
+.db-hz {{ background: {CANVAS}; border: 1px solid {RULE}; border-radius: 6px;
+  padding: .35rem .5rem; font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.db-hz-label {{ display: block; color: {MUTED}; font-size: .66rem; font-weight: 600;
+  letter-spacing: .07em; }}
+.db-hz .db-fig {{ display: block; text-align: left; }}
+.db-hz .db-unavailable {{ font-size: .78rem; font-weight: 400; }}
+@media (max-width: 900px) {{ .db-hzs {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }} }}
+
+/* ---- every value we hold ---- */
+.db-values td {{ font-size: .84rem; }}
+.db-values .db-fig {{ text-align: right; }}
+.db-marks {{ letter-spacing: .15rem; font-weight: 600; }}
+.db-gapline {{ border-bottom: 1px solid {RULE}; padding: 0 0 .3rem 0; margin-top: -.15rem; }}
+.db-checks .db-gapline {{ display: block; }}
 
 /* ---- overview: small multiples ---- */
 .db-ov {{ display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; }}

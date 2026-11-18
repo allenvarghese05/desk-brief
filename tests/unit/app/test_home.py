@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -261,7 +262,7 @@ def test_query_param_selects_an_instrument(run_home: Run) -> None:
     assert len(sel) == 1
     assert "4.37%" in sel[0]
     assert '<span class="db-ch-name">10Y</span>' in text
-    assert "Tier ladder" in text
+    assert "Do the sources agree?" in text
 
 
 def test_unknown_query_param_falls_back_to_the_default(run_home: Run) -> None:
@@ -280,10 +281,10 @@ def test_single_search_match_selects_it(run_home: Run) -> None:
 
 def test_ladder_uses_p009_labels(run_home: Run) -> None:
     text = page(select(run_home("local"), "UST_10Y"))
-    ladder = text.split("Tier ladder", 1)[1]
+    ladder = text.split("Do the sources agree?", 1)[1]
     assert 'db-field">yield<' in ladder
     assert 'db-field">close<' not in ladder  # a yield is not a close
-    eur = page(select(run_home("local"), "EURUSD")).split("Tier ladder", 1)[1]
+    eur = page(select(run_home("local"), "EURUSD")).split("Do the sources agree?", 1)[1]
     assert "ECB reference rate" in eur
 
 
@@ -296,10 +297,10 @@ def test_hosted_details_never_show_tier1(run_home: Run) -> None:
 
 def test_local_details_show_every_tier_and_checks(run_home: Run) -> None:
     text = page(select(run_home("local"), "SPY"))
-    ladder = text.split("Tier ladder", 1)[1]
+    ladder = text.split("Do the sources agree?", 1)[1]
     assert "alpaca" in ladder
     assert "live" in ladder
-    assert "Checks, last 14 days" in text
+    assert "Data checks, last 14 days" in text
 
 
 def test_hosted_bars_never_read_tier1(run_home: Run) -> None:
@@ -349,3 +350,75 @@ def test_candles_need_a_consistent_open_high_low() -> None:
     spec = chart.price_chart(bare, style=chart.CANDLES, last=4.1).to_dict()
     assert "vconcat" in spec or "layer" in spec
     assert len(chart.window(good, "1M")) == 3
+
+
+# --- T36 phase 1: tearsheet -------------------------------------------------------------------
+
+
+def test_tearsheet_lists_every_value_we_hold_with_as_of_and_fetch_age(run_home: Run) -> None:
+    text = page(select(run_home("local"), "UST_10Y"))
+    assert "Every value we hold" in text
+    table = text.split("Every value we hold", 1)[1].split("</table>", 1)[0]
+    assert "treasury" in table  # the official yield
+    assert "yahoo" in table  # and the delayed quote
+    assert "fetched" in table
+    for cell in re.findall(r'<span class="db-fig".*?</span></span>', table, flags=re.S):
+        assert "db-src" in cell
+        assert "db-field" in cell
+
+
+def test_hosted_tearsheet_never_shows_tier1_values(run_home: Run) -> None:
+    text = page(select(run_home("hosted"), "SPY"), limits=False)
+    table = text.split("Every value we hold", 1)[1].split("</table>", 1)[0]
+    assert "alpaca" not in table
+    assert "600.00" not in table
+
+
+def test_horizons_say_how_much_history_they_need(run_home: Run) -> None:
+    text = page(select(run_home("hosted"), "UST_10Y"))
+    strip = text.split('aria-label="performance over horizons"', 1)[1].split("</div></div>", 1)[0]
+    for label in ("1D", "1W", "1M", "3M", "YTD", "1Y"):
+        assert f">{label}<" in strip
+    assert "needs" in strip  # the synthetic store holds days, not a year
+
+
+def test_risk_panel_needs_twenty_days_before_volatility(run_home: Run) -> None:
+    text = page(select(run_home("hosted"), "UST_10Y"))
+    risk = text.split("Risk and range", 1)[1]
+    assert "Realised vol 20d" in risk
+    assert "needs 21d" in risk
+
+
+def test_rebased_comparison_starts_both_series_at_100() -> None:
+    import pandas as pd
+    from app.components import chart
+
+    days = pd.to_datetime(["2026-11-10", "2026-11-11", "2026-11-12"])
+    a = pd.DataFrame({"d": days, "close": [50.0, 55.0, 60.0]})
+    b = pd.DataFrame({"d": days[1:], "close": [200.0, 180.0]})
+    long = chart.rebased(a, b, "A", "B")
+    first = long[long["d"] == days[1]].set_index("series")["index"]
+    assert first["A"] == 100.0
+    assert first["B"] == 100.0
+    assert long[(long["series"] == "B") & (long["d"] == days[2])]["index"].iloc[0] == 90.0
+    assert chart.rebased(a, b.head(0), "A", "B").empty
+
+
+def test_corrections_show_both_versions(run_home: Run) -> None:
+    from brief_synth import FRI, MON_0700
+
+    old = daily("UST_2Y", FRI, 4.10, source="treasury", dataset="par_curve", field="yield",
+                unit="pct", ingested_at=MON_0700 - timedelta(hours=30))  # fmt: skip
+    new = daily("UST_2Y", FRI, 4.18, source="treasury", dataset="par_curve", field="yield",
+                unit="pct", ingested_at=MON_0700 - timedelta(hours=2))  # fmt: skip
+    rows = [
+        r
+        for r in monday_rows()
+        if not (r["instrument_id"] == "UST_2Y" and r["as_of"] == old["as_of"])
+    ]
+    at = select(run_home("hosted", rows=[*rows, old, new]), "UST_2Y")
+    text = page(at)
+    corr = text.split("Corrections, last 30 days", 1)[0]
+    assert "2 versions" in corr
+    assert "4.100%" in corr
+    assert "4.180%" in corr

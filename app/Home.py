@@ -27,7 +27,7 @@ for path in (ROOT, ROOT / "src"):  # `app` is a plain folder; src/ covers a non-
         sys.path.insert(0, str(path))
 
 from app import theme  # noqa: E402
-from app.components import chart, data, instrument, panels  # noqa: E402
+from app.components import chart, data, instrument, panels, tearsheet  # noqa: E402
 
 from deskbrief.config import Config, load_config  # noqa: E402
 from deskbrief.report.model import Row  # noqa: E402
@@ -80,14 +80,19 @@ def _watchlist(ov: data.Overview, query: str, sel: str, keep: dict[str, str]) ->
     _html(st, panels.watchlist(found, ov.as_of, sel, keep, fold_proxies=False))
 
 
+NO_COMPARE = "Compare with…"
+
+
 def _chart(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -> pd.DataFrame:
-    """Header, range and style controls, the price chart and its caption; returns the bars."""
+    """Header, performance over horizons, controls, the chart and its caption; returns all
+    daily bars of the instrument (the risk panel needs more than the range in view)."""
     _html(st, panels.chart_header(row, ov.as_of))
     bars = data.load_bars(config, row.instrument_id, hidden)
+    _html(st, tearsheet.horizons_html(tearsheet.horizons(row, bars)))
     if bars.empty:
         _html(st, '<div class="db-empty">No daily history for this instrument yet.</div>')
         return bars
-    c1, c2 = st.columns([3, 2], vertical_alignment="center")
+    c1, c2, c3, c4 = st.columns([2.6, 1.6, 2.2, 1.4], vertical_alignment="center")
     rng = (
         c1.segmented_control("Range", list(chart.RANGES), key="rng", label_visibility="collapsed")
         or chart.DEFAULT_RANGE
@@ -99,26 +104,80 @@ def _chart(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) 
         if len(styles) > 1
         else chart.LINE
     ) or styles[0]
+    others = {
+        r.instrument_id: f"{panels.short(r)} · {r.name}"
+        for s in ov.sections
+        for r in s.rows
+        if r.available and r.instrument_id != row.instrument_id
+    }
+    vs = c3.selectbox(
+        "Compare with",
+        [NO_COMPARE, *others],
+        format_func=lambda i: others.get(i, i),
+        key=f"vs-{row.instrument_id}",
+        label_visibility="collapsed",
+    )
     view = chart.window(bars, rng)
+    c4.download_button(
+        "Download CSV",
+        view.drop(columns=[c for c in ("ok",) if c in view]).to_csv(index=False),
+        file_name=f"{row.instrument_id}_daily.csv",
+        mime="text/csv",
+        width="stretch",
+    )
     last = row.change.last.value if row.change is not None else None
+    if vs != NO_COMPARE:
+        other = chart.window(data.load_bars(config, vs, hidden), rng)
+        long = chart.rebased(view, other, panels.short(row), others[vs].split(" · ")[0])
+        if long.empty:
+            _html(st, '<div class="db-empty">No common days to compare in this range.</div>')
+        else:
+            names = list(dict.fromkeys(long["series"]))
+            st.altair_chart(chart.compare_chart(long, names[0], names[1]), theme=None)
+            st.caption(
+                "Both series set to 100 on the first common day; dashed: "
+                f"{escape(others[vs])}. {chart.caption(view, latest_line=False)}"
+            )
+            return bars
     if len(view) < 2:
         _html(st, '<div class="db-empty">Fewer than two days in this range.</div>')
     else:
         st.altair_chart(chart.price_chart(view, style=style, last=last), theme=None)
     st.caption(chart.caption(view))
-    return view
+    return bars
+
+
+def _values(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -> None:
+    body, n = tearsheet.all_values_html(config, row.instrument_id, hidden, ov.as_of)
+    _html(
+        st,
+        f'<div class="db-kicker">Every value we hold · {n} '
+        f"{'line' if n == 1 else 'lines'}</div>"
+        '<div class="db-note" style="margin-bottom:.4rem">Latest value per source, dataset, '
+        "field and interval: when it was true (as of) and when we fetched it. Hover a value "
+        "for its full trail.</div>" + body,
+    )
 
 
 def _details(config: Config, ov: data.Overview, row: Row, bars: pd.DataFrame,
              hidden: frozenset[int]) -> None:  # fmt: skip
-    _html(st, '<div class="db-kicker">Details</div>' + panels.details(row, bars, ov.as_of))
+    today = et_date(ov.as_of)
     rows = instrument.ladder(config, row.instrument_id, hidden, ov.as_of)
-    _html(st, '<div class="db-kicker">Tier ladder</div>' + instrument.ladder_html(rows))
+    _html(
+        st,
+        '<div class="db-kicker">Do the sources agree?</div>'
+        + instrument.ladder_html(rows)
+        + '<div class="db-kicker">Cross-checks, last 14 days</div>'
+        + tearsheet.agreement_html(config, row.instrument_id, hidden, today),
+    )
+    _html(st, '<div class="db-kicker">Risk and range</div>' + tearsheet.risk_html(row, bars))
     if rows:
         with st.expander("Lineage: source, fetch and raw file"):
             _html(st, instrument.lineage_html(config, rows[0]))
-    with st.expander(f"Checks, last {instrument.CHECK_DAYS} days"):
-        _html(st, instrument.checks_html(config, row.instrument_id, hidden, et_date(ov.as_of)))
+    with st.expander(f"Data checks, last {instrument.CHECK_DAYS} days"):
+        _html(st, instrument.checks_html(config, row.instrument_id, hidden, today))
+    with st.expander(f"Corrections, last {tearsheet.REVISION_DAYS} days"):
+        _html(st, tearsheet.revisions_html(config, row.instrument_id, hidden, ov.as_of))
     _html(st, '<div class="db-kicker">Yield curve · official</div>' + panels.yield_curve(ov))
 
 
@@ -174,6 +233,9 @@ def main() -> None:
                 bars = _chart(config, ov, rows[sel], hidden)
             else:
                 _html(st, '<div class="db-empty">No instruments to chart yet.</div>')
+        if sel:
+            with st.container(key="db-values"):
+                _values(config, ov, rows[sel], hidden)
         with st.container(key="db-overview"):
             _html(st, '<div class="db-kicker">Market overview · last 30 days</div>')
             _html(st, panels.overview(ov, sel, keep))
