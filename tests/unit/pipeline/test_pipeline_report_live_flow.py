@@ -51,13 +51,20 @@ def test_report_diagnostic_counts_are_logged(tmp_path: Path) -> None:
         run_job(env, JobKind.MORNING, target_date=MONDAY, trigger=Trigger.MANUAL)
     (diag,) = [e for e in logs if e["event"] == "report.diagnostic"]
     model = _model(env.store)
-    assert diag["clean_version"] == "v1"
-    assert diag["obs_files"] == 1
-    assert diag["obs_rows_visible"] == 1
-    assert diag["rows_available"] == sum(r.available for r in model.rows()) >= 1
-    assert diag["rows_unavailable"] == sum(not r.available for r in model.rows())
-    assert all(isinstance(v, int | str) for v in diag.values() if v is not diag["event"])
-    assert "450" not in str({k: v for k, v in diag.items() if k != "timestamp"})  # counts only
+    rows = model.rows()
+    assert set(diag) == {
+        "event",
+        "log_level",
+        "run_id",
+        "clean_version",
+        "obs_files",
+        "obs_rows_visible",
+        "rows_available",
+        "rows_unavailable",
+    }
+    assert (diag["clean_version"], diag["obs_files"], diag["obs_rows_visible"]) == ("v1", 1, 1)
+    assert diag["rows_available"] == sum(r.available for r in rows) >= 1
+    assert diag["rows_unavailable"] == sum(not r.available for r in rows)
 
 
 def test_manifest_groups_check_failures_by_check_name_with_counts(tmp_path: Path) -> None:
@@ -95,3 +102,51 @@ def test_manifest_markdown_check_table_has_counts_and_names_only() -> None:
     assert "- dq fail `completeness` (source stooq): 12" in md
     assert "- dq warn `fresh`: 2" in md
     assert "- crosscheck fail `proxy_vs_exact`: 3" in md
+
+
+def test_check_issues_groups_by_kind_status_check_and_source() -> None:
+    import pandas as pd
+
+    from deskbrief.pipeline.clean import RunBuffer
+
+    def dq(check: str, status: str, source: str | None) -> dict[str, object]:
+        return {"check_name": check, "status": status, "source": source}
+
+    buf = RunBuffer()
+    for row in (
+        dq("completeness", "fail", "stooq"),
+        dq("completeness", "fail", "stooq"),
+        dq("completeness", "fail", "fred"),
+        dq("freshness", "fail", "stooq"),
+        dq("completeness", "pass", "stooq"),  # ignored
+        dq("fresh", "warn", None),
+    ):
+        buf.add("dq_results", row)  # type: ignore[arg-type]
+    buf.add_frame(  # the frame path used by the check hooks
+        "dq_results",
+        pd.DataFrame([dq("completeness", "fail", "stooq"), dq("validity", "skip", "x")]),
+    )
+    buf.add_frame(
+        "crosscheck_results",
+        pd.DataFrame(
+            [
+                {"check_name": "proxy_vs_exact", "status": "fail"},
+                {"check_name": "proxy_vs_exact", "status": "fail"},
+                {"check_name": "proxy_vs_exact", "status": "pass"},
+                {"check_name": "fx_vs_ecb", "status": "warn"},
+            ]
+        ),
+    )
+    got = [(i.kind, i.status, i.check, i.source, i.count) for i in buf.check_issues()]
+    assert got == [
+        ("dq", "fail", "completeness", "stooq", 3),
+        ("crosscheck", "fail", "proxy_vs_exact", None, 2),
+        (
+            "dq",
+            "fail",
+        )
+        + ("completeness", "fred", 1),
+        ("dq", "fail", "freshness", "stooq", 1),
+        ("crosscheck", "warn", "fx_vs_ecb", None, 1),
+        ("dq", "warn", "fresh", None, 1),
+    ]

@@ -281,9 +281,14 @@ def report_steps(
         duck = connect(ctx.store, ctx.config)
         try:
             model = BriefModel.from_store(duck, ctx.config, ctx.target_date, ctx.now_utc)
-            get_logger(run_id=ctx.run_id).info(
-                "report.diagnostic", **report_diagnostic(ctx.store, duck, model)
-            )
+            try:  # log-only: must never cost the report
+                get_logger(run_id=ctx.run_id).info(
+                    "report.diagnostic", **report_diagnostic(ctx.store, duck, model)
+                )
+            except Exception as exc:
+                get_logger(run_id=ctx.run_id).warning(
+                    "report.diagnostic_failed", error=redact(f"{type(exc).__name__}: {exc}")
+                )
         finally:
             duck.close()
         html = render_html(model)
