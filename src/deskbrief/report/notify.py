@@ -35,6 +35,8 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+import duckdb
+
 from deskbrief.logging import get_logger, redact, redact_text
 from deskbrief.models import RunContext, Trigger
 from deskbrief.report.excel import write_workbook
@@ -45,7 +47,9 @@ from deskbrief.store.backend import (
     KeyExistsError,
     StorageBackend,
     report_key,
+    table_prefix,
 )
+from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.duck import connect
 
 DEFAULT_SMTP_HOST = "smtp.gmail.com"
@@ -231,6 +235,24 @@ def archive_report(store: StorageBackend, report_date: date, files: Mapping[str,
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def report_diagnostic(
+    store: StorageBackend, duck: duckdb.DuckDBPyConnection, model: BriefModel
+) -> dict[str, int | str]:
+    """What the report's connection saw, as counts only (never values): the clean version, the
+    observation files and rows visible to it, and how many report rows came out available."""
+    version = current_clean_version(store)
+    files = [k for k in store.list(table_prefix("observations", version)) if k.endswith(".parquet")]
+    row = duck.execute("SELECT count(*) FROM obs_all").fetchone()
+    rows = model.rows()
+    return {
+        "clean_version": version,
+        "obs_files": len(files),
+        "obs_rows_visible": int(row[0]) if row else 0,
+        "rows_available": sum(r.available for r in rows),
+        "rows_unavailable": sum(not r.available for r in rows),
+    }
+
+
 def _workbook_bytes(model: BriefModel) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         return write_workbook(model, Path(tmp) / "brief.xlsx").read_bytes()
@@ -259,6 +281,9 @@ def report_steps(
         duck = connect(ctx.store, ctx.config)
         try:
             model = BriefModel.from_store(duck, ctx.config, ctx.target_date, ctx.now_utc)
+            get_logger(run_id=ctx.run_id).info(
+                "report.diagnostic", **report_diagnostic(ctx.store, duck, model)
+            )
         finally:
             duck.close()
         html = render_html(model)
@@ -310,5 +335,6 @@ __all__ = [
     "SmtpSettings",
     "archive_report",
     "notifier_for",
+    "report_diagnostic",
     "report_steps",
 ]

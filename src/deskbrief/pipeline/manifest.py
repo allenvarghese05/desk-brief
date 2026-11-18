@@ -35,6 +35,17 @@ class SourceStats:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CheckIssue:
+    """``count`` failing or warning results of one check (names and counts only, never values)."""
+
+    kind: str  # dq | crosscheck
+    status: str  # fail | warn
+    check: str
+    source: str | None
+    count: int
+
+
 @dataclass
 class RunManifest:
     run_id: str
@@ -53,6 +64,7 @@ class RunManifest:
     n_obs: int = 0
     n_dq_fail: int = 0  # runner-emitted DQ rows only; rows written by check hooks (T20/T21)
     n_dq_warn: int = 0  # are not included (they belong to dq_results, not to this counter)
+    check_issues: list[CheckIssue] = field(default_factory=list)  # DQ + cross-check fail/warn
     storage_ok: int = 0
     storage_failed: int = 0
     flush_data_lost: bool = False  # a data table (observations, source_log, quarantine) failed
@@ -130,6 +142,14 @@ class RunManifest:
                 "",
                 f"Observations written: {self.n_obs} · DQ fail: {self.n_dq_fail} · "
                 f"DQ warn: {self.n_dq_warn}",
+            ]
+        if self.check_issues:
+            lines += ["", "Checks that failed or warned (number of results):"]
+            lines += [
+                f"- {i.kind} {i.status} `{i.check}`"
+                + (f" (source {i.source})" if i.source else "")
+                + f": {i.count}"
+                for i in self.check_issues
             ]
         lines += [f"- {n}" for n in self.notes]
         if self.catchup_runs:
