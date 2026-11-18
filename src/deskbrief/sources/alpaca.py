@@ -86,6 +86,17 @@ _PRICE_FIELDS = (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"))
 _TS = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})")
 
 
+def bar_symbols(config: Config, dataset: str) -> tuple[str, ...]:
+    """Symbols whose ``dataset`` bars the eod/backfill plan fetches.
+
+    Only ``crosschecks.iex_vs_sip.symbols`` that have a feed for ``dataset``: other configured
+    ``sip_bars_1m`` feeds (AAPL, MSFT, ...) are never fetched, so the completeness check must
+    not expect them (T25c: they failed on every run).
+    """
+    index = config.feed_index("alpaca", dataset)
+    return tuple(s for s in config.crosschecks.iex_vs_sip.symbols if s in index)
+
+
 class AlpacaSource:
     name = "alpaca"
     parser_version = "1"
@@ -127,10 +138,11 @@ class AlpacaSource:
             log.info("alpaca.plan.closed", target_date=ctx.target_date.isoformat())
             return []
         start, end = bounds
-        wanted = self.config.crosschecks.iex_vs_sip.symbols
         requests: list[FetchRequest] = []
         for dataset, feed in BARS_DATASETS.items():
-            symbols = tuple(s for s in wanted if s in self._indexes[dataset])
+            symbols = tuple(
+                s for s in bar_symbols(self.config, dataset) if s in self._indexes[dataset]
+            )
             if not symbols:
                 continue
             window_end = end

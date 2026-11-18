@@ -227,6 +227,26 @@ def test_parse_quote_batch(src: TwelveDataSource) -> None:
     assert eur["as_of"] == datetime(2026, 11, 13, 13, 15, tzinfo=UTC)
 
 
+def test_parse_quote_as_of_prefers_last_quote_at_over_interval_open(
+    src: TwelveDataSource,
+) -> None:
+    """T25c: ``timestamp`` is the opening of the 1day candle, so two polls of one day shared an
+    as_of and every new close became a revision. ``last_quote_at`` is the quote instant."""
+    day_open = int(datetime(2026, 11, 13, tzinfo=UTC).timestamp())
+    polls = []
+    for minute in (15, 30):
+        quote_at = int(datetime(2026, 11, 13, 15, minute, tzinfo=UTC).timestamp())
+        doc = {"EUR/USD": {"symbol": "EUR/USD", "timestamp": day_open,
+                           "last_quote_at": quote_at, "close": f"1.08{minute}"}}  # fmt: skip
+        df = src.parse(raw_for("fx_quote", json.dumps(doc).encode()))
+        polls.append(df[df["field"] == "last"].iloc[0]["as_of"])
+    assert polls == [
+        datetime(2026, 11, 13, 15, 15, tzinfo=UTC),
+        datetime(2026, 11, 13, 15, 30, tzinfo=UTC),
+    ]
+    assert src.parser_version != "1"  # outputs changed: a rebuild must not mix the two
+
+
 def test_parse_quote_emits_bid_ask_only_when_present(src: TwelveDataSource) -> None:
     df = src.parse(quote_raw())
     extra = df[df["field"].isin(["bid", "ask"])]

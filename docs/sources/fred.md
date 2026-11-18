@@ -73,6 +73,9 @@ out of the repo unless confirmed redistributable):
    (the client reports it as `HTTP 400`); the response and `url_redacted` must not contain the key.
 8. Lag: when each daily series (DGS*, DFF, DCOIL*) is published, to check the `freshness`
    entry for FRED in `config.yaml` (`expected_by_et: 16:30`, `lag_bdays: 1`, SIFMA_US).
+   T25c: DCOIL* come from EIA's weekly spot-price release, so completeness judges them on
+   `SeriesSpec.lag_bdays` (`OIL_LAG_BDAYS = 8`), not the dataset's 1 day; live run 3 failed
+   both on the 1-day lag. Confirm the release day and tighten the value here.
 9. Rate: 9 requests per run stay far below the configured `rate_per_min: 100`.
 
 Record the date, HTTP statuses and any surprises in the PR and update this file.

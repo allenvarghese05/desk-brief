@@ -91,15 +91,20 @@ def test_grace_boundary_is_the_same_for_freshness_and_completeness(  # type: ign
     ("pub_day", "wti", "brent", "ust"),
     [
         (WED, S.FAIL, S.FAIL, S.FAIL),  # ordinary day: missing oil fails like any series
-        (date(2026, 4, 6), S.SKIP, S.SKIP, S.WARN),  # data day Good Friday: oil shut, early close
-        (date(2026, 4, 7), S.FAIL, S.SKIP, S.FAIL),  # data day Easter Monday: only Brent shut
+        (date(2026, 4, 6), None, None, S.WARN),  # UST data day Good Friday: early close
+        # T25c: oil is judged OIL_LAG_BDAYS (8) SIFMA days back, so these publication days
+        # put the oil data day on Good Friday (both shut) and Easter Monday (only Brent shut)
+        (date(2026, 4, 15), S.SKIP, S.SKIP, S.FAIL),
+        (date(2026, 4, 16), S.FAIL, S.SKIP, S.FAIL),
     ],
 )
 def test_fred_oil_skipped_when_oil_market_closed(store, config, pub_day, wti, brent, ust) -> None:  # type: ignore[no-untyped-def]
     ctx = ctx_at(config, store, ET_NOW(pub_day, "23:00"))
     res = find(CompletenessCheck().evaluate(ctx, duck_for(store, config)), source="fred")
     by = {r.instrument_id: r for r in res}
-    assert (by["WTI"].status, by["BRENT"].status, by["UST_10Y"].status) == (wti, brent, ust)
+    assert by["UST_10Y"].status == ust
+    if wti is not None:
+        assert (by["WTI"].status, by["BRENT"].status) == (wti, brent)
     for oil in (by["WTI"], by["BRENT"]):
         if oil.status is S.SKIP:
             assert oil.details["reason"] == "oil market closed"
