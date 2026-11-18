@@ -35,13 +35,10 @@ Key and budget
 ``fetch`` reads ``TWELVEDATA_API_KEY`` and passes it ONLY as ``secret_params={"apikey": ...}``.
 A missing key returns an error ``RawResponse`` (no HTTP call, ``http_status=None``).
 
-Twelve Data bills one credit **per symbol** (a 3-pair batch costs 3), but the T03 tracker reserves
-one unit per HTTP attempt and ``HttpClient.get`` has no weight argument, so a batch is tracked as
-1 unit and the daily count under-reports real use by up to ``len(symbols)``. Closing that gap needs
-a contract change (see ``docs/sources/twelvedata.md``); until then :func:`credits_for` states the
-real cost per request for the runner/reporting, and the configured ``daily_budget`` (750 of the
-provider's 800) leaves headroom. Exhausted budget gives ``BUDGET_EXHAUSTED`` with no HTTP call
-(done by the client).
+Twelve Data bills one credit **per symbol** (a 3-pair batch costs 3). :func:`credits_for` states
+that cost and ``fetch`` passes it as ``units=`` to ``HttpClient.get``, so the daily budget counts
+one unit per symbol. A batch larger than the remaining budget gives ``BUDGET_EXHAUSTED`` with no
+HTTP call (done by the client); the configured ``daily_budget`` is 750 of the provider's 800.
 
 Payloads are SYNTHETIC in tests until the owner's live probe (``docs/sources/twelvedata.md``).
 """
@@ -169,7 +166,9 @@ class TwelveDataSource:
                 status=FetchStatus.ERROR,
             )
         url = SERIES_ENDPOINT if req.dataset == "fx_series_1m" else QUOTE_ENDPOINT
-        raw = http.get(req, url, params=req.params, secret_params={"apikey": key})
+        raw = http.get(
+            req, url, params=req.params, secret_params={"apikey": key}, units=credits_for(req)
+        )
         return _flag_payload_error(raw, key)
 
     # -- parse ----------------------------------------------------------------------------
