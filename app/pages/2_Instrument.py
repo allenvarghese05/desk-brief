@@ -17,8 +17,8 @@ for _p in (ROOT, ROOT / "src"):
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 from app.components import data  # noqa: E402
+from app.components import kit as _kit  # noqa: E402
 from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell  # noqa: E402
-from app.pages import _kit  # noqa: E402
 
 from deskbrief.query import Lineage, ValueRow, field_label, latest_snapshot, lineages  # noqa: E402
 from deskbrief.timeutil import et_date, to_et  # noqa: E402
@@ -92,9 +92,15 @@ names = dict(zip(snap["instrument_id"], snap["name"], strict=True)) if not snap.
 if not names:
     st.markdown("No instruments to show yet.")
     st.stop()
+options = sorted(names)
+wanted = st.query_params.get("id")  # set by a click or a search on the Overview
+if wanted in names and st.session_state.get("_instrument_qp") != wanted:
+    st.session_state["instrument"] = wanted  # a new link wins over the last manual pick
 iid = st.selectbox(
-    "Instrument", sorted(names), format_func=lambda i: f"{i} · {names[i]}", key="instrument"
+    "Instrument", options, format_func=lambda i: f"{i} · {names[i]}", key="instrument"
 )
+st.query_params["id"] = iid
+st.session_state["_instrument_qp"] = iid  # our own write: not a new link next run
 where = _kit.where_key(ctx.config)
 rows = _ladder(ctx, where, iid, ctx.hidden)
 if not rows:

@@ -276,7 +276,7 @@ def test_parse_incidents_skips_the_template_fence() -> None:
     import sys
 
     sys.path.insert(0, str(REPO))
-    from app.pages import _incidents
+    from app.components import incidents as _incidents
 
     md = (
         "# Incidents\n\n```\n## 2026-01-01 — Template example\n- Detected by:\n```\n\n"

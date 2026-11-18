@@ -19,7 +19,7 @@ for _p in (ROOT, ROOT / "src"):
 
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
-from app.pages import _kit  # noqa: E402
+from app.components import kit as _kit  # noqa: E402
 
 ctx = _kit.context("Sources")
 sc = _kit.serving_frame(ctx, "scorecard_30d.parquet")

@@ -1,6 +1,6 @@
-"""Shared helpers for the dashboard pages 2-6 (spec 10.3). Private to ``app/pages``.
+"""Shared helpers for the dashboard pages 2-6 (spec 10.3).
 
-Candidate to move into ``app/components`` once card T34B has merged (T35 may not edit it).
+Lives in ``app/components`` (not ``app/pages``) so Streamlit does not list it as a page.
 
 * :func:`context`: config, display mode, hidden tiers, read-only store; stops the page with a
   message when the store cannot be read.
@@ -103,7 +103,7 @@ def context(title: str) -> Ctx:
         st.stop()
     st.markdown(
         f'<div class="db-top"><span class="db-brand">{escape(title)}</span>'
-        f'<span class="db-mode">{escape(mode)}</span></div>',
+        f'<span class="db-mode">{escape(mode)}</span></div><hr class="db-rule">',
         unsafe_allow_html=True,
     )
     return Ctx(config, mode, data.hidden_tiers(mode, config), store, data.current_time())

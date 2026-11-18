@@ -37,7 +37,8 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     assert "hosted" in text
     assert "delayed+official" in text
     for title in ("Rates", "FX", "Commodities", "Equities"):
-        assert any(e.label == title for e in at.expander)
+        assert f'<div class="db-sec-title">{title}</div>' in text
+    assert at.text_input[0].label == "Search instruments"
 
 
 def test_hosted_never_renders_tier1_rows(run_home: Run) -> None:
@@ -169,6 +170,7 @@ def test_known_limits_list_dashboard_limits(run_home: Run) -> None:
     from app.components.data import DASHBOARD_LIMITS
 
     assert len(DASHBOARD_LIMITS) == 5
+    assert not any("no yield-curve panel" in limit for limit in DASHBOARD_LIMITS)
     text = page(run_home("hosted"))
     for limit in DASHBOARD_LIMITS:
         assert f"- {limit}" in text
@@ -181,3 +183,49 @@ def test_provenance_drawer_lists_lineage(run_home: Run) -> None:
     text = page(at)
     assert "Parser" in text
     assert "synthetic-1" in text
+
+
+# --- T36 redesign: compact tags, search, folded proxies, tiles -----------------------------
+
+
+def test_overview_numbers_use_the_compact_tag(run_home: Run) -> None:
+    """Glyph and as-of are on screen; field and source stay in the markup (hover, readers)."""
+    text = page(run_home("hosted"))
+    rows = re.findall(r'<tr class="db-row".*?</tr>', text, flags=re.S)
+    ten = next(c for c in rows if "4.37%" in c)
+    assert 'class="db-tagline"' in ten
+    assert re.search(r'<span class="db-sr"><span class="db-field">yield</span>', ten)
+    assert re.search(r'<span class="db-sr"> · delayed · <span class="db-src">', ten)
+    assert ten.count('class="db-tagline"') == 1  # the change does not repeat the tag
+
+
+def test_headline_tiles_link_to_the_instrument_page(run_home: Run) -> None:
+    text = page(run_home("hosted"))
+    assert '<div class="db-tiles">' in text
+    assert 'href="Instrument?id=UST_10Y"' in text
+    assert "Biggest moves" in text
+
+
+def test_proxies_fold_behind_one_line(run_home: Run) -> None:
+    text = page(run_home("hosted"))
+    assert re.search(r"<summary>Show \d+ ETF prox(y|ies)</summary>", text)
+    folded = re.findall(r'<details class="db-more">.*?</details>', text, flags=re.S)
+    assert any('href="Instrument?id=SPY"' in f for f in folded)
+
+
+def test_search_filters_sections_and_unfolds_proxies(run_home: Run) -> None:
+    at = run_home("hosted")
+    at.text_input[0].input("yield").run()
+    text = page(at)
+    assert not at.exception
+    assert "matches for" in text
+    assert "<details" not in text  # nothing folded while searching
+    rows = re.findall(r'<tr class="db-row".*?</tr>', text, flags=re.S)
+    assert not any("1.0842" in r for r in rows)  # EURUSD does not match "yield"
+    assert any("4.37%" in r for r in rows)
+
+
+def test_search_with_no_match_says_so(run_home: Run) -> None:
+    at = run_home("hosted")
+    at.text_input[0].input("zzzz").run()
+    assert 'No instrument matches "zzzz"' in page(at)

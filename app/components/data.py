@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 
 import duckdb
 import streamlit as st
@@ -30,7 +30,7 @@ from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
 from deskbrief.query import Lineage, series_all
-from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Row, Section
+from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Notable, Row, Section
 from deskbrief.store import duck
 from deskbrief.store.backend import StorageError
 from deskbrief.store.local import LocalBackend
@@ -42,6 +42,8 @@ HOSTED, LOCAL = "hosted", "local"
 ALWAYS_HIDDEN_HOSTED = frozenset({1})
 READER_ENV = ("R2_ACCOUNT_ID", "R2_READER_ACCESS_KEY_ID", "R2_READER_SECRET_ACCESS_KEY")
 SPARK_DAYS = 30
+#: Treasury tenors drawn on the yield curve, shortest first (official values only)
+CURVE_TENORS = ("UST_3M", "UST_2Y", "UST_10Y", "UST_20Y", "UST_30Y")
 CACHE_TTL_SECONDS = 60
 
 
@@ -85,7 +87,8 @@ class Snapshot:
     """Everything the Overview needs, unfiltered (tiers are filtered later, per mode)."""
 
     model: BriefModel
-    series: dict[str, tuple[tuple[int, float], ...]]  # (tier, value) of official daily values
+    #: (tier, value, ET date) of official daily values, oldest first
+    series: dict[str, tuple[tuple[int, float, date], ...]]
 
 
 def build_snapshot(
@@ -106,7 +109,10 @@ def build_snapshot(
         history = series_all(conn, SPARK_DAYS, now)
     finally:
         conn.close()
-    return Snapshot(model, {k: tuple((r.tier, r.value) for r in v) for k, v in history.items()})
+    return Snapshot(
+        model,
+        {k: tuple((r.tier, r.value, et_date(r.as_of)) for r in v) for k, v in history.items()},
+    )
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
@@ -123,8 +129,8 @@ def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snaps
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
 DASHBOARD_LIMITS = (
     "Dashboard: no stale greying; the as-of text and health badge carry data age.",
-    "Dashboard: no 30-day z-score column.",
-    "Dashboard: no yield-curve panel.",
+    "Dashboard: no 30-day z-score column; unusual moves are listed under Biggest moves.",
+    "Dashboard: the yield curve uses official Treasury values only (no intraday curve).",
     "Dashboard: no live polling; refresh the page (data cached for 60 s).",
     f"Dashboard: sparklines cover {SPARK_DAYS} days, not the spec's 1-day sparkline.",
 )
@@ -144,6 +150,8 @@ class Overview:
     sparks: dict[str, tuple[float, ...]]
     known_limits: tuple[KnownLimit, ...]
     withheld: int  # rows hidden by the mode (shown as one honest note, never as values)
+    moves: tuple[Notable, ...] = ()  # unusual moves, largest first (the report's own scoring)
+    curve: dict[str, tuple[tuple[date, float], ...]] = field(default_factory=dict)  # UST tenors
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -172,8 +180,18 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
             if lg.role == "value" and lg.value.tier not in hidden
         },
         sparks={
-            k: tuple(v for t, v in pts if t not in hidden)
+            k: tuple(v for t, v, _ in pts if t not in hidden)
             for k, pts in snap.series.items()
+            if k in by_id
+        },
+        moves=tuple(
+            n
+            for n in model.notable
+            if n.kind == "move" and n.instrument_id in by_id and by_id[n.instrument_id].available
+        ),
+        curve={
+            k: tuple((d, v) for t, v, d in snap.series.get(k, ()) if t == 3)
+            for k in CURVE_TENORS
             if k in by_id
         },
         known_limits=model.known_limits
