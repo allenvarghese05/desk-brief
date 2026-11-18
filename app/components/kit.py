@@ -307,7 +307,8 @@ def line_chart(
         for x, y in ln.points:  # >= 8 px hover targets with a surface ring
             out.append(
                 f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" r="4" fill="{ln.colour}" '
-                f'stroke="#fff" stroke-width="2"><title>{escape(ln.name)} · {escape(x)} · '
+                f'stroke="{theme.CANVAS}" stroke-width="2">'
+                f"<title>{escape(ln.name)} · {escape(x)} · "
                 f"{y:,.6g} {escape(unit)}</title></circle>"
             )
         if ln.points:

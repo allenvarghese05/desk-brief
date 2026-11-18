@@ -1,10 +1,10 @@
-# Minimal, quiet look (spec 10.2). Layout and number styling live in app/theme.py.
+# Dark terminal look (spec 10.2, T36). Layout and number styling live in app/theme.py.
 [theme]
-base = "light"
-primaryColor = "#4a5a52"
-backgroundColor = "#fbfaf8"
-secondaryBackgroundColor = "#f2f0ec"
-textColor = "#1f2421"
+base = "dark"
+primaryColor = "#6ea8ff"
+backgroundColor = "#0b0e13"
+secondaryBackgroundColor = "#11161d"
+textColor = "#e7eaf0"
 font = "sans serif"
 
 [client]

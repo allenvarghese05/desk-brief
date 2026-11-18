@@ -1,10 +1,13 @@
-"""Overview panels (T36 redesign): top bar, headline tiles, biggest moves, section tables, yield
-curve, search filter and the provenance drawer.
+"""Workspace panels (T36 terminal redesign): top bar, market strip, biggest moves, watchlist,
+chart header, overview small multiples, instrument details and the yield curve.
 
 All text comes from ``BriefModel`` rows (labels, signed changes, as-of text); every number is
-printed through ``values.value_cell`` / ``change_cell``. On the Overview they use the compact
-tag (tier glyph and as-of on screen; field and source on hover and for screen readers); the
-provenance drawer and the Instrument page print the full line.
+printed through ``values.value_cell`` / ``change_cell``. Lists use the compact tag (tier glyph
+and as-of on screen; field and source on hover and for screen readers); the chart header and
+the details panel print the full line.
+
+Selecting an instrument is a plain link (``?id=...``): it survives a reload, can be shared and
+needs no JavaScript. The link keeps the chosen chart range and search (``r``, ``q``).
 """
 # ruff: noqa: RUF001  (the sigma sign is intentional output)
 
@@ -12,14 +15,14 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from html import escape
+from urllib.parse import urlencode
 
-import streamlit as st
+import pandas as pd
 from app.components.data import CURVE_TENORS, Overview
 from app.components.values import (
-    TIER_NAME,
     Provenance,
     change_cell,
     direction,
@@ -27,7 +30,7 @@ from app.components.values import (
     value_cell,
 )
 
-from deskbrief.query import Lineage, field_label
+from deskbrief.query import field_label
 from deskbrief.report.model import SPREAD_ID, Row, Section
 from deskbrief.timeutil import to_et
 
@@ -50,15 +53,18 @@ SHORT = {
 }
 _TENOR_YEARS = {"UST_3M": 0.25, "UST_2Y": 2, "UST_10Y": 10, "UST_20Y": 20, "UST_30Y": 30}
 NO_CHANGE = "—"
-INSTRUMENT_PAGE = "Instrument"
+#: the instrument selected when the URL names none
+DEFAULT_ID = "ES_F"
 
 
 def short(row: Row) -> str:
     return SHORT.get(row.instrument_id, row.instrument_id)
 
 
-def _link(iid: str) -> str:
-    return f"{INSTRUMENT_PAGE}?id={escape(iid)}"
+def href(iid: str, keep: Mapping[str, str] | None = None) -> str:
+    """Link that selects ``iid`` on Home, keeping the range and search in ``keep``."""
+    params = {"id": iid, **{k: v for k, v in (keep or {}).items() if v}}
+    return escape("?" + urlencode(params))
 
 
 def _age(delta_seconds: float) -> str:
@@ -106,6 +112,26 @@ def brand(ov: Overview) -> str:
     )
 
 
+#: (label, url path) of every page, in menu order; Streamlit derives the path from the file name
+PAGES = (
+    ("Markets", "./"),
+    ("Cross checks", "Cross_checks"),
+    ("Data health", "Data_health"),
+    ("Sources", "Sources"),
+    ("Runs", "Runs"),
+)
+
+
+def nav(here: str = "Markets") -> str:
+    """Page links in the top bar, as in a terminal's workspace tabs."""
+    links = "".join(
+        f'<a class="db-nav-link{" is-here" if label == here else ""}" href="{url}" '
+        f'target="_self"{' aria-current="page"' if label == here else ""}>{label}</a>'
+        for label, url in PAGES
+    )
+    return f'<nav class="db-nav" aria-label="Pages">{links}</nav>'
+
+
 def status(ov: Overview) -> str:
     """Pipeline health as one quiet link to Data health; the counts live in the tooltip."""
     s = ov.health.status
@@ -121,28 +147,33 @@ def status(ov: Overview) -> str:
 
 
 # ---------------------------------------------------------------------------
-# headline tiles and biggest moves
+# market strip and biggest moves
 # ---------------------------------------------------------------------------
 
 
-def _spark(values: Sequence[float], cls: str) -> str:
-    """Small sparkline of the last official daily values (no axis, no numbers)."""
+def _spark(
+    values: Sequence[float], cls: str, w: int = 72, h: int = 22, *, area: bool = False
+) -> str:
+    """Sparkline of the last official daily values (no axis, no numbers)."""
     if len(values) < 2:
         return ""
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1.0
-    w, h = 72, 22
     step = w / (len(values) - 1)
-    pts = " ".join(
-        f"{i * step:.1f},{h - 2 - (v - lo) / span * (h - 4):.1f}" for i, v in enumerate(values)
-    )
+    pts = [(i * step, h - 2 - (v - lo) / span * (h - 4)) for i, v in enumerate(values)]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    fill = f'<polygon class="db-spark-area" points="0,{h} {line} {w},{h}"/>' if area else ""
     return (
-        f'<svg class="db-spark {cls}" width="{w}" height="{h}" aria-hidden="true">'
-        f'<polyline points="{pts}"/></svg>'
+        f'<svg class="db-spark {cls}" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+        f'preserveAspectRatio="none" aria-hidden="true">{fill}<polyline points="{line}"/></svg>'
     )
 
 
-def tiles(ov: Overview) -> str:
+def _trend_cls(row: Row) -> str:
+    return direction(row.change_text) if _has_change(row) else "db-flat"
+
+
+def tiles(ov: Overview, sel: str = "", keep: Mapping[str, str] | None = None) -> str:
     items = []
     for label, row in ov.headline:
         if not row.available:
@@ -151,14 +182,14 @@ def tiles(ov: Overview) -> str:
             )
         else:
             p = provenance_of(row, ov.as_of)
-            cls = direction(row.change_text) if _has_change(row) else "db-flat"
             body = (
                 f'<div class="db-tile-value">{value_cell(row.value_text, p, compact=True)}</div>'
                 f'<div class="db-tile-row"><span class="db-tile-chg">{_change(row, p)}</span>'
-                f"{_spark(ov.sparks.get(row.instrument_id, ()), cls)}</div>"
+                f"{_spark(ov.sparks.get(row.instrument_id, ()), _trend_cls(row))}</div>"
             )
+        cls = "db-tile is-sel" if row.instrument_id == sel else "db-tile"
         items.append(
-            f'<a class="db-tile" href="{_link(row.instrument_id)}" target="_self" '
+            f'<a class="{cls}" href="{href(row.instrument_id, keep)}" target="_self" '
             f'title="{escape(row.name)}">'
             f'<div class="db-tile-label">{escape(label)}</div>{body}</a>'
         )
@@ -168,7 +199,7 @@ def tiles(ov: Overview) -> str:
 _SIGMA = re.compile(r"is (\d+(?:\.\d+)?)σ")
 
 
-def moves(ov: Overview, limit: int = 5) -> str:
+def moves(ov: Overview, keep: Mapping[str, str] | None = None, limit: int = 6) -> str:
     """The day's unusual moves, ranked by size against each instrument's own recent moves."""
     rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
     items = []
@@ -180,9 +211,9 @@ def moves(ov: Overview, limit: int = 5) -> str:
         m = _SIGMA.search(n.text)
         sigma = f' <span class="db-note" title="{escape(n.text)}">{m.group(1)}σ</span>' if m else ""
         items.append(
-            f'<span class="db-move"><span class="db-name"><a href="{_link(row.instrument_id)}" '
-            f'target="_self">{escape(short(row))}</a></span> '
-            f"{change_cell(row.change_text, p, row.basis, compact=True)}{sigma}</span>"
+            f'<a class="db-move" href="{href(row.instrument_id, keep)}" target="_self">'
+            f"<b>{escape(short(row))}</b> "
+            f"{change_cell(row.change_text, p, row.basis, compact=True)}{sigma}</a>"
         )
     body = "".join(items) or (
         '<span class="db-note">Nothing unusual: every move is within its normal range.</span>'
@@ -195,7 +226,7 @@ def moves(ov: Overview, limit: int = 5) -> str:
 
 
 # ---------------------------------------------------------------------------
-# search and section tables
+# search and watchlist
 # ---------------------------------------------------------------------------
 
 
@@ -216,44 +247,146 @@ def search(sections: Iterable[Section], query: str) -> list[Section]:
     return out
 
 
-def _row_html(row: Row, now: datetime) -> str:
+def _wl_row(row: Row, now: datetime, sel: str, keep: Mapping[str, str] | None) -> str:
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy else ""
     hover = "; ".join((row.label, *row.qualifiers))
-    name_cls = "db-full db-name-proxy" if row.is_proxy else "db-full"
+    cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
     name = (
-        f'<td class="db-name"><a href="{_link(row.instrument_id)}" target="_self">'
-        f"{escape(short(row))}</a>{tag}"
-        f'<span class="{name_cls}" title="{escape(hover)}">{escape(row.name)}</span></td>'
+        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}</b>'
+        f'<small title="{escape(hover)}">{escape(row.name)}</small></span>'
     )
     if not row.available:
-        gap = '<td colspan="2" class="db-unavailable num" title="data unavailable">no data</td>'
-        return f'<tr class="db-row">{name}{gap}</tr>'
-    p = provenance_of(row, now)
+        cells = '<span class="db-wl-gap db-unavailable" title="data unavailable">no data</span>'
+    else:
+        p = provenance_of(row, now)
+        cells = (
+            f'<span class="db-wl-val">{value_cell(row.value_text, p, compact=True)}</span>'
+            f'<span class="db-wl-chg">{_change(row, p)}</span>'
+        )
     return (
-        f'<tr class="db-row">{name}'
-        f'<td class="num">{value_cell(row.value_text, p, compact=True)}</td>'
-        f'<td class="num db-c">{_change(row, p)}</td></tr>'
+        f'<a class="{cls}" href="{href(row.instrument_id, keep)}" target="_self" '
+        f'aria-current="{"true" if row.instrument_id == sel else "false"}">{name}{cells}</a>'
     )
 
 
-def _table(rows: Sequence[Row], now: datetime) -> str:
-    body = "".join(_row_html(r, now) for r in rows)
-    return f'<table class="db-table"><tbody>{body}</tbody></table>'
-
-
-def section(sec: Section, now: datetime, *, fold_proxies: bool = True) -> str:
-    """A section title and its table; proxies fold behind one line unless searching."""
-    real = [r for r in sec.rows if not r.is_proxy] if fold_proxies else list(sec.rows)
-    proxies = [r for r in sec.rows if r.is_proxy] if fold_proxies else []
-    html = f'<div class="db-sec"><div class="db-sec-title">{escape(sec.title)}</div>'
-    html += _table(real, now) if real else ""
-    if proxies:
-        noun = "proxy" if len(proxies) == 1 else "proxies"
-        html += (
-            f'<details class="db-more"><summary>Show {len(proxies)} ETF {noun}</summary>'
-            f"{_table(proxies, now)}</details>"
-        )
+def watchlist(
+    sections: Sequence[Section],
+    now: datetime,
+    sel: str = "",
+    keep: Mapping[str, str] | None = None,
+    *,
+    fold_proxies: bool = True,
+) -> str:
+    """Every instrument grouped by section; ETF proxies fold behind one line unless searching."""
+    html = '<div class="db-wl">'
+    for sec in sections:
+        real = [r for r in sec.rows if not (fold_proxies and r.is_proxy)]
+        proxies = [r for r in sec.rows if fold_proxies and r.is_proxy]
+        html += f'<div class="db-wl-grp db-sec-title">{escape(sec.title)}</div>'
+        html += "".join(_wl_row(r, now, sel, keep) for r in real)
+        if proxies:
+            noun = "proxy" if len(proxies) == 1 else "proxies"
+            opened = " open" if any(r.instrument_id == sel for r in proxies) else ""
+            html += (
+                f'<details class="db-more"{opened}><summary>Show {len(proxies)} ETF {noun}'
+                f"</summary>{''.join(_wl_row(r, now, sel, keep) for r in proxies)}</details>"
+            )
     return html + "</div>"
+
+
+# ---------------------------------------------------------------------------
+# chart header, details and the overview grid
+# ---------------------------------------------------------------------------
+
+
+def chart_header(row: Row, now: datetime) -> str:
+    """Name, the latest value with its full provenance line, and the change with its basis."""
+    sub = escape(" · ".join(x for x in (row.label, *row.qualifiers) if x))
+    head = (
+        f'<div class="db-ch"><span class="db-ch-name">{escape(short(row))}</span>'
+        f'<span class="db-ch-sub">{escape(row.name)}</span></div>'
+    )
+    if not row.available:
+        return head + '<div class="db-ch-value db-unavailable">no data</div>'
+    p = provenance_of(row, now)
+    chg = (
+        change_cell(row.change_text, p, row.basis)
+        if _has_change(row)
+        else '<span class="db-flat" title="no earlier value to compare with">no change yet</span>'
+    )
+    return (
+        head + '<div class="db-ch" style="margin-top:.3rem">'
+        f'<span class="db-ch-value">{value_cell(row.value_text, p)}</span>'
+        f'<span class="db-ch-chg">{chg}</span></div>'
+        + (f'<div class="db-ch-foot">{sub}</div>' if sub else "")
+    )
+
+
+def _num(v: float, unit: str) -> str:
+    return f"{v:.2f}%" if unit == "pct" else f"{v:,.4f}".rstrip("0").rstrip(".")
+
+
+def details(row: Row, bars: pd.DataFrame, now: datetime) -> str:
+    """Key facts of the selection: latest value, change, last close and the range in view."""
+    if not row.available:
+        return '<div class="db-empty">No value for this instrument in this mode.</div>'
+    p = provenance_of(row, now)
+    facts = [("Latest", value_cell(row.value_text, p))]
+    if _has_change(row):
+        facts.append(("Change", change_cell(row.change_text, p, row.basis)))
+    rng = ""
+    if not bars.empty:
+        unit = str(bars["unit"].iloc[-1])
+        last = bars.iloc[-1]
+        bp = Provenance(
+            str(last["source"]), int(last["tier"]), f"{last['d']:%d %b}", str(last["field"])
+        )
+        facts.append((f"Last daily {last['field']}", value_cell(_num(last["close"], unit), bp)))
+        hi_col = "high" if bars["high"].notna().all() else "close"
+        lo_col = "low" if bars["low"].notna().all() else "close"
+        hi, lo = float(bars[hi_col].max()), float(bars[lo_col].min())
+        first = bars.iloc[0]
+        span = f"{first['d']:%d %b} to {last['d']:%d %b}"
+        tiers = sorted({int(t) for t in bars["tier"]})
+        src = ", ".join(sorted({str(s) for s in bars["source"]}))
+        rp = Provenance(src, max(tiers), span, f"daily {last['field']} range")
+        facts.append(("Range in view", value_cell(f"{_num(lo, unit)} – {_num(hi, unit)}", rp)))
+        cur = row.change.last.value if row.change is not None else float(last["close"])
+        pos = 0.0 if hi == lo else min(1.0, max(0.0, (cur - lo) / (hi - lo)))
+        rng = (  # where the latest value sits in the range (the figures are in the row above)
+            f'<div class="db-range" role="img" aria-label="latest value at {pos:.0%} of the '
+            f'range in view"><span style="left:calc({pos * 100:.1f}% - 1px)"></span></div>'
+        )
+    body = "".join(f"<tr><th>{escape(k)}</th><td>{v}</td></tr>" for k, v in facts)
+    return f'<table class="db-dl">{body}</table>{rng}'
+
+
+def overview(ov: Overview, sel: str = "", keep: Mapping[str, str] | None = None) -> str:
+    """Small multiples: every instrument's 30-day trend, grouped by section."""
+    html = ""
+    for sec in ov.sections:
+        cards = []
+        for row in sec.rows:
+            if row.is_proxy or not row.available:
+                continue
+            p = provenance_of(row, ov.as_of)
+            cls = "db-card is-sel" if row.instrument_id == sel else "db-card"
+            spark = _spark(
+                ov.sparks.get(row.instrument_id, ()), _trend_cls(row), 160, 34, area=True
+            )
+            cards.append(
+                f'<a class="{cls}" href="{href(row.instrument_id, keep)}" target="_self" '
+                f'title="{escape(row.name)}"><div class="db-card-top"><b>{escape(short(row))}</b>'
+                f"{_change(row, p)}</div>"
+                f'<div class="db-card-val">{value_cell(row.value_text, p, compact=True)}</div>'
+                f"{spark}</a>"
+            )
+        if cards:
+            html += (
+                f'<div class="db-ov-sec"><div class="db-sec-title">{escape(sec.title)}</div>'
+                f'<div class="db-ov-grid">{"".join(cards)}</div></div>'
+            )
+    return f'<div class="db-ov">{html}</div>' if html else ""
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +405,7 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
     tenors = [t for t in CURVE_TENORS if ov.curve.get(t)]
     if len(tenors) < 2:
         return (
-            '<div class="db-sec"><div class="db-sec-title">Yield curve</div>'
-            '<div class="db-empty">Not enough official Treasury yields yet to draw the curve.'
-            "</div></div>"
+            '<div class="db-empty">Not enough official Treasury yields yet to draw the curve.</div>'
         )
     latest = max(ov.curve[t][-1][0] for t in tenors)
     now = {t: ov.curve[t][-1] for t in tenors}
@@ -299,7 +430,7 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
         v = lo + (hi - lo) * i / 3
         grid += (
             f'<line x1="{left}" x2="{w - right}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
-            f'stroke="#eeebe5"/><text x="{left - 6}" y="{y(v) + 4:.1f}" text-anchor="end">'
+            f'class="db-curve-grid"/><text x="{left - 6}" y="{y(v) + 4:.1f}" text-anchor="end">'
             f"{v:.2f}%</text>"
         )
     ticks = "".join(
@@ -322,48 +453,10 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
     svg = (
         f'<svg class="db-curve" viewBox="0 0 {w} {h}" width="100%" role="img" '
         f'aria-label="Treasury yield curve on {latest.day} {latest:%b}: {desc}" '
-        f'style="color:#1f2421">{grid}{then_svg}'
+        f'style="color:#6ea8ff">{grid}{then_svg}'
         f'<polyline class="db-curve-now" points="{line_now}"/>{marks}{ticks}</svg>'
     )
     return (
-        '<div class="db-sec"><div class="db-sec-title">Yield curve · official</div>'
         f'{svg}<div class="db-curve-legend"><span>— {latest.day} {latest:%b}</span>'
-        f"{legend_then}<span>{tier_glyph(3)} treasury</span></div></div>"
+        f"{legend_then}<span>{tier_glyph(3)} treasury</span></div>"
     )
-
-
-# ---------------------------------------------------------------------------
-# provenance drawer
-# ---------------------------------------------------------------------------
-
-
-def provenance_drawer(ov: Overview) -> None:
-    """Pick an instrument to see its value, tier and the fetch behind it (spec 10.3 page 2)."""
-    rows = {r.instrument_id: r for s in ov.sections for r in s.rows if r.available}
-    with st.expander("Trace a value: source, fetch and raw file"):
-        if not rows:
-            st.markdown("No values to trace.")
-            return
-        pick = st.selectbox("Instrument", list(rows), format_func=lambda i: f"{i} · {rows[i].name}")
-        row = rows[pick]
-        p = provenance_of(row, ov.as_of)
-        lg: Lineage | None = ov.lineage.get(pick)
-        facts = [
-            ("Value", value_cell(row.value_text, p)),
-            ("Tier", f"{tier_glyph(p.tier)} {TIER_NAME[p.tier]}"),
-            ("Basis", escape(row.basis or "n/a")),
-            ("Caveats", escape("; ".join(row.qualifiers) or "none")),
-        ]
-        if lg is None:
-            facts.append(("Fetch", "no single fetch: derived value"))
-        else:
-            v = lg.value
-            facts += [
-                ("Source", escape(f"{v.source} / {v.dataset} / {v.symbol}")),
-                ("Fetched", escape(f"{to_et(v.ingested_at):%d %b %H:%M} ET, fetch {v.fetch_id}")),
-                ("Latency", escape(f"{lg.latency_ms or 'n/a'} ms, HTTP {lg.http_status or 'n/a'}")),
-                ("Raw object", escape(f"{lg.raw_key or 'n/a'} · sha256 {lg.sha256 or 'n/a'}")),
-                ("Parser", escape(v.parser_version)),
-            ]
-        body = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in facts)
-        st.markdown(f'<table class="db-table">{body}</table>', unsafe_allow_html=True)

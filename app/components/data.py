@@ -22,9 +22,10 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import duckdb
+import pandas as pd
 import streamlit as st
 from app.components.values import TIER_NAME
 
@@ -45,6 +46,10 @@ SPARK_DAYS = 30
 #: Treasury tenors drawn on the yield curve, shortest first (official values only)
 CURVE_TENORS = ("UST_3M", "UST_2Y", "UST_10Y", "UST_20Y", "UST_30Y")
 CACHE_TTL_SECONDS = 60
+#: how far back the price chart reads daily bars (calendar days; the store may hold less)
+BAR_DAYS = 400
+BAR_COLUMNS = ("d", "open", "high", "low", "close", "volume", "tier", "source", "field", "unit")
+_MAIN_RANK = {"close": 0, "yield": 1, "rate": 2}
 
 
 def current_time() -> datetime:
@@ -124,6 +129,70 @@ def _cached(_config: Config, backend: str, where: str, hidden: frozenset[int]) -
 def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snapshot:
     s = config.storage
     return _cached(config, s.backend, s.bucket if s.backend == "r2" else s.local_root, hidden)
+
+
+def build_bars(
+    config: Config,
+    env: Mapping[str, str],
+    now: datetime,
+    instrument_id: str,
+    exclude_tiers: frozenset[int],
+    days: int = BAR_DAYS,
+) -> pd.DataFrame:
+    """Completed daily bars of one instrument, oldest first: one row per ET date.
+
+    Each day takes its main value (close, else yield, else rate) from the highest visible tier,
+    then open / high / low / volume from that same tier and source only, so a candle is never
+    stitched together from two feeds. Hidden tiers are excluded in SQL: hosted mode never reads
+    a tier-1 bar. Point-in-time at ``now``; the current ET date is left out (still forming).
+    """
+    tiers = [t for t in (1, 2, 3) if t not in exclude_tiers] or [0]
+    marks = ", ".join(str(int(t)) for t in tiers)
+    conn = open_connection(config, env)
+    try:
+        raw = conn.execute(
+            "SELECT CAST(timezone('America/New_York', as_of) AS DATE) AS d, field, value, tier, "  # noqa: S608 (the interpolated tiers are ints)
+            "source, unit, ingested_at FROM obs_pit(?) WHERE instrument_id = ? "
+            "AND interval = '1d' AND field IN ('open', 'high', 'low', 'close', 'yield', 'rate', "
+            f"'volume') AND as_of > ? AND tier IN ({marks}) "
+            "AND CAST(timezone('America/New_York', as_of) AS DATE) < ?",
+            [now, instrument_id, now - timedelta(days=days), et_date(now)],
+        ).fetchdf()
+    finally:
+        conn.close()
+    if raw.empty:
+        return pd.DataFrame(columns=list(BAR_COLUMNS))
+    main = raw[raw["field"].isin(list(_MAIN_RANK))].copy()
+    main["rank"] = main["field"].map(_MAIN_RANK)
+    main = main.sort_values(
+        ["d", "tier", "rank", "source", "ingested_at"], ascending=[True, False, True, True, False]
+    ).drop_duplicates("d")
+    out = main[["d", "tier", "source", "field", "unit", "value"]].rename(columns={"value": "close"})
+    extra = raw[raw["field"].isin(["open", "high", "low", "volume"])]
+    if not extra.empty:
+        extra = extra.sort_values("ingested_at").drop_duplicates(
+            ["d", "tier", "source", "field"], keep="last"
+        )
+        wide = extra.pivot(index=["d", "tier", "source"], columns="field", values="value")
+        out = out.merge(wide.reset_index(), on=["d", "tier", "source"], how="left")
+    for col in ("open", "high", "low", "volume"):
+        if col not in out:
+            out[col] = float("nan")
+    out["d"] = pd.to_datetime(out["d"])
+    return out[list(BAR_COLUMNS)].sort_values("d").reset_index(drop=True)
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_bars(
+    _config: Config, backend: str, where: str, instrument_id: str, hidden: frozenset[int]
+) -> pd.DataFrame:
+    return build_bars(_config, os.environ, current_time(), instrument_id, hidden)
+
+
+def load_bars(config: Config, instrument_id: str, hidden: frozenset[int]) -> pd.DataFrame:
+    s = config.storage
+    where = s.bucket if s.backend == "r2" else s.local_root
+    return _cached_bars(config, s.backend, where, instrument_id, hidden)
 
 
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
