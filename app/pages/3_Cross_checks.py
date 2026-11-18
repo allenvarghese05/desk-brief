@@ -49,9 +49,14 @@ def readable(name: str) -> str:
     return name.replace("_", " ").capitalize()
 
 
-latest = {
-    k: df[(df["group_id"] == k[0]) & (df["check_name"] == k[1])].iloc[-1]["status"] for k in keys
-}
+def _latest_real(group: str, name: str) -> str:
+    """The latest result that actually compared something; ``skip`` only if none did."""
+    c = df[(df["group_id"] == group) & (df["check_name"] == name)]
+    real = c[c["status"] != "skip"]
+    return str((real if not real.empty else c).iloc[-1]["status"])
+
+
+latest = {k: _latest_real(*k) for k in keys}
 ran = [k for k in keys if latest[k] != "skip"]
 skipped = [k for k in keys if latest[k] == "skip"]
 n = {s: sum(1 for k in ran if latest[k] == s) for s in ("fail", "warn", "pass")}
@@ -66,7 +71,7 @@ st.markdown(
             ),
             ("Warnings", str(n["warn"]), "warn" if n["warn"] else "ok", "gap above the warn line"),
             ("Agreeing", str(n["pass"]), "ok" if n["pass"] else "muted", "within tolerance"),
-            ("Skipped", str(len(skipped)), "muted", "nothing to compare last time"),
+            ("Never compared", str(len(skipped)), "muted", "skipped every run this week"),
         ]
     ),
     unsafe_allow_html=True,
@@ -84,7 +89,8 @@ def _row(group: str, name: str) -> str:
         )
         for r in c.itertuples()
     ]
-    last = c.iloc[-1]
+    real = c[c["status"] != "skip"]
+    last = (real if not real.empty else c).iloc[-1]
     first_d, last_d = _kit.day_text(c["ref_date"].iloc[0]), _kit.day_text(c["ref_date"].iloc[-1])
     pair = f"{last['left_source']} vs {last['right_source']}"
     return (
@@ -103,13 +109,17 @@ head = (
     "<thead><tr><th>Check</th><th>Last 7 days</th><th class='num'>Latest gap</th>"
     "<th>Compared</th></tr></thead>"
 )
-_kit.section("Results, problems first", "Squares are labelled by the date of the data compared.")
+_kit.section(
+    "Results, problems first",
+    "Status and gap are each check's latest real comparison (a run with nothing to compare is "
+    "a grey square, not a result). Squares are labelled by the date of the data compared.",
+)
 st.markdown(_kit.status_legend(), unsafe_allow_html=True)
 order = sorted(ran, key=lambda k: (RANK.get(str(latest[k]), 9), k[1]))
 st.markdown(
     f'<table class="db-table">{head}<tbody>{"".join(_row(*k) for k in order)}</tbody></table>'
     if order
-    else '<div class="db-n">Every check was skipped last time.</div>',
+    else '<div class="db-n">No check compared anything this week.</div>',
     unsafe_allow_html=True,
 )
 if skipped:

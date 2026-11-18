@@ -66,7 +66,7 @@ else:
         "Job": runs["job"],
         "Status": [STATUS_MARK.get(str(x), str(x)) for x in runs["status"]],
         "For date": [_kit.day_text(d) for d in runs["target_date"]],
-        "Start delay": [("n/a" if pd.isna(d) else f"{d:,.0f} s") for d in delay],
+        "Start delay": [_kit.duration(d) for d in delay],
         "Run time": [_kit.duration(t) for t in took],
         "Fetches ok / failed": [
             f"{int(n) - int(f)} / {int(f)}" if pd.notna(n) and pd.notna(f) else "n/a"

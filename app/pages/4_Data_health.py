@@ -113,15 +113,39 @@ else:
             for t, row in by_type.iterrows()
         )
         st.markdown(f'<div class="db-n">{_kit.escape(summary)}</div>', unsafe_allow_html=True)
-        st.dataframe(
-            bad[["status", "check_type", "check_name", "source", "instrument_id", "observed",
-                 "threshold"]].rename(columns={
-                "status": "Status", "check_type": "Type", "check_name": "Check",
-                "source": "Source", "instrument_id": "Instrument", "observed": "Observed",
-                "threshold": "Threshold"}),
-            hide_index=True,
-            width="stretch",
-        )  # fmt: skip
+        # one line per check, source and status: which instruments, and the observed range
+        lines = []
+        keys = ["_r", "status", "check_type", "check_name", "source"]
+        for (_, status, ctype, name, source), g in bad.fillna({"source": "no source"}).groupby(
+            keys, sort=True, dropna=False
+        ):
+            ids = sorted({str(i) for i in g["instrument_id"].dropna()})
+            shown = ", ".join(ids[:8]) + (f" and {len(ids) - 8} more" if len(ids) > 8 else "")
+            obs = g["observed"].dropna()
+            thr = g["threshold"].dropna()
+            seen = (
+                f"observed {obs.min():g}" + (f" to {obs.max():g}" if obs.max() != obs.min() else "")
+                if len(obs)
+                else ""
+            )
+            limit = f" · limit {thr.iloc[0]:g}" if len(thr) else ""
+            what = name if name == ctype else f"{ctype} · {name}"
+            mark = {"fail": "✕", "warn": "!"}.get(str(status), "")
+            lines.append(
+                f'<tr><td><span class="db-st-{_kit.escape(str(status))}">{mark} '
+                f"{_kit.escape(str(status))}</span></td>"
+                f"<td><b>{_kit.escape(str(what))}</b><span class='db-note'> · "
+                f"{_kit.escape(str(source))}</span><br><span class='db-n'>"
+                f"{len(g)} {'result' if len(g) == 1 else 'results'}"
+                f"{': ' + _kit.escape(shown) if shown else ''}</span></td>"
+                f"<td class='db-n'>{_kit.escape(seen + limit)}</td></tr>"
+            )
+        st.markdown(
+            '<table class="db-table"><thead><tr><th>Status</th><th>Check, source and what it '
+            "hit</th><th>Observed vs limit</th></tr></thead>"
+            f"<tbody>{''.join(lines)}</tbody></table>",
+            unsafe_allow_html=True,
+        )
     for ctype, group in today.groupby("check_type"):
         c = group["status"].value_counts()
         summary = ", ".join(f"{n} {s}" for s, n in c.items())

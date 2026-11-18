@@ -311,8 +311,8 @@ def line_chart(
     *,
     band: tuple[float, float] | None = None,
     guides: tuple[float, ...] = (),
-    width: int = 640,
-    height: int = 200,
+    width: int = 1000,
+    height: int = 260,
 ) -> str:
     """Thin lines on one y axis (never two), the last point labelled directly, hover titles on
     every point. ``band`` shades a tolerance range; ``guides`` draws dashed reference lines."""
@@ -336,12 +336,15 @@ def line_chart(
     def py(y: float) -> float:
         return top + (height - top - bottom) * (1 - (y - lo) / (hi - lo))
 
-    out = [f'<svg class="db-chart" viewBox="0 0 {width} {height}" role="img" width="100%">']
+    out = [
+        f'<svg class="db-chart" viewBox="0 0 {width} {height}" role="img" width="100%" '
+        'style="max-width:1100px">'
+    ]
     for g in (lo + (hi - lo) * k / 3 for k in range(4)):  # recessive grid, four ticks
         out.append(
             f'<line x1="{left}" x2="{width - right}" y1="{py(g):.1f}" y2="{py(g):.1f}" '
             f'stroke="{theme.RULE}" stroke-width="1"/>'
-            f'<text x="{left - 6}" y="{py(g) + 4:.1f}" text-anchor="end">{g:,.4g}</text>'
+            f'<text x="{left - 6}" y="{py(g) + 4:.1f}" text-anchor="end">{g:,.3g}</text>'
         )
     if band:
         out.append(

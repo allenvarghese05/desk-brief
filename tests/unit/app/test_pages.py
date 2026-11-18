@@ -231,7 +231,7 @@ def test_runs_table_start_delay_and_links(run_page: RunPage) -> None:
     assert "degraded" in t
     assert "ok" in t
     assert "morning" in t
-    assert "300 s" in t  # scheduled 06:50, started 06:55
+    assert "5 min" in t  # scheduled 06:50, started 06:55
     assert "github.com/allenvarghese05/desk-brief/actions" in t
     # the template block inside the code fence is not an incident
     assert "YYYY-MM-DD" not in t

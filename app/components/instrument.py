@@ -90,6 +90,13 @@ def _num(r: ValueRow) -> str:
     return text if r.unit in _PLAIN_UNITS else f"{text} {r.unit}"
 
 
+def _apart(seconds: float) -> str:
+    m = int(seconds // 60)
+    if m < 120:
+        return f"{m} min"
+    return f"{m / 60:.1f} h" if m < 2880 else f"{m / 1440:.1f} d"
+
+
 def ladder_html(rows: list[ValueRow]) -> str:
     """Each visible tier's latest value and its gap to the official (highest) tier."""
     if not rows:
@@ -105,6 +112,9 @@ def ladder_html(rows: list[ValueRow]) -> str:
             gap = f"{(r.value - best.value) / best.value * 10_000:+.1f} bp"
         else:
             gap = "–"
+        apart = abs((r.as_of - best.as_of).total_seconds())
+        if r is not best and apart > 15 * 60:  # a gap between different moments is not a gap
+            gap += f", {_apart(apart)} apart: not like-for-like"
         body += (
             f"<tr><th>{TIER_GLYPH[r.tier]} {TIER_NAME[r.tier]}"
             f'<span class="db-tagline">{escape(gap)}</span></th>'
