@@ -37,6 +37,7 @@ from deskbrief.models import (
     RawResponse,
     RunContext,
 )
+from deskbrief.pipeline.manifest import CheckIssue
 from deskbrief.schemas import empty_frame, to_frame, validate
 from deskbrief.sources.base import ParseError, Source
 from deskbrief.store.backend import (
@@ -235,6 +236,27 @@ class RunBuffer:
             for status, n in frame["status"].value_counts().items():
                 counts[str(status)] += int(n)
         return dict(counts)
+
+    def check_issues(self) -> list[CheckIssue]:
+        """Fail/warn results of ``dq_results`` and ``crosscheck_results`` grouped by check.
+
+        One entry per (kind, status, check name, source); failures first, then by count.
+        Cross-check results carry no single source, so theirs is ``None``.
+        """
+        counts: dict[tuple[str, str, str, str | None], int] = defaultdict(int)
+        for kind, table in (("dq", "dq_results"), ("crosscheck", "crosscheck_results")):
+            records: list[dict[str, Any]] = list(self._rows[table])
+            for frame in self._frames[table]:
+                records.extend({str(k): v for k, v in r.items()} for r in frame.to_dict("records"))
+            for rec in records:
+                status = str(rec["status"])
+                if status not in ("fail", "warn"):
+                    continue
+                source = rec.get("source") if kind == "dq" else None
+                source = None if source is None or pd.isna(source) else str(source)
+                counts[(kind, status, str(rec["check_name"]), source)] += 1
+        ordered = sorted(counts.items(), key=lambda kv: (kv[0][1] != "fail", -kv[1], kv[0][0:3]))
+        return [CheckIssue(k, st, name, src, n) for (k, st, name, src), n in ordered]
 
     def flush(
         self, datasets: Datasets, ctx: RunContext, *, only: Collection[str] | None = None
