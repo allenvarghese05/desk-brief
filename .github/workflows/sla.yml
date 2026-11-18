@@ -1,0 +1,96 @@
+name: sla
+
+# Spec §5.4: 12:20 UTC weekdays (07:20 ET winter, 08:20 ET summer, after the 07:00 target).
+# Fails the job (red X, visible incident) when there is no report for today's ET date on an
+# XNYS business day, whatever the cause, including a morning run that never started. It looks
+# for reports/date=D/v*/brief.html in the store, not at the runs table, so it needs no run row.
+# Read-only: it uses the R2 reader key pair (R2_READER_*), never the writer keys.
+on:
+  schedule:
+    - cron: "20 12 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "ET date to check, YYYY-MM-DD (empty: today)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  sla:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUNBUFFERED: "1"
+      DESKBRIEF_STORAGE_BACKEND: r2
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_READER_ACCESS_KEY_ID: ${{ secrets.R2_READER_ACCESS_KEY_ID }}
+      R2_READER_SECRET_ACCESS_KEY: ${{ secrets.R2_READER_SECRET_ACCESS_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+      SLA_DATE: ${{ inputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Check today's report
+        run: |
+          uv run python - <<'PY'
+          import os
+          import sys
+          from datetime import UTC, date, datetime
+
+          from deskbrief.calendars import is_business_day
+          from deskbrief.config import load_config
+          from deskbrief.pipeline.jobs import build_store
+          from deskbrief.report.notify import NotifyError, SmtpNotifier, SmtpSettings
+          from deskbrief.timeutil import et_date
+
+          raw = os.environ.get("SLA_DATE", "").strip()
+          try:
+              day = date.fromisoformat(raw) if raw else et_date(datetime.now(UTC))
+          except ValueError:
+              print(f"SLA_DATE must be YYYY-MM-DD, got {raw!r}")
+              sys.exit(2)
+          if not is_business_day("XNYS", day):
+              print(f"sla: {day} is not an XNYS business day; no report expected")
+              sys.exit(0)
+
+          config = load_config()
+          try:
+              store = build_store(config)
+              keys = store.list(f"reports/date={day.isoformat()}/")
+          except Exception as exc:  # cannot tell: that is a failure too, never a pass
+              print(f"sla: cannot verify the report for {day}: {type(exc).__name__}")
+              sys.exit(1)
+          if any(k.endswith("/brief.html") for k in keys):
+              print(f"sla: report for {day} present")
+              sys.exit(0)
+
+          subject = f"Desk Brief: report missed SLA for {day}"
+          body = f"No report was found for {day} (reports/date={day.isoformat()}/)."
+          print(f"sla: {subject}")
+          try:
+              settings = SmtpSettings.from_env(os.environ, config.report.recipients_env)
+              SmtpNotifier(settings).send(subject, f"<p>{body}</p>", body)
+              print("sla: alert email sent")
+          except NotifyError as exc:
+              print(f"sla: alert email not sent: {exc}")
+          sys.exit(1)
+          PY

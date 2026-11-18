@@ -1,0 +1,85 @@
+name: eod
+
+# Spec §5.4: 22:30 UTC weekdays. The gate skips a day that is a holiday on every calendar.
+# Same ping/log conventions as morning.yml: success pings (not when skipped), a failed job pings
+# /fail, no ping at all means the job never ran and the dead-man's switch alerts.
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  eod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
+      DESKBRIEF_STORAGE_BACKEND: r2
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Run eod
+        id: run
+        run: |
+          set +e -o pipefail
+          mkdir -p logs
+          # stdout is the run manifest (counts only); stderr is the redacted JSON log.
+          uv run deskbrief run eod 2> logs/eod.log | tee logs/eod-summary.md
+          status=$?
+          if grep -qF ': **skipped**' logs/eod-summary.md; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+
+      - name: Ping healthcheck (success)
+        if: success() && steps.run.outputs.skipped != 'true'
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECK_URL_EOD }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HEALTHCHECK_URL_EOD is not set; the dead-man's switch was not pinged"
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 -o /dev/null "${HC_URL%/}"
+
+      - name: Ping healthcheck (fail)
+        if: failure()
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECK_URL_EOD }}
+        run: |
+          if [ -z "$HC_URL" ]; then
+            echo "::warning::HEALTHCHECK_URL_EOD is not set; the failure was not reported"
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 -o /dev/null "${HC_URL%/}/fail"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eod-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+          if-no-files-found: ignore
