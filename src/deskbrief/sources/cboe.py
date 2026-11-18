@@ -30,7 +30,8 @@ from deskbrief.timeutil import et_to_utc
 NAME = "cboe"
 DATASET = "vix_history"
 SYMBOL = "VIX"
-URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"  # UNVERIFIED
+# cdn.cboe.com answers HTTP 307 -> cdn-api.cboe.com (probe 2026-11-18, docs/sources/cboe.md)
+URL = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 LOOKBACK_DAYS = 10
 HEADER = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE"]
 _PREAMBLE_LINES = 5

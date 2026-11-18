@@ -6,7 +6,7 @@ Code: `src/deskbrief/sources/cboe.py` · dataset `vix_history` · symbol `VIX`.
 
 `GET https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv` (no auth, no
 params): the whole history since 1990, columns `DATE,OPEN,HIGH,LOW,CLOSE`, dates `MM/DD/YYYY`.
-The URL is from memory of the public Cboe page and is **unverified** (see below).
+The URL was moved by Cboe to `cdn-api.cboe.com` (see the live probe below).
 
 ## Plan and parse
 
@@ -24,20 +24,23 @@ column count) is skipped instead of failing every daily run; a bad row inside th
 unparsable date, still raises (a request without `lookback_days` validates every row). A body that
 does not end in a newline, when its last row is inside the window, is treated as a truncated
 download (a cut such as `16.` would otherwise parse as 16.0) and raises `ParseError`. `csv.Error`
-and an out-of-range `lookback_days` (`OverflowError`) also become `ParseError`. The URL constant is
-marked `# UNVERIFIED` in code until the live probe below has run.
+and an out-of-range `lookback_days` (`OverflowError`) also become `ParseError`. 
 An empty or header-only body, or a window with no rows, is a legitimate empty result. Up to four
 title lines before the header and lines starting with `#` are tolerated.
 
-## Live probe status: PENDING
+## Live probe (2026-11-18, T25)
 
-Not run: outbound requests to provider sites were denied by the permission gate in the
-environment this card was built in. The parser rests on the documented format and a synthetic
+The first live run (2026-11-17) got HTTP 307 from the original URL. The owner probed it on
+2026-11-18 01:20 UTC (server `cloudflare`):
+
+    curl -sI https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv
+    HTTP/2 307
+    location: https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv
+
+The target is the same official Cboe file on a new host, so `URL` in `cboe.py` now points at
+`cdn-api.cboe.com` (pinned by `test_url_is_the_cdn_api_host_the_old_host_redirects_to`). The shared
+HTTP client's redirect policy is unchanged. The new URL's `200` and CSV header were not probed in
+this card; the next live run shows them. The parser rests on the documented format and a synthetic
 fixture (`tests/fixtures/synthetic/cboe/`, header "SYNTHETIC FIXTURE"). Cboe's redistribution terms
-were not checked, so no real capture is committed. To verify:
-
-    curl -sS -I https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv
-    curl -sS https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv | head -3
-
-Expect `200` and the header above. If the URL has moved, change `URL` in `cboe.py`; if the file
-format changed, `parse` fails loudly. Disable with `sources.cboe.enabled: false`.
+were not checked, so no real capture is committed. If the file format changed, `parse` fails
+loudly. Disable with `sources.cboe.enabled: false`.

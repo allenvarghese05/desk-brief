@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from config_support import enable_all_sources
 from deskbrief.config import Config, load_config
 from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext
 from deskbrief.pipeline.jobs import JobSteps
@@ -25,7 +26,7 @@ T0 = datetime(2026, 11, 16, 11, 20, tzinfo=UTC)  # Monday 06:20 ET
 
 
 def load_test_config() -> Config:
-    return load_config(REPO_ROOT / "config.yaml")
+    return enable_all_sources(load_config(REPO_ROOT / "config.yaml"))
 
 
 class FakeClock:

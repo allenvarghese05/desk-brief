@@ -25,6 +25,7 @@ from deskbrief.checks.base import (
     minutes_late,
     query,
     register,
+    source_enabled,
     within_grace,
 )
 from deskbrief.config import DatasetSchedule, IntradaySchedule
@@ -60,6 +61,8 @@ class FreshnessCheck:
     def evaluate(self, ctx: RunContext, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
         out: list[DQResult] = []
         for sched in ctx.config.datasets:
+            if not source_enabled(ctx, sched.source):
+                continue  # switched off in config.yaml: nothing is expected from it
             exp = expected_for(ctx, sched)
             base: dict[str, Any] = {"dataset": sched.dataset, "data_day": exp.data_day.isoformat()}
             if exp.skip_reason:

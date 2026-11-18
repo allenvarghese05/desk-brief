@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from config_support import enable_all_sources
 from deskbrief.checks import run_checks
 from deskbrief.config import Config, load_config
 from deskbrief.models import JobKind, RunContext, Trigger
@@ -21,7 +22,9 @@ from deskbrief.store.duck import connect
 from deskbrief.store.local import LocalBackend
 from deskbrief.timeutil import ET, et_date
 
-CONFIG: Config = load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+CONFIG: Config = enable_all_sources(
+    load_config(Path(__file__).resolve().parents[2] / "config.yaml")
+)
 WED = date(2026, 11, 18)
 
 

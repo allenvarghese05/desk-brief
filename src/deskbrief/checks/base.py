@@ -156,6 +156,13 @@ def expected_for(ctx: RunContext, sched: DatasetSchedule) -> Expected:
     return Expected(pub, data_day, due, sched.grace_minutes, early, reason)
 
 
+def source_enabled(ctx: RunContext, source: str) -> bool:
+    """False when ``source`` is switched off in ``config.yaml``: it is never fetched, so
+    nothing may be expected from it (a missing row would fail on every run)."""
+    settings = ctx.config.sources.get(source)
+    return settings is None or settings.enabled
+
+
 def minutes_late(ctx: RunContext, exp: Expected) -> float:
     return max(0.0, (ctx.now_utc - exp.due_utc).total_seconds() / 60.0)
 
