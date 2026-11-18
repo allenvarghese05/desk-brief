@@ -1,0 +1,74 @@
+name: backfill
+
+# Spec §5.4: manual only. Official and daily sources for a date range (one run per XNYS
+# business day), trigger=manual. Inputs reach the shell only through env vars, and are
+# validated before use.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First date (ET), YYYY-MM-DD"
+        required: true
+        type: string
+      end:
+        description: "Last date, inclusive, YYYY-MM-DD (empty: same as start)"
+        required: false
+        default: ""
+        type: string
+      sources:
+        description: "Comma-separated source names (empty: all enabled)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      PYTHONUNBUFFERED: "1"
+      DESKBRIEF_STORAGE_BACKEND: r2
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      IN_START: ${{ inputs.start }}
+      IN_END: ${{ inputs.end }}
+      IN_SOURCES: ${{ inputs.sources }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Validate inputs
+        run: |
+          date_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+          [[ "$IN_START" =~ $date_re ]] || { echo "::error::start must be YYYY-MM-DD"; exit 2; }
+          if [ -n "$IN_END" ] && ! [[ "$IN_END" =~ $date_re ]]; then
+            echo "::error::end must be YYYY-MM-DD or empty"; exit 2
+          fi
+          src_re='^[a-z0-9_]+(,[a-z0-9_]+)*$'
+          if [ -n "$IN_SOURCES" ] && ! [[ "$IN_SOURCES" =~ $src_re ]]; then
+            echo "::error::sources must be comma-separated lowercase names"; exit 2
+          fi
+      - name: Run backfill
+        run: |
+          args=(--date "$IN_START")
+          if [ -n "$IN_END" ]; then args+=(--end-date "$IN_END"); fi
+          if [ -n "$IN_SOURCES" ]; then args+=(--sources "$IN_SOURCES"); fi
+          uv run deskbrief run backfill "${args[@]}"
