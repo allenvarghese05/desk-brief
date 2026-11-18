@@ -663,33 +663,43 @@ def test_budget_exhausted_makes_no_http_call(
 
 
 @respx.mock
-def test_budget_known_gap_batch_counts_one_tracked_unit(
+def test_budget_batch_consumes_one_unit_per_symbol(
     src: TwelveDataSource, config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """KNOWN GAP (documented in docs/sources/twelvedata.md): the T03 tracker reserves one unit
-    per HTTP attempt and the HttpClient protocol has no weight argument, so a 3-symbol batch is
-    tracked as 1 although Twelve Data bills 3 credits (``credits_for``). This test pins the
-    current behaviour so that fixing it (a contract PR) has to update it deliberately."""
+    """T08: a 3-symbol batch costs 3 units, as Twelve Data bills it (``credits_for``)."""
     monkeypatch.setenv("TWELVEDATA_API_KEY", KEY)
     respx.get(QUOTE_ENDPOINT).mock(
         return_value=httpx.Response(200, content=(FIX / "quote_batch.json").read_bytes())
     )
     budget, store = tracker(used=0, limit=750)
     (req,) = src.plan(JobKind.MORNING, ctx_for(config))
-    src.fetch(req, http_client(budget, daily_budget=750))
-    assert store.load("twelvedata", datetime.now(UTC).date()) == 1
-    assert credits_for(req) == 3
+    assert src.fetch(req, http_client(budget, daily_budget=750)).ok
+    assert store.load("twelvedata", datetime.now(UTC).date()) == credits_for(req) == 3
 
 
 @respx.mock
-def test_budget_last_unit_then_exhausted(
+def test_budget_batch_refused_when_fewer_units_remain_than_symbols(
+    src: TwelveDataSource, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TWELVEDATA_API_KEY", KEY)
+    route = respx.get(QUOTE_ENDPOINT).mock(return_value=httpx.Response(200, json={}))
+    budget, store = tracker(used=748, limit=750)  # 2 left, the batch needs 3
+    (req,) = src.plan(JobKind.MORNING, ctx_for(config))
+    raw = src.fetch(req, http_client(budget, daily_budget=750))
+    assert not route.called
+    assert raw.fetch_status is FetchStatus.BUDGET_EXHAUSTED
+    assert store.load("twelvedata", datetime.now(UTC).date()) == 748  # nothing consumed
+
+
+@respx.mock
+def test_budget_exact_fit_then_exhausted(
     src: TwelveDataSource, config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TWELVEDATA_API_KEY", KEY)
     route = respx.get(QUOTE_ENDPOINT).mock(
         return_value=httpx.Response(200, content=(FIX / "quote_batch.json").read_bytes())
     )
-    budget, _ = tracker(used=749, limit=750)
+    budget, _ = tracker(used=747, limit=750)  # exactly 3 left
     client = http_client(budget, daily_budget=750)
     (req,) = src.plan(JobKind.MORNING, ctx_for(config))
     assert src.fetch(req, client).ok
