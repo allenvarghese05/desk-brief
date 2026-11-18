@@ -1,0 +1,57 @@
+name: rebuild
+
+# Spec §5.4: manual only. Re-parse raw/ into clean/v{N+1}/ and flip clean/_CURRENT atomically.
+# The source API keys are only needed so the sources can be constructed to re-parse raw bodies;
+# a rebuild makes no provider requests.
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "Only rebuild raw objects from this date (ET), YYYY-MM-DD (empty: everything)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      DESKBRIEF_STORAGE_BACKEND: r2
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      IN_FROM_DATE: ${{ inputs.from_date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Validate inputs
+        run: |
+          date_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+          if [ -n "$IN_FROM_DATE" ] && ! [[ "$IN_FROM_DATE" =~ $date_re ]]; then
+            echo "::error::from_date must be YYYY-MM-DD or empty"; exit 2
+          fi
+      - name: Run rebuild
+        run: |
+          args=()
+          if [ -n "$IN_FROM_DATE" ]; then args+=(--date "$IN_FROM_DATE"); fi
+          uv run deskbrief run rebuild "${args[@]}"
