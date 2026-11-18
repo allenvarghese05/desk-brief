@@ -1,0 +1,86 @@
+name: morning
+
+# Two crons, one per fire time (P-013). github.event.schedule names the exact fire, and the
+# morning gate in the code (`scheduled_for`) proceeds only for the one landing 06:00-07:00 ET;
+# the other exits as `skipped`. A skipped run does not ping the healthcheck.
+on:
+  schedule:
+    - cron: "15 10 * * 1-5"
+    - cron: "15 11 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Shared by every pipeline workflow so runs never overlap (spec 5.4).
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  morning:
+    name: morning
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      DESKBRIEF_STORAGE_BACKEND: r2
+      # config.py reads DESKBRIEF_STORAGE_BUCKET, not R2_BUCKET; an empty value keeps config.yaml's.
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+
+      - name: Run morning job
+        id: run
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+        run: |
+          set +e -o pipefail
+          mkdir -p logs
+          # stdout is the run manifest (counts only) -> step summary; stderr is the redacted JSON log.
+          uv run deskbrief run morning 2> logs/morning.log | tee logs/morning-summary.md >> "$GITHUB_STEP_SUMMARY"
+          status=$?
+          if grep -qF ': **skipped**' logs/morning-summary.md; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+
+      - name: Ping healthcheck (success)
+        if: success() && steps.run.outputs.skipped != 'true'
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECK_URL_MORNING }}
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "${HC_URL%/}"
+
+      - name: Ping healthcheck (fail)
+        if: failure()
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECK_URL_MORNING }}
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "${HC_URL%/}/fail"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: morning-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+          if-no-files-found: ignore
