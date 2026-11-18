@@ -141,11 +141,7 @@ def test_check_issues_groups_by_kind_status_check_and_source() -> None:
     assert got == [
         ("dq", "fail", "completeness", "stooq", 3),
         ("crosscheck", "fail", "proxy_vs_exact", None, 2),
-        (
-            "dq",
-            "fail",
-        )
-        + ("completeness", "fred", 1),
+        ("dq", "fail", "completeness", "fred", 1),
         ("dq", "fail", "freshness", "stooq", 1),
         ("crosscheck", "warn", "fx_vs_ecb", None, 1),
         ("dq", "warn", "fresh", None, 1),
