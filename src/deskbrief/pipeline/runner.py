@@ -44,7 +44,7 @@ from deskbrief.models import (
     RunStatus,
     Trigger,
 )
-from deskbrief.pipeline.catchup import missed_dates
+from deskbrief.pipeline.catchup import CATCHUP_TIME_BUDGET, missed_dates, split_catchup
 from deskbrief.pipeline.clean import (
     RunBuffer,
     clean_response,
@@ -569,15 +569,25 @@ def _run_with_catchup(env: RunEnv, ctx: RunContext) -> RunManifest:
         manifest.notes.append(f"storage unavailable: {runs}")
         return manifest
     catchups: list[RunManifest] = []
-    for day in missed_dates(runs, ctx.job, ctx.target_date):
+    todo, deferred = split_catchup(missed_dates(runs, ctx.job, ctx.target_date))
+    for i, day in enumerate(todo):
+        if env.clock() - ctx.now_utc >= CATCHUP_TIME_BUDGET:  # keep time for the main run
+            deferred = sorted([*todo[i:], *deferred])
+            break
         log.info("catchup.start", target_date=day.isoformat())
         cctx = make_context(env, JobKind.BACKFILL, Trigger.CATCHUP, day, env.clock())
         try:
             catchups.append(execute_run(env, cctx))
         except Exception as exc:  # catch-up must never prevent the main run
             log.error("catchup.failed", target_date=day.isoformat(), error=redact(str(exc)))
+    if deferred:
+        log.info("catchup.deferred", target_dates=[d.isoformat() for d in deferred])
     manifest = execute_run(env, ctx)
     manifest.catchup_runs = catchups
+    if deferred:
+        manifest.notes.append(
+            "catch-up deferred to the next run: " + ", ".join(d.isoformat() for d in deferred)
+        )
     return manifest
 
 
