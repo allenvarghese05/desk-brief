@@ -35,7 +35,8 @@ def provenance_of(row: Row, now: datetime) -> Provenance:
     if row.tier is None:
         raise ValueError(f"{row.instrument_id} has no value, so no provenance")
     if row.change is None:  # only the derived 2s10s spread has no observed value behind it
-        assert row.instrument_id == SPREAD_ID
+        if row.instrument_id != SPREAD_ID:
+            raise ValueError(f"{row.instrument_id} has a value but no observed change behind it")
         return Provenance("treasury (derived)", row.tier, row.as_of_text, "derived spread")
     last = row.change.last
     hover = f"{to_et(last.as_of):%d %b %H:%M} ET, {_age((now - last.as_of).total_seconds())}"
@@ -77,7 +78,7 @@ def headline_strip(ov: Overview) -> None:
         else:
             p = provenance_of(row, ov.as_of)
             body = value_cell(row.value_text, p) + (
-                change_cell(row.change_text, p, row.basis) if row.change_text != "n/a" else ""
+                change_cell(row.change_text, p, row.basis) if row.change is not None else ""
             )
             body += _spark(ov.sparks.get(row.instrument_id, ()))
         items.append(f'<div><span class="db-hl-label">{escape(label)}</span>{body}</div>')
@@ -96,7 +97,7 @@ def _row_html(row: Row, now: datetime) -> str:
         gap = '<td colspan="2" class="db-unavailable">data unavailable</td>'
     else:
         p = provenance_of(row, now)
-        chg = change_cell(row.change_text, p, row.basis) if row.change_text != "n/a" else "n/a"
+        chg = change_cell(row.change_text, p, row.basis) if row.change is not None else "n/a"
         gap = f'<td class="num">{value_cell(row.value_text, p)}</td><td class="num">{chg}</td>'
     quals = "".join(f'<span class="db-note"> · {escape(q)}</span>' for q in row.qualifiers)
     return f'<tr class="db-row"><td>{_name_cell(row)}{quals}</td>{gap}</tr>'
