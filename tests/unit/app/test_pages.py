@@ -1,4 +1,4 @@
-"""Dashboard pages 2-3 (T35, part 1): AppTest smoke, hosted rule, P-009 labels, ref_date labels.
+"""Dashboard pages 2-6 (T35): AppTest smoke per page, hosted rule, P-009 labels, ref_date labels.
 
 SYNTHETIC FIXTURE: a store built from ``brief_synth`` (made-up values, Monday 16 Nov 2026 07:00
 ET) plus serving files built by ``deskbrief.pipeline.serving``. SPY is the only tier-1 instrument
@@ -29,6 +29,9 @@ PAGES = REPO / "app" / "pages"
 PAGE_FILES = {
     "instrument": "2_Instrument.py",
     "xchecks": "3_Cross_checks.py",
+    "health": "4_Data_health.py",
+    "sources": "5_Sources.py",
+    "runs": "6_Runs.py",
 }
 _ENV = ("DESKBRIEF_DISPLAY_MODE", "R2_ACCOUNT_ID", "R2_READER_ACCESS_KEY_ID")
 _ids = itertools.count()
@@ -91,6 +94,13 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
                 "error_rate": 0.0, "disagreement_rate": None, "n_crosschecks": 0,
             }], "RUNSC", FRI)  # fmt: skip
             w.run(MON)
+            w._append("runs", [{
+                "run_id": "RUNLATE", "job": "intraday", "trigger": "schedule", "target_date": MON,
+                "scheduled_for": et(MON, "06:50"), "started_at": et(MON, "06:55"),
+                "finished_at": et(MON, "06:58"), "status": "ok", "git_sha": "deadbeef",
+                "config_hash": "cafe", "n_fetch": 1, "n_fetch_failed": 0, "n_obs": 1,
+                "n_dq_fail": 0, "n_dq_warn": 0,
+            }], lambda r: MON)  # fmt: skip
             w.run(FRI, status="degraded")
             w._append("revisions", [{
                 "instrument_id": "UST_10Y", "source": "treasury", "dataset": "par_curve",
@@ -107,6 +117,10 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
                 "fetch_id": "F9", "run_id": "RUN1", "source": "yahoo", "dataset": "quote",
                 "reason": "negative_price", "detail": "synthetic", "raw_key": None,
                 "detected_at": et(MON, "06:40"),
+            }, {
+                "fetch_id": "F10", "run_id": "RUN1", "source": "alpaca", "dataset": "iex_latest",
+                "reason": "tier1_bad_tick", "detail": "synthetic", "raw_key": None,
+                "detected_at": et(MON, "06:41"),
             }], lambda r: MON)  # fmt: skip
             from deskbrief.pipeline import serving
 
@@ -198,6 +212,84 @@ def test_crosscheck_gap_chart_shows_tolerance_band(run_page: RunPage) -> None:
     assert "warn" in t
 
 
+# --- page 4: data health --------------------------------------------------------------------
+
+
+def test_data_health_groups_by_type_and_lists_revisions_and_quarantine(run_page: RunPage) -> None:
+    t = text(run_page("health", "local"))
+    assert "freshness" in t
+    assert "validity" in t
+    assert "negative_price" in t  # quarantine list
+    assert "UST_10Y" in t  # revisions log
+    assert "fresh_b" in t
+
+
+def test_data_health_hosted_withholds_tier1_rows(run_page: RunPage) -> None:
+    t = text(run_page("health", "hosted"))
+    assert "range_spy" not in t
+    assert "alpaca" not in t
+    assert "fresh_b" in t
+    assert "withheld" in t
+
+
+def test_data_health_freshness_timeline_per_dataset(run_page: RunPage) -> None:
+    t = text(run_page("health", "hosted"))
+    assert 'aria-label="12 Nov fail"' in t  # Thursday's late arrival
+    assert "minutes late" in t
+
+
+# --- page 5: sources ------------------------------------------------------------------------
+
+
+def test_sources_show_measured_numbers_with_days_of_data(run_page: RunPage) -> None:
+    at = run_page("sources", "hosted")
+    t = text(at)
+    assert "days of data" in t
+    df = at.dataframe[0].value
+    assert set(df["Source"]) >= {"yahoo", "treasury"}
+    row = df[df["Source"] == "yahoo"].iloc[0]
+    assert row["Days of data"] == 2
+    assert row["Uptime"] == "83.3%"  # fetch-weighted: (1 ok of 2 + 4 ok of 4) / 6
+
+
+def test_sources_empty_says_so(run_page: RunPage) -> None:
+    t = text(run_page("sources", empty=True))
+    assert "No scorecard data yet" in t
+
+
+# --- page 6: runs ---------------------------------------------------------------------------
+
+
+def test_runs_table_start_delay_and_links(run_page: RunPage) -> None:
+    at = run_page("runs", "hosted")
+    t = text(at)
+    assert "degraded" in t
+    assert "ok" in t
+    assert "morning" in t
+    assert "300 s" in t  # scheduled 06:50, started 06:55
+    assert "github.com/allenvarghese05/desk-brief/actions" in t
+    # the template block inside the code fence is not an incident
+    assert "YYYY-MM-DD" not in t
+
+
+def test_parse_incidents_skips_the_template_fence() -> None:
+    import sys
+
+    sys.path.insert(0, str(REPO))
+    from app.pages import _incidents
+
+    md = (
+        "# Incidents\n\n```\n## 2026-01-01 — Template example\n- Detected by:\n```\n\n"
+        "## 2026-11-20 — Yahoo outage\n- Detected by: freshness\n- Impact: none\n\n"
+        "## 2026-11-18 — Late FRED\n- Detected by: sla\n"
+    )
+    items = _incidents.parse(md)
+    assert [i.title for i in items] == ["Yahoo outage", "Late FRED"]
+    assert items[0].date == "2026-11-20"
+    assert "freshness" in items[0].body
+    assert _incidents.parse("# Incidents\n\nnone yet") == []
+
+
 def test_instrument_hosted_history_and_tolerance_exclude_tier1(run_page: RunPage) -> None:
     hosted = text(pick(run_page("instrument", "hosted"), "SPY"))
     assert "590.25" not in hosted  # the tier-1 daily value in the 30-day window
@@ -215,3 +307,11 @@ def test_skipped_crosscheck_has_no_nan_in_strip_or_chart(run_page: RunPage) -> N
     assert "nan" not in t.lower().replace("financial", "")
     assert "no data in this window" in t
     assert "no gap computed" in text(run_page("xchecks", "local"))
+
+
+def test_data_health_quarantine_hosted_withholds_tier1_source(run_page: RunPage) -> None:
+    hosted = text(run_page("health", "hosted"))
+    assert "tier1_bad_tick" not in hosted
+    assert "negative_price" in hosted
+    assert "withheld" in hosted
+    assert "tier1_bad_tick" in text(run_page("health", "local"))

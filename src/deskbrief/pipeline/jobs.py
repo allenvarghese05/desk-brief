@@ -27,6 +27,7 @@ from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
+from deskbrief.alerts import with_alerts
 from deskbrief.calendars import is_business_day, session_bounds_utc
 from deskbrief.checks import run_checks
 from deskbrief.config import CalendarName, Config
@@ -103,7 +104,7 @@ class JobSteps:
     """Steps that run after the fetch/clean flush, in this order. Each is isolated by the runner."""
 
     run_checks: ChecksHook = _noop_checks  # T06: dq_results, crosscheck_results, revisions
-    build_serving: Hook = _noop  # T23: serving snapshot
+    build_serving: Hook = _noop  # T40 alerts, then T23 serving snapshot (see steps_for)
     build_report: ReportHook = _noop_report  # T31: html/xlsx/xlsm (morning)
     notify: Hook = _noop  # T31: email
 
@@ -114,11 +115,11 @@ def steps_for(job: JobKind) -> JobSteps:
         build_report, notify = report_steps()  # fresh per run: notify only sends this run's report
         return JobSteps(
             run_checks=run_checks_step,
-            build_serving=serving_step,
+            build_serving=with_alerts(serving_step),
             build_report=build_report,
             notify=notify,
         )
-    return JobSteps(run_checks=run_checks_step, build_serving=serving_step)
+    return JobSteps(run_checks=run_checks_step, build_serving=with_alerts(serving_step))
 
 
 # ---------------------------------------------------------------------------------------------

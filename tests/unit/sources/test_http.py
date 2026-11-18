@@ -105,7 +105,7 @@ def test_success_first_try(clock: FakeClock) -> None:
 
 @respx.mock
 def test_units_keyword_is_accepted_and_changes_nothing(clock: FakeClock) -> None:
-    """T08A: ``units`` is part of the protocol; until T08B it has no effect on the request."""
+    """T08A: ``units`` is part of the protocol; without a budget it has no effect on the request."""
     respx.get(URL).respond(200, content=b"a,b\n1,2\n", headers={"content-type": "text/csv"})
     plain = make(clock).get(req(), URL, params={"series_id": "DGS10"})
     weighted = make(clock).get(req(), URL, params={"series_id": "DGS10"}, units=3)
@@ -757,3 +757,79 @@ def test_secret_forms_floor_and_forms() -> None:
     assert secret_forms("abcde") == []
     assert "abcdef" in secret_forms("abcdef")
     assert "s\\xe9cr" in "".join(secret_forms("sécrét-value"))
+
+
+# -- budget units (card T08B) -----------------------------------------------------------------
+
+
+def test_try_consume_units_reserves_that_many() -> None:
+    day = date(2026, 11, 16)
+    store = InMemoryBudgetStore()
+    tracker = BudgetTracker(store, {"src": 10})
+    assert tracker.try_consume("src", day, units=5) is True
+    assert tracker.used("src", day) == 5
+    assert tracker.try_consume("src", day) is True  # default stays 1
+    assert tracker.used("src", day) == 6
+
+
+def test_try_consume_refused_when_fewer_units_remain_saves_nothing() -> None:
+    day = date(2026, 11, 16)
+    store = InMemoryBudgetStore()
+    tracker = BudgetTracker(store, {"src": 10})
+    assert tracker.try_consume("src", day, units=8) is True
+    assert tracker.try_consume("src", day, units=5) is False  # 2 left
+    assert tracker.used("src", day) == 8
+    assert tracker.try_consume("src", day, units=2) is True  # exact fit
+    assert tracker.used("src", day) == 10
+
+
+def test_try_consume_unlimited_source_passes_any_units() -> None:
+    tracker = BudgetTracker(InMemoryBudgetStore(), {"other": 1})
+    assert tracker.try_consume("src", date(2026, 11, 16), units=99) is True
+
+
+@pytest.mark.parametrize("units", [0, -1])
+def test_try_consume_rejects_non_positive_units(units: int) -> None:
+    tracker = BudgetTracker(InMemoryBudgetStore(), {"src": 10})
+    with pytest.raises(ValueError, match="units"):
+        tracker.try_consume("src", date(2026, 11, 16), units=units)
+
+
+@respx.mock
+def test_get_cost_5_consumes_5_units_and_is_refused_when_fewer_remain(clock: FakeClock) -> None:
+    route = respx.get(URL).respond(200, content=b"x")
+    s = settings(daily_budget=8)
+    tracker = BudgetTracker.from_settings(InMemoryBudgetStore(), {"src": s})
+    c = make(clock, s, budget=tracker)
+    day = date(2026, 11, 16)
+    assert c.get(req(), URL, units=5).ok
+    assert tracker.used("src", day) == 5
+    raw = c.get(req(), URL, units=5)  # 3 left
+    assert route.call_count == 1  # refused: no HTTP call
+    assert raw.status is FetchStatus.BUDGET_EXHAUSTED
+    assert raw.error is not None and "no request made" in raw.error
+    assert tracker.used("src", day) == 5
+    assert c.get(req(), URL, units=3).ok  # exact remainder still fits
+    assert tracker.used("src", day) == 8
+
+
+@respx.mock
+def test_each_retry_consumes_units(clock: FakeClock) -> None:
+    route = respx.get(URL).respond(503, content=b"down")
+    s = settings(daily_budget=10, retries=5)
+    tracker = BudgetTracker.from_settings(InMemoryBudgetStore(), {"src": s})
+    raw = make(clock, s, budget=tracker).get(req(), URL, units=4)
+    assert route.call_count == 2 and raw.attempts == 2  # 4 + 4; a third needs 12 > 10
+    assert raw.status is FetchStatus.BUDGET_EXHAUSTED
+    assert tracker.used("src", date(2026, 11, 16)) == 8
+
+
+@respx.mock
+def test_get_non_positive_units_returns_error_without_request(clock: FakeClock) -> None:
+    route = respx.get(URL).respond(200, content=b"x")
+    s = settings(daily_budget=5)
+    tracker = BudgetTracker.from_settings(InMemoryBudgetStore(), {"src": s})
+    raw = make(clock, s, budget=tracker).get(req(), URL, units=0)
+    assert route.call_count == 0 and not raw.ok
+    assert raw.error is not None and "units" in raw.error
+    assert tracker.used("src", date(2026, 11, 16)) == 0
