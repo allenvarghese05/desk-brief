@@ -53,6 +53,7 @@ from deskbrief.store.backend import (
     table_prefix,
 )
 from deskbrief.store.datasets import arrow_schema, current_clean_version
+from deskbrief.store.table_cache import invalidate
 
 #: clean tables written per run and per ET date (``source_log`` etc. live outside ``clean/``)
 COMPACTED_TABLES: tuple[str, ...] = ("observations", "quarantine")
@@ -112,6 +113,7 @@ def compact_partition(
         compression="zstd",
     )
     store.put_bytes(dest, sink.getvalue(), overwrite=True)
+    invalidate()  # a key was rewritten in place: cached tables (store.table_cache) are stale
     written = pq.read_table(io.BytesIO(store.get_bytes(dest))).num_rows
     if written != len(distinct):
         if previous is None:

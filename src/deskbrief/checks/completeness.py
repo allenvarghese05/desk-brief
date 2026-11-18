@@ -72,7 +72,7 @@ def _early(sched: DatasetSchedule, day: date) -> bool:
 
 
 def _as_date(value: Any) -> date:
-    return value.date() if isinstance(value, datetime) else value  # type: ignore[no-any-return]
+    return value.date() if isinstance(value, datetime) else value
 
 
 class CompletenessCheck:

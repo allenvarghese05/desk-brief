@@ -8,6 +8,11 @@ Views are bound to the files that exist **when you connect**. A table with no fi
 gets a view, empty and with the declared columns and types, so queries never fail on a fresh
 store. Reconnect to see files written afterwards (connecting is cheap).
 
+The append-only tables (every view below except ``scorecard``) are read once per process
+through :mod:`deskbrief.store.table_cache` and copied into the connection, so a query never goes
+back to R2 (T25c: one ``read_parquet`` glob over 1620 small files per query was most of a
+morning run). ``scorecard_daily`` is overwritten in place, so its view still reads the files.
+
 ========================  =====================================================================
 ``obs_all``               every version of every observation (all ingested rows)
 ``obs_latest``            latest ``ingested_at`` per natural key (ties: highest ``fetch_id``)
@@ -42,6 +47,7 @@ from deskbrief.store.backend import DAILY_TABLES, StorageBackend, table_prefix
 from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend, R2Credentials, r2_credentials_from_env
+from deskbrief.store.table_cache import load_table
 
 #: view name -> table it reads
 TABLE_VIEWS: dict[str, str] = {
@@ -119,6 +125,17 @@ def table_source_sql(table: str, base: str, clean_version: str, *, has_files: bo
         )
     typed = ", ".join(f"CAST(NULL AS {_sql_type(k)}) AS {_q(c)}" for c, k in TABLES[table].items())
     return f"SELECT {typed} WHERE false"
+
+
+_RUN_FILE = re.compile(r"date=[^/]+/run=[^/]+\.parquet")
+
+
+def table_keys(store: StorageBackend, table: str, clean_version: str) -> tuple[str, ...]:
+    """The table's ``date=*/run=*.parquet`` files (what the old view glob matched), sorted."""
+    prefix = table_prefix(table, clean_version)
+    return tuple(
+        sorted(k for k in store.list(prefix) if _RUN_FILE.fullmatch(k.removeprefix(prefix)))
+    )
 
 
 def _has_files(store: StorageBackend, table: str, clean_version: str) -> bool:
@@ -227,7 +244,17 @@ def connect(
 
     version = current_clean_version(store)
     for view, table in TABLE_VIEWS.items():
-        source = table_source_sql(table, base, version, has_files=_has_files(store, table, version))
+        if table in DAILY_TABLES:  # overwritten in place: always read the files themselves
+            source = table_source_sql(
+                table, base, version, has_files=_has_files(store, table, version)
+            )
+        else:  # append-only: read once per process, then copied in (store.table_cache)
+            data = load_table(store, table, version, table_keys(store, table, version))
+            name = _q(f"_cache_{view}")
+            conn.register("_cache_in", data)
+            conn.execute(f"CREATE TEMP TABLE {name} AS SELECT * FROM _cache_in")  # noqa: S608
+            conn.unregister("_cache_in")
+            source = f"SELECT {', '.join(_q(c) for c in columns(table))} FROM {name}"  # noqa: S608
         conn.execute(f"CREATE VIEW {view} AS {source}")
     for statement in _DERIVED_VIEWS:
         conn.execute(statement)
