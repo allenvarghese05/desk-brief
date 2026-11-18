@@ -1,0 +1,6 @@
+# HYPOTHETICAL broker statement for the paper portfolio. Synthetic, invented for Desk Brief. Not a real account.
+# Same shape as holdings.csv. Edit a quantity here to see reconciliation fail.
+account,instrument_id,quantity,cost_basis,currency
+HYPOTHETICAL-PAPER,AAPL,50,9000.00,USD
+HYPOTHETICAL-PAPER,MSFT,20,8000.00,USD
+HYPOTHETICAL-PAPER,NVDA,100,12000.00,USD

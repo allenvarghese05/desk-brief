@@ -6,6 +6,7 @@ INJECTED FAULT: the scorecard step raising inside the hook.
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 from dataclasses import replace
@@ -216,7 +217,8 @@ def test_a_failing_scorecard_does_not_stop_serving_but_is_reported(
 
 
 def test_serving_is_wired_into_every_job_and_the_morning_report_is_kept() -> None:
-    assert all(steps_for(j).build_serving is serving.serving_step for j in JobKind)
+    # T40 puts the alerts step in front of serving; unwrap to the serving hook itself
+    assert all(inspect.unwrap(steps_for(j).build_serving) is serving.serving_step for j in JobKind)
     morning = steps_for(JobKind.MORNING)
     assert morning.build_report.__name__ != "_noop_report"
     assert morning.run_checks is not None
