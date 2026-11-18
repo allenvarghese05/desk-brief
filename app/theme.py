@@ -93,8 +93,8 @@ CSS = f"""
 .stMarkdown .db-table tr {{ background: transparent !important; }}
 .db-sec .db-table {{ table-layout: fixed; }}
 .db-sec .db-table td {{ padding: .5rem .25rem; }}
-.db-sec .db-table td.db-name {{ width: 50%; overflow: hidden; }}
-.db-sec .db-table td.db-c {{ width: 22%; padding-left: .75rem; }}
+.db-sec .db-table td.db-name {{ width: 46%; overflow: hidden; }}
+.db-sec .db-table td.db-c {{ width: 26%; padding-left: .6rem; white-space: nowrap; }}
 .db-sec .db-table td:first-child {{ padding-left: 0; }}
 .db-sec .db-table td:last-child {{ padding-right: 0; }}
 .db-table .num, .db-fig {{ text-align: right; font-variant-numeric: tabular-nums; }}
