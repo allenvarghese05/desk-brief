@@ -42,28 +42,18 @@ verified against the live service.
 3. **Missing key**: error `RawResponse` (`http_status=None`, `error` names `TWELVEDATA_API_KEY`),
    no HTTP call, logged as `twelvedata.fetch.no_api_key`. Blank or whitespace counts as missing.
 
-## Budget accounting (known gap, for the runner/planner)
+## Budget accounting
 
-Twelve Data bills one credit per symbol: a 3-pair batch costs 3 credits (`credits_for(req)`
-returns that number). The T03 `BudgetTracker.try_consume(source, day)` reserves exactly one unit
-per HTTP attempt, and `HttpClient.get` (a contract in `base.py`) has no weight parameter. The
-source cannot reach the tracker, so **a batch is tracked as 1 unit and the persisted daily count
-under-reports real use by up to a factor of `len(symbols)`** (3 here). Pinned by
-`test_budget_known_gap_batch_counts_one_tracked_unit`.
-
-Why this is tolerable for now: real use is about 3 credits per intraday run (about 36 runs/day) plus
-3 at morning and 3 at eod, roughly 120 of the provider's 800/day (8/min) limit, so the tracked
-count would have to be 6x low before the plan breaks, and `daily_budget: 750` is below the
-provider's cap. The per-minute limit (`rate_per_min: 7`) is also per request, so a batch is
-one token.
-
-Proposed follow-up (needs a `contract:` PR, so out of scope for T15): add `units: int = 1` to
-`BudgetTracker.try_consume` and a `cost: int = 1` keyword to `HttpClient.get`; the source then
-passes `cost=credits_for(req)`. The budget-exhausted test should then assert that a batch of 3
-is refused when fewer than 3 units remain.
+Twelve Data bills one credit per symbol: a 3-pair batch costs 3 credits (`credits_for(req)`).
+`fetch` passes `units=credits_for(req)` to `HttpClient.get` (the `units` argument added by T08A/T08B),
+so the daily tracker consumes one unit per symbol and a batch is refused with `BUDGET_EXHAUSTED`
+(no HTTP call, nothing consumed) when fewer units remain than symbols. Tests:
+`test_budget_batch_consumes_one_unit_per_symbol`,
+`test_budget_batch_refused_when_fewer_units_remain_than_symbols`, `test_budget_exact_fit_then_exhausted`.
+The per-minute limit (`rate_per_min: 7`) is still per request, so a batch is one rate-limit token.
 
 Budget exhausted: the client returns `BUDGET_EXHAUSTED` with no HTTP call; covered by
-`test_budget_exhausted_makes_no_http_call` and `test_budget_last_unit_then_exhausted`.
+`test_budget_exhausted_makes_no_http_call` and the tests above.
 
 ## Key handling
 

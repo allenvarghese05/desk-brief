@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 
 import pandas as pd
@@ -512,6 +512,9 @@ def run_job(
     log = get_logger(run_id=ctx.run_id, job=job.value)
 
     gate = evaluate_gate(job, trig, now, scheduled_for)
+    if gate.proceed and gate.sources is not None:  # e.g. the ECB-fix run fetches Yahoo only
+        env = replace(env, sources=[s for s in env.sources if s.name in gate.sources])
+        log.info("run.sources_restricted", reason=gate.reason, sources=sorted(gate.sources))
     if not gate.proceed:
         manifest = _manifest(ctx)
         manifest.skipped_reason = gate.reason

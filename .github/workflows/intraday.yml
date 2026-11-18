@@ -1,0 +1,53 @@
+name: intraday
+
+# Spec §5.4. Cron is UTC; the gate in code (evaluate_gate, intraday branch) decides:
+#   - */15 13-21: proceeds only inside the NYSE session, every source.
+#   - 15 12 (P-012, summer ECB fix 14:15 CEST): proceeds only at the fix, Yahoo only.
+#   - At the fix in winter (13:15 UTC) the */15 trigger proceeds Yahoo-only before the open.
+# github.event.schedule is mapped into GITHUB_EVENT_SCHEDULE so a delayed run is gated on the
+# fire it belongs to (scheduled_for), not on the wall clock.
+on:
+  schedule:
+    - cron: "*/15 13-21 * * 1-5"
+    - cron: "15 12 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deskbrief-pipeline
+  cancel-in-progress: false
+
+jobs:
+  intraday:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUNBUFFERED: "1"
+      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
+      DESKBRIEF_STORAGE_BACKEND: r2
+      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Run intraday
+        run: |
+          args=()
+          # The gate enforces Yahoo-only itself; the flag on the 12:15 trigger is a second belt.
+          if [ "$GITHUB_EVENT_SCHEDULE" = "15 12 * * 1-5" ]; then
+            args+=(--sources yahoo)
+          fi
+          uv run deskbrief run intraday "${args[@]}"

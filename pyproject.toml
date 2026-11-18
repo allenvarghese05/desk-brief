@@ -70,7 +70,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--disable-socket --allow-unix-socket -ra"
+# --ignore-glob: the sandbox denies stat() on .env*, which pytest's rootdir scan would hit (T18)
+addopts = "--disable-socket --allow-unix-socket -ra --ignore-glob=*.env*"
 markers = [
     "integration: talks to real external services; excluded from PR CI",
 ]
