@@ -40,7 +40,7 @@ from deskbrief.store.backend import KeyNotFoundError, StorageBackend, budget_key
 from deskbrief.store.duck import connect
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
-from deskbrief.timeutil import ensure_utc, to_et
+from deskbrief.timeutil import CET, ensure_utc, local_to_utc, to_et
 
 MORNING_WINDOW_ET = (time(6, 0), time(7, 0))
 _EOD_CALENDARS: tuple[CalendarName, ...] = ("XNYS", "SIFMA_US", "TARGET")
@@ -128,8 +128,34 @@ def steps_for(job: JobKind) -> JobSteps:
 
 @dataclass(frozen=True)
 class Gate:
+    """Outcome of :func:`evaluate_gate`.
+
+    ``sources`` restricts a proceeding run to those source names (``None``: every enabled
+    source); ``run_job`` applies it, so the workflow's ``--sources`` flag is a second belt.
+    """
+
     proceed: bool
     reason: str = ""
+    sources: frozenset[str] | None = None
+
+
+#: P-012: the FX leg of ``yahoo_vs_primary`` needs a Yahoo quote at the ECB fix.
+ECB_FIX_TIME = "14:15"  # Europe/Berlin wall clock (config ``fx_vs_ecb.fix_time_cet``)
+ECB_FIX_WINDOW = timedelta(minutes=10)
+ECB_FIX_SOURCES = frozenset({"yahoo"})
+
+
+def _in_ecb_fix_window(ref_utc: datetime) -> bool:
+    """``ref_utc`` is within +/-10 min of 14:15 Berlin on a TARGET business day.
+
+    The one place the fix-window rule lives. TARGET, not XNYS, decides the day, so US holidays
+    (Thanksgiving, July 4) where the ECB still publishes are covered.
+    """
+    ref = ensure_utc(ref_utc)
+    day = ref.astimezone(CET).date()
+    if not is_business_day("TARGET", day):
+        return False
+    return abs(ref - local_to_utc(day, ECB_FIX_TIME, CET)) <= ECB_FIX_WINDOW
 
 
 def evaluate_gate(
@@ -140,6 +166,11 @@ def evaluate_gate(
     ``morning`` is gated on the instant the cron was *meant* to fire (``scheduled_for``, from
     ``GITHUB_EVENT_SCHEDULE``) when known, so a delayed GitHub runner still produces the
     report; otherwise on the wall clock.
+
+    ``intraday`` proceeds inside the XNYS session (every source). Outside it, a run proceeds
+    only inside the ECB-fix window (P-012) and then fetches Yahoo only (``Gate.sources``). That
+    window is judged on ``scheduled_for`` (wall clock if unknown) and comes before the "not an
+    XNYS business day" check, so it also covers US holidays when TARGET is open.
     """
     if trigger is not Trigger.SCHEDULE:
         return Gate(True)
@@ -156,13 +187,15 @@ def evaluate_gate(
                 "(the other DST cron trigger handles it)",
             )
     elif job is JobKind.INTRADAY:
+        now = ensure_utc(now_utc)
         bounds = session_bounds_utc(day)
+        if bounds is not None and bounds[0] <= now <= bounds[1]:
+            return Gate(True)
+        if _in_ecb_fix_window(scheduled_for if scheduled_for is not None else now):
+            return Gate(True, "ECB fix window: Yahoo FX quote only", ECB_FIX_SOURCES)
         if bounds is None:
             return Gate(False, f"{day} is not an XNYS business day")
-        et = to_et(now_utc)
-        opens, closes = bounds
-        if not opens <= ensure_utc(now_utc) <= closes:
-            return Gate(False, f"{et:%H:%M} ET is outside the XNYS session")
+        return Gate(False, f"{et:%H:%M} ET is outside the XNYS session")
     elif job is JobKind.EOD and not any(is_business_day(c, day) for c in _EOD_CALENDARS):
         return Gate(False, f"{day} is a holiday on every configured calendar")
     return Gate(True)
