@@ -35,8 +35,9 @@ callables over the ``StorageBackend``, keyed by ``deskbrief.store.backend.budget
 
 and builds ``BudgetTracker.from_settings(CallableBudgetStore(load, save), config.sources)``.
 ``day`` is the UTC date, since provider quotas reset at UTC midnight. Every HTTP attempt,
-retries included, consumes one unit. Weighting batch requests per symbol is left to the
-source card.
+retries included, consumes ``units`` (the ``get(..., units=N)`` argument, default 1; for example
+a batch quote the provider counts once per symbol). A call is refused, with no HTTP request, when
+fewer than ``units`` remain. Choosing the cost per request is left to the source card.
 """
 
 from __future__ import annotations
@@ -127,16 +128,22 @@ class BudgetTracker:
     def used(self, source: str, day: date) -> int:
         return self._store.load(source, day)
 
-    def try_consume(self, source: str, day: date) -> bool:
-        """Reserve one request. False (and nothing saved) when the day's budget is spent."""
+    def try_consume(self, source: str, day: date, units: int = 1) -> bool:
+        """Reserve ``units`` of the day's budget (default 1 request).
+
+        False, with nothing saved, when fewer than ``units`` remain. Raises ``ValueError`` for
+        ``units < 1``, even for a source without a limit.
+        """
+        if units < 1:
+            raise ValueError(f"units must be >= 1, got {units}")
         limit = self._limits.get(source)
         if limit is None:
             return True
         with self._lock:
             used = self._store.load(source, day)
-            if used >= limit:
+            if used + units > limit:
                 return False
-            self._store.save(source, day, used + 1)
+            self._store.save(source, day, used + units)
             return True
 
 
@@ -315,7 +322,7 @@ class DefaultHttpClient:
         headers: Mapping[str, str] | None = None,
         secret_params: Mapping[str, str] | None = None,
         secret_headers: Mapping[str, str] | None = None,
-        units: int = 1,  # accepted, not yet used: T08B wires it to BudgetTracker
+        units: int = 1,
     ) -> RawResponse:
         log = get_logger(source=req.source, dataset=req.dataset)
         secrets = [*(secret_params or {}).values(), *(secret_headers or {}).values()]
@@ -368,10 +375,10 @@ class DefaultHttpClient:
         max_attempts = settings.retries + 1
 
         def reserve() -> bool:
-            """Take one unit of the daily budget (UTC day of now). True if no budget applies."""
+            """Take ``units`` of the daily budget (UTC day of now). True if no budget applies."""
             if self._budget is None:
                 return True
-            return self._budget.try_consume(req.source, ensure_utc(self._now()).date())
+            return self._budget.try_consume(req.source, ensure_utc(self._now()).date(), units)
 
         def exhausted(made: int, last: _Outcome) -> RawResponse:
             log.warning("http.budget_exhausted", url=url_redacted, attempts_made=made)
@@ -386,6 +393,9 @@ class DefaultHttpClient:
                 ),
                 FetchStatus.BUDGET_EXHAUSTED,
             )
+
+        if units < 1:  # programmer error, but get() never raises: fail before any budget/HTTP
+            return finish(1, _Outcome(error=f"units must be >= 1, got {units}; no request made"))
 
         for name, value in send_headers.items():
             if not (name.isascii() and value.isascii()):
