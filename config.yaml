@@ -243,6 +243,21 @@ instruments:
     feeds:
       - {source: fred, dataset: series, symbol: DGS30, tier: 3}
       - {source: treasury, dataset: par_curve, symbol: 30 Yr, tier: 3}
+  # T46 (P-021a): real yield and breakeven, FRED only (docs/sources/fred.md)
+  - id: UST_10Y_REAL
+    name: US 10-year TIPS real yield
+    asset_class: rates
+    kind: yield
+    unit: pct           # may be negative; validity pct is [-2, 25]
+    feeds:
+      - {source: fred, dataset: series, symbol: DFII10, tier: 3}
+  - id: BEI_10Y
+    name: US 10-year breakeven inflation (nominal minus real yield)
+    asset_class: rates
+    kind: yield
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: T10YIE, tier: 3}
 
   # ---------------- FX (ECB GBP/JPY rates are derived crosses via EUR) ----------------
   - id: EURUSD
@@ -275,6 +290,15 @@ instruments:
       - {source: twelvedata, dataset: fx_series_1m, symbol: USD/JPY, tier: 1}
       - {source: yahoo, dataset: quote, symbol: JPY=X, tier: 2}
       - {source: ecb, dataset: eurofxref, symbol: USDJPY, tier: 3}
+  # T46: an index, not a pair, so kind macro (kind fx requires unit fx_rate). Weekly H.10
+  # release with daily values: SeriesSpec lag (sources/fred.py DOLLAR_LAG_BDAYS).
+  - id: USD_BROAD
+    name: Nominal broad US dollar index
+    asset_class: fx
+    kind: macro
+    unit: index_pts
+    feeds:
+      - {source: fred, dataset: series, symbol: DTWEXBGS, tier: 3}
 
   # ---------------- Volatility ----------------
   - id: VIX
@@ -313,7 +337,7 @@ instruments:
       - {source: yahoo, dataset: quote, symbol: ^GDAXI, tier: 2}
       - {source: yahoo, dataset: history, symbol: ^GDAXI, tier: 2}
 
-  # ---------------- Macro (monthly CPI/UNRATE, daily DFF) ----------------
+  # ---------------- Macro (monthly CPI/UNRATE, daily DFF and HY OAS, weekly NFCI) ----------------
   - id: CPI
     name: CPI, all urban consumers (index)
     asset_class: macro
@@ -335,6 +359,21 @@ instruments:
     unit: pct
     feeds:
       - {source: fred, dataset: series, symbol: DFF, tier: 3}
+  # T46 (P-021a): credit spread and financial conditions
+  - id: HY_OAS
+    name: ICE BofA US high-yield option-adjusted spread
+    asset_class: macro
+    kind: macro
+    unit: pct
+    feeds:
+      - {source: fred, dataset: series, symbol: BAMLH0A0HYM2, tier: 3}
+  - id: NFCI
+    name: Chicago Fed National Financial Conditions Index
+    asset_class: macro
+    kind: macro
+    unit: index         # negative = looser than average; validity index is [-100, 100000]
+    feeds:
+      - {source: fred, dataset: series_weekly, symbol: NFCI, tier: 3}
 
 groups:
   - {id: sp500, label: S&P 500, proxy: SPY, exact: ES_F, official: SPY, relation: return,
@@ -369,6 +408,11 @@ groups:
 datasets:   # expected publish times drive freshness; before expected_by the check is "skip"
   - {source: treasury, dataset: par_curve, expected_by_et: "18:00", lag_bdays: 0, calendar: SIFMA_US}
   - {source: fred, dataset: series, expected_by_et: "16:30", lag_bdays: 1, calendar: SIFMA_US}
+  # T46: NFCI. Chicago Fed releases Wednesdays 08:30 ET with data through the previous Friday
+  # (3 weekdays back); a federal holiday on or before Wednesday moves it to Thursday. FRED
+  # posted the 2026-11-18 release at 08:35 ET. Source: docs/sources/fred.md.
+  - {source: fred, dataset: series_weekly, expected_by_et: "09:30", lag_bdays: 3,
+     calendar: SIFMA_US, grace_minutes: 90, release_weekday: 2}
   - {source: ecb, dataset: eurofxref, expected_by_et: "11:00", lag_bdays: 0, calendar: TARGET}
   - {source: stooq, dataset: daily, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
   - {source: cboe, dataset: vix_history, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}

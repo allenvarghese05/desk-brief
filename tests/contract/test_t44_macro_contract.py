@@ -168,7 +168,11 @@ def test_existing_schedules_have_no_release_weekday() -> None:
     assert DatasetSchedule.model_validate(_schedule()).release_weekday is None
     cfg = load_config("config.yaml")
     assert cfg.datasets, "the real config has freshness entries"
-    assert all(s.release_weekday is None for s in cfg.datasets)
+    # Weekly datasets added by later cards (T46 FRED NFCI) carry one; the daily ones never do.
+    weekly = {("fred", "series_weekly")}
+    assert all(
+        s.release_weekday is None for s in cfg.datasets if (s.source, s.dataset) not in weekly
+    )
 
 
 @pytest.mark.parametrize("bad", [-1, 7, True, "4"])

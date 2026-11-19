@@ -41,7 +41,13 @@ SERIES = [
     "DCOILBRENTEU",
     "CPIAUCSL",
     "UNRATE",
+    # card T46
+    "DFII10",
+    "T10YIE",
+    "DTWEXBGS",
+    "BAMLH0A0HYM2",
 ]
+WEEKLY = ["NFCI"]  # dataset series_weekly (card T46)
 
 
 @pytest.fixture(scope="module")
@@ -112,9 +118,10 @@ def obs(d: str, v: str) -> dict[str, str]:
 
 def test_plan_one_request_per_configured_series(src: FredSource, config: Config) -> None:
     reqs = src.plan(JobKind.MORNING, ctx_for(config))
-    assert sorted(r.symbols[0] for r in reqs) == sorted(SERIES)
+    assert sorted(r.symbols[0] for r in reqs) == sorted(SERIES + WEEKLY)
     for r in reqs:
-        assert r.source == "fred" and r.dataset == "series"
+        assert r.source == "fred"
+        assert r.dataset == ("series_weekly" if r.symbols[0] in WEEKLY else "series")
         assert r.symbols == (r.params["series_id"],)
         assert r.params["limit"] == "10"  # last ~10 obs so revisions are visible
         assert r.params["sort_order"] == "desc"
@@ -146,7 +153,8 @@ def test_plan_skips_series_without_a_spec(config: Config) -> None:
     src = FredSource(config)
     src._specs = {k: v for k, v in src._specs.items() if k != "UNRATE"}
     reqs = src.plan(JobKind.MORNING, ctx_for(config))
-    assert "UNRATE" not in [r.symbols[0] for r in reqs] and len(reqs) == 8
+    assert "UNRATE" not in [r.symbols[0] for r in reqs]
+    assert len(reqs) == len(SERIES) + len(WEEKLY) - 1
     # T08: the skip is a config bug, so it is logged at error level and the log line is asserted
     logged = [json.loads(ln) for ln in stream.getvalue().splitlines() if ln.strip()]
     skips = [r for r in logged if r.get("event") == "fred.plan.skip"]
@@ -156,7 +164,9 @@ def test_plan_skips_series_without_a_spec(config: Config) -> None:
 
 def test_every_configured_fred_series_has_a_spec(config: Config) -> None:
     """T08: a series added to config.yaml without a SERIES_SPECS entry must fail CI."""
-    configured = set(config.feed_index("fred", "series"))
+    configured = set(config.feed_index("fred", "series")) | set(
+        config.feed_index("fred", "series_weekly")
+    )
     assert configured, "config has no FRED series"
     missing = sorted(configured - set(SERIES_SPECS))
     assert not missing, f"FRED series without a SERIES_SPECS entry: {missing}"
@@ -231,7 +241,7 @@ def test_parse_oil_is_usd_close(src: FredSource) -> None:
     assert brent.iloc[0]["instrument_id"] == "BRENT" and brent.iloc[0]["unit"] == "USD"
 
 
-@pytest.mark.parametrize("series", SERIES)
+@pytest.mark.parametrize("series", SERIES + WEEKLY)
 def test_every_configured_series_parses_and_validates(src: FredSource, series: str) -> None:
     day = "2026-09-01" if series in {"CPIAUCSL", "UNRATE"} else "2026-11-13"
     df = src.parse(raw_for(series, payload([obs(day, "1.5")])))
