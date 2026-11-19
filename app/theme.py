@@ -179,7 +179,17 @@ div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
 .db-range span {{ position: absolute; top: -3px; width: 2px; height: 10px; background: {INK}; }}
 .db-range-ends {{ display: flex; justify-content: space-between; color: {MUTED};
   font-size: .72rem; font-variant-numeric: tabular-nums; }}
-.db-kicker {{ margin: .9rem 0 .3rem 0; }}
+.db-kicker {{ margin: 1.1rem 0 .35rem 0; }}
+.st-key-db-detail .db-kicker, .st-key-db-values .db-kicker {{ color: {INK}; font-size: .74rem;
+  padding-top: .7rem; border-top: 1px solid {RULE}; }}
+.st-key-db-detail .db-kicker:first-child {{ border-top: 0; padding-top: 0; }}
+.db-verdict {{ display: flex; gap: .45rem; align-items: baseline; flex-wrap: wrap;
+  margin-top: .55rem; padding: .45rem .7rem; border-radius: 6px; font-size: .84rem;
+  color: {INK}; background: {CANVAS}; border: 1px solid {RULE}; border-left-width: 3px; }}
+.db-verdict b {{ font-weight: 600; }}
+.db-verdict-ok {{ border-left-color: {UP}; }} .db-verdict-warn {{ border-left-color: {WARN}; }}
+.db-verdict-fail {{ border-left-color: {FAIL}; }}
+.db-verdict-muted {{ border-left-color: {MUTED}; }}
 .db-kicker:first-child {{ margin-top: 0; }}
 .db-checks {{ font-size: .8rem; color: {INK}; }}
 .db-checks div {{ display: flex; justify-content: space-between; gap: .5rem;

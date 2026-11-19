@@ -97,6 +97,50 @@ def _apart(seconds: float) -> str:
     return f"{m / 60:.1f} h" if m < 2880 else f"{m / 1440:.1f} d"
 
 
+#: gap (bp) at or under which two same-moment values count as agreeing
+AGREE_BP = 5.0
+LIKE_FOR_LIKE_S = 15 * 60
+
+
+def _gap_bp(r: ValueRow, best: ValueRow) -> float | None:
+    if r.unit == "pct":
+        return (r.value - best.value) * 100
+    return (r.value - best.value) / best.value * 10_000 if best.value else None
+
+
+def verdict_html(rows: list[ValueRow]) -> str:
+    """One line answering "do the sources agree?", shown under the price."""
+    if not rows:
+        return ""
+    best = rows[0]
+    names = ", ".join(f"{r.source} ({TIER_NAME[r.tier]})" for r in rows)
+    if len(rows) == 1:
+        tone, text = "muted", f"One source only: {names}. Nothing to cross-check yet."
+    else:
+        gaps = [abs(g) for r in rows[1:] if (g := _gap_bp(r, best)) is not None]
+        worst = max(gaps, default=0.0)
+        apart = max(abs((x.as_of - best.as_of).total_seconds()) for x in rows[1:])
+        if apart > LIKE_FOR_LIKE_S:
+            tone = "warn"
+            text = (
+                f"{len(rows)} sources, {worst:.1f} bp apart, but their prices are "
+                f"{_apart(apart)} apart in time: not like-for-like."
+            )
+        elif worst <= AGREE_BP:
+            tone, text = "ok", f"{len(rows)} sources agree within {worst:.1f} bp."
+        else:
+            tone, text = (
+                "fail",
+                f"{len(rows)} sources disagree by {worst:.1f} bp at the same moment.",
+            )
+        text += f" ({names})"
+    return (
+        f'<div class="db-verdict db-verdict-{tone}" title="compares each tier\'s latest value">'
+        f'<span class="db-dot db-dot-{"unknown" if tone == "muted" else tone}"></span>'
+        f"<b>Do the sources agree?</b> {escape(text)}</div>"
+    )
+
+
 def ladder_html(rows: list[ValueRow]) -> str:
     """Each visible tier's latest value and its gap to the official (highest) tier."""
     if not rows:

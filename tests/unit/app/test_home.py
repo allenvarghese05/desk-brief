@@ -281,10 +281,12 @@ def test_single_search_match_selects_it(run_home: Run) -> None:
 
 def test_ladder_uses_p009_labels(run_home: Run) -> None:
     text = page(select(run_home("local"), "UST_10Y"))
-    ladder = text.split("Do the sources agree?", 1)[1]
+    ladder = text.split('db-kicker">Do the sources agree?</div>', 1)[1].split("Cross-checks", 1)[0]
     assert 'db-field">yield<' in ladder
     assert 'db-field">close<' not in ladder  # a yield is not a close
-    eur = page(select(run_home("local"), "EURUSD")).split("Do the sources agree?", 1)[1]
+    eur = page(select(run_home("local"), "EURUSD")).split(
+        'db-kicker">Do the sources agree?</div>', 1
+    )[1]
     assert "ECB reference rate" in eur
 
 
@@ -297,7 +299,7 @@ def test_hosted_details_never_show_tier1(run_home: Run) -> None:
 
 def test_local_details_show_every_tier_and_checks(run_home: Run) -> None:
     text = page(select(run_home("local"), "SPY"))
-    ladder = text.split("Do the sources agree?", 1)[1]
+    ladder = text.split('db-kicker">Do the sources agree?</div>', 1)[1].split("Cross-checks", 1)[0]
     assert "alpaca" in ladder
     assert "live" in ladder
     assert "Data checks, last 14 days" in text
@@ -422,3 +424,13 @@ def test_corrections_show_both_versions(run_home: Run) -> None:
     assert "2 versions" in corr
     assert "4.100%" in corr
     assert "4.180%" in corr
+
+
+def test_verdict_under_the_price_answers_do_the_sources_agree(run_home: Run) -> None:
+    text = page(select(run_home("local"), "SPY"))
+    verdict = re.search(r'<div class="db-verdict db-verdict-(\w+)".*?</div>', text, flags=re.S)
+    assert verdict is not None
+    assert "Do the sources agree?" in verdict.group(0)
+    assert verdict.start() < text.index('<div class="db-hzs"')
+    one = page(select(run_home("hosted"), "UST_2Y"))
+    assert "One source only" in one or "sources" in one

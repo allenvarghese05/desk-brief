@@ -87,6 +87,9 @@ def _chart(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) 
     """Header, performance over horizons, controls, the chart and its caption; returns all
     daily bars of the instrument (the risk panel needs more than the range in view)."""
     _html(st, panels.chart_header(row, ov.as_of))
+    _html(
+        st, instrument.verdict_html(instrument.ladder(config, row.instrument_id, hidden, ov.as_of))
+    )
     bars = data.load_bars(config, row.instrument_id, hidden)
     _html(st, tearsheet.horizons_html(tearsheet.horizons(row, bars)))
     if bars.empty:
