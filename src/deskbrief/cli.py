@@ -59,7 +59,17 @@ def _business_days(start: date, end: date) -> list[date]:
     return business_days("XNYS", start, end)
 
 
+#: ``run`` rejects these jobs: they have their own subcommand (or will, once their card lands).
+_NOT_RUN_JOBS: dict[JobKind, str] = {
+    JobKind.HISTORY: "history is its own subcommand (card T53)",
+}
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    rejected = _NOT_RUN_JOBS.get(JobKind(args.job))
+    if rejected:
+        print(rejected, file=sys.stderr)
+        return 2
     configure_logging()
     log = get_logger()
     try:

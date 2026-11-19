@@ -25,13 +25,13 @@ from yaml.nodes import MappingNode
 from deskbrief.timeutil import parse_hhmm
 
 KNOWN_SOURCES: frozenset[str] = frozenset(
-    {"treasury", "fred", "ecb", "stooq", "cboe", "alpaca", "twelvedata", "yahoo"}
+    {"treasury", "fred", "ecb", "stooq", "cboe", "alpaca", "twelvedata", "yahoo", "cftc"}
 )
 
 Tier = Literal[1, 2, 3]
 AssetClass = Literal["equity", "rates", "fx", "commodity", "index", "vol", "macro"]
 Kind = Literal["etf", "stock", "future", "index", "yield", "fx", "macro"]
-Unit = Literal["USD", "pct", "fx_rate", "index_pts"]
+Unit = Literal["USD", "pct", "fx_rate", "index_pts", "index", "contracts"]
 Relation = Literal["same", "return", "inverse_duration", "level"]
 CalendarName = Literal["XNYS", "SIFMA_US", "TARGET"]
 
@@ -157,6 +157,9 @@ class DatasetSchedule(_Model):
     lag_bdays: int = Field(ge=0, le=10)
     calendar: CalendarName
     grace_minutes: int = Field(default=60, gt=0)
+    #: Weekday of the release (0 = Monday .. 6 = Sunday) for ``1w`` datasets (P-021); absent
+    #: for daily and monthly datasets. Read by the freshness check (card T45).
+    release_weekday: int | None = Field(default=None, ge=0, le=6, strict=True)
 
     @field_validator("expected_by_et")
     @classmethod

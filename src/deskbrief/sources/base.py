@@ -23,12 +23,19 @@ Rules every source follows:
 * A malformed/unexpected payload -> raise :class:`ParseError`; the runner quarantines the fetch
   and records a DQ failure. Never return partial garbage.
 * Apply ``Feed.scale`` before returning values.
+
+Range support (P-020, optional): a source may also implement
+``plan_range(start, end, ctx)`` -> the requests that cover the ET dates ``[start, end]`` in as
+few calls as the provider allows. It is used only by the one-time ``history`` job (card T53);
+``plan`` stays the per-run path. A source without it has no range support, and the history job
+lists and skips it. Use :func:`supports_range` rather than ``hasattr``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from datetime import date
+from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
 
 import pandas as pd
 
@@ -82,6 +89,18 @@ class Source(Protocol):
     def fetch(self, req: FetchRequest, http: HttpClient) -> RawResponse: ...
 
     def parse(self, raw: RawResponse) -> pd.DataFrame: ...
+
+
+@runtime_checkable
+class RangeSource(Source, Protocol):
+    """A :class:`Source` that can plan a whole date range at once (P-020)."""
+
+    def plan_range(self, start: date, end: date, ctx: RunContext) -> list[FetchRequest]: ...
+
+
+def supports_range(source: Source) -> TypeGuard[RangeSource]:
+    """True when ``source`` implements a callable ``plan_range`` (range support, P-020)."""
+    return callable(getattr(source, "plan_range", None))
 
 
 #: How the registry constructs a source.
