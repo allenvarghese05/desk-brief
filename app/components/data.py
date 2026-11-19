@@ -108,6 +108,9 @@ def _shared(config: Config, backend: str, where: str) -> _Shared:
     The old connection is closed after taking its lock, so a query still running on it
     finishes first and only one in-memory copy is kept."""
     key = (backend, where)
+    # Single flight on purpose: a stale connection is rebuilt while the guard is held, so
+    # sessions arriving meanwhile wait for that one build instead of each starting their own
+    # (a build copies every cached table: seconds on R2, and memory per copy).
     with _SHARED_GUARD:
         cur = _SHARED.get(key)
         if cur is not None and time.monotonic() - cur.built < CACHE_TTL_SECONDS:
