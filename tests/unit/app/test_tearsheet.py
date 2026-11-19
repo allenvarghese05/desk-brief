@@ -126,7 +126,6 @@ def test_horizons_measure_from_the_close_on_or_before_the_start() -> None:
 def test_risk_volatility_matches_the_formula() -> None:
     from app.components import tearsheet
 
-    closes = [100.0 * (1.01 if i % 2 else 0.99) ** (i % 2) for i in range(25)]
     closes = [100.0, 101.0] * 13
     html = tearsheet.risk_html(_row(), _bars(closes))
     moves = pd.Series(closes).apply(math.log).diff().dropna() * 100
@@ -214,3 +213,26 @@ def test_shared_connection_is_reused_then_replaced_and_closed(
         assert fresh.execute("SELECT 1").fetchone() == (1,)
     with pytest.raises(Exception):  # noqa: B017, PT011 (duckdb raises its own closed error)
         first.execute("SELECT 1")
+
+
+def test_shared_connection_skips_one_closed_between_lookup_and_lock(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that looked up a connection just before another replaced and closed it must
+    retry and get the new one, never run a query on the closed one."""
+    import threading
+
+    from app.components import data
+
+    run_home("local")
+    config = load_config(os.environ["DESKBRIEF_CONFIG"])
+    stale = data._Shared(data.open_connection(config, os.environ), threading.Lock(), 0.0)
+    stale.closed = True
+    stale.conn.close()
+    good = data._Shared(data.open_connection(config, os.environ), threading.Lock(), 0.0)
+    handed = iter([stale, good])
+    monkeypatch.setattr(data, "_shared", lambda *_a: next(handed))
+    with data.shared_connection(config) as conn:
+        assert conn is good.conn
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+    good.conn.close()

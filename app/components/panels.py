@@ -392,12 +392,11 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
         return top + (hi - v) / ((hi - lo) or 1) * (h - top - bottom)
 
     grid = ""
-    for i in range(4):
+    for i in range(4):  # gridlines only: every yield figure is in the tenor strip below
         v = lo + (hi - lo) * i / 3
         grid += (
             f'<line x1="{left}" x2="{w - right}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
-            f'class="db-curve-grid"/><text x="{left - 6}" y="{y(v) + 4:.1f}" text-anchor="end">'
-            f"{v:.2f}%</text>"
+            'class="db-curve-grid"/>'
         )
     ticks = "".join(
         f'<text x="{x(t):.1f}" y="{h - 10}" text-anchor="middle">{SHORT[t]}</text>' for t in tenors
