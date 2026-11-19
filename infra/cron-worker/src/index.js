@@ -46,6 +46,10 @@ function field(spec, lo, hi) {
       start = Number(rng);
       end = stepStr === undefined ? start : hi;
     }
+    // Supported: *, n, a-b, lists, and steps on * and ranges. "n/step" means n through the
+    // field's maximum. Names (MON, JAN) and "?", "L", "W", "#" are not supported. A stepped
+    // day field such as "*/2" counts as restricted for the day-of-month/day-of-week OR rule,
+    // as in jobs.last_cron_fire (Vixie cron would treat it as "*"); no table cron uses one.
     const sundaySeven = hi === 6 && end === 7;
     if (!(Number.isInteger(start) && Number.isInteger(end))) throw new Error(`bad cron ${spec}`);
     if (!(lo <= start && start <= end && (end <= hi || sundaySeven))) {
@@ -128,9 +132,21 @@ export async function dispatch(entry, env, fetchImpl = fetch, log = console) {
   return false;
 }
 
+/**
+ * Dispatch every entry due at `scheduledTime`. Every due fire is attempted; if any still failed
+ * after its retry, log one `tick.failed` summary and throw, so Cloudflare marks the invocation
+ * failed (visible in the Worker's metrics) instead of discarding the failure.
+ */
 export async function tick(scheduledTime, env, fetchImpl = fetch, log = console) {
   const entries = due(scheduledTime);
-  return Promise.all(entries.map((e) => dispatch(e, env, fetchImpl, log)));
+  const results = await Promise.all(entries.map((e) => dispatch(e, env, fetchImpl, log)));
+  const failed = entries.filter((_, i) => !results[i]);
+  if (failed.length > 0) {
+    const fires = failed.map((e) => ({ workflow: e.workflow, fire: e.cron, slot: e.slot }));
+    log.error(JSON.stringify({ event: "tick.failed", failed: fires }));
+    throw new Error(`${failed.length} of ${entries.length} dispatches failed: ${failed.map((e) => e.workflow).join(", ")}`);
+  }
+  return results;
 }
 
 export default {

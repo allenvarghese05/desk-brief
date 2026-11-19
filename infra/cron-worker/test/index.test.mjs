@@ -108,3 +108,40 @@ test("tick dispatches every due entry and nothing on a quiet minute", async () =
   assert.deepEqual(await tick(ms("2026-11-17T22:31:00Z"), ENV, g.impl, rec), []);
   assert.equal(g.calls.length, 0);
 });
+
+test("a fire that still fails after its retry fails the tick with a summary", async () => {
+  const f = fakeFetch([500, 503]);
+  const rec = recorder();
+  await assert.rejects(
+    () => tick(ms("2026-11-17T22:30:00Z"), ENV, f.impl, rec),
+    (err) => {
+      assert.match(err.message, /1 of 1 dispatches failed: eod.yml/);
+      assert.ok(!err.message.includes("fake-token-123"));
+      return true;
+    },
+  );
+  assert.equal(f.calls.length, 2);
+  const summary = rec.lines.filter((l) => l.includes("tick.failed"));
+  assert.equal(summary.length, 1);
+  assert.deepEqual(JSON.parse(summary[0]).failed, [
+    { workflow: "eod.yml", fire: "30 22 * * 1-5", slot: "2026-11-17T22:30:00Z" },
+  ]);
+  assert.ok(rec.lines.every((l) => !l.includes("fake-token-123")));
+});
+
+test("the token appears in no log line on the ok, failure and error paths", async () => {
+  const rec = recorder();
+  const entry = { workflow: "eod.yml", cron: "30 22 * * 1-5", slot: "2026-11-17T22:30:00Z" };
+  await dispatch(entry, ENV, fakeFetch([204]).impl, rec);
+  await dispatch(entry, ENV, fakeFetch([403, 401]).impl, rec);
+  await dispatch(entry, ENV, fakeFetch(["throw", "throw"]).impl, rec);
+  await tick(ms("2026-11-17T22:30:00Z"), ENV, fakeFetch(["throw", 500]).impl, rec).catch(() => {});
+  const events = rec.lines.map((l) => JSON.parse(l).event);
+  for (const e of ["dispatch.ok", "dispatch.failed", "dispatch.error", "tick.failed"]) {
+    assert.ok(events.includes(e), e);
+  }
+  for (const line of rec.lines) {
+    assert.ok(!line.includes("fake-token-123"), line);
+    assert.ok(!line.includes("Bearer"), line);
+  }
+});

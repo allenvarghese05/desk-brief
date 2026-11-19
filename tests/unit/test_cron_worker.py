@@ -7,6 +7,7 @@ The drift test parses the four workflows' ``schedule:`` crons and the table in
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -99,8 +100,13 @@ def test_workflows_accept_fire_and_slot_and_map_them_through_env(name: str) -> N
         assert "${{" not in step.get("run", "")
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_worker_node_tests_pass() -> None:
+    """Runs the Worker's node suite. CI's ubuntu runner ships node, so there it must run: a
+    missing node fails under ``CI`` instead of skipping silently; locally it is a skip."""
+    if shutil.which("node") is None:
+        if os.environ.get("CI"):
+            pytest.fail("node is not on PATH in CI; the Worker's tests would not run")
+        pytest.skip("node is not installed")
     proc = subprocess.run(
         ["node", "--test", "test/index.test.mjs"],
         cwd=WORKER,
