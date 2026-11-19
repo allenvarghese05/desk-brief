@@ -620,6 +620,135 @@ Not carried: the two PR #41 nits. The stale PR-body line needs no action, and th
 #### T42 — README, architecture doc, screenshots
 - **Depends:** T31, T35 · **Owns:** `README.md`, `docs/architecture.md`, `docs/terms.md` (from H9). Only measured numbers.
 
+### Phase 4B — Macro-desk data (rulings P-018 to P-021, 2026-11-19)
+
+Order (never two open PRs owning the same file, §3):
+- **Track A, in parallel from the start:** T43. It owns no file of track B.
+- **Track B, one after another:** T44 (contract) → T45 (weekly cadence) → T46 → T47 → T48 → T49. T46–T49 each edit `config.yaml`.
+- **Last:** T53 (history load, after T43 and T49), then T54 (dashboard views).
+
+Rules for the phase:
+- **Live probes:** keyless sources (Yahoo, Cboe, CFTC) are probed by the implementer. FRED needs `FRED_API_KEY`, which only the owner holds, so the PR gives the exact command and the owner runs it.
+- **Spec:** the spec text for P-018 to P-021 is written by T53 alone. Until then the rulings take precedence (P-020).
+- **Range support:** each source card implements `plan_range` for its own source (P-020), with a test over a multi-month range.
+
+Changelog: T45's Owns widened to the value readers, and T43 names `scheduled_for_from_env`, after the [PR #73 confirmation review, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/73).
+
+#### T43 — Cloudflare Worker cron trigger (P-018)
+- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README with the deploy, secret and rotation commands), the `fire` and `slot` `workflow_dispatch` inputs and their mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` and `scheduled_for_from_env` (which prefers `DESKBRIEF_SLOT`) in `src/deskbrief/pipeline/jobs.py`, the `slot` → `scheduled_for` mapping and the `duplicate fire` skip in `src/deskbrief/pipeline/runner.py`, tests.
+- Acceptance:
+  - **One trigger:** the Worker has a single Cron Trigger (`* * * * *`) and a UTC schedule table in code. A test parses the four workflows' `schedule:` crons and fails if the table differs.
+  - **Inputs:** each dispatch passes `fire` (the exact cron string) and `slot` (the scheduled minute in UTC, computed from the table, not from when the Worker ran). The workflows read both through `env:`, never `${{ }}` inside `run:`. `GITHUB_EVENT_SCHEDULE` gets `fire` (so `intraday.yml`'s literal `15 12 * * 1-5` branch still works) and a separate `DESKBRIEF_SLOT` gets `slot`.
+  - **Human dispatch unchanged:** a `workflow_dispatch` without `fire` and `slot` stays `Trigger.MANUAL` and ungated. Test covers it.
+  - **Same as a schedule event:** a dispatch with `fire` and `slot` gets `Trigger.SCHEDULE`, `scheduled_for = slot`, and the same gate result as a schedule event for that slot. Tests cover a dispatched ECB-fix run that starts late.
+  - **Duplicates (P-018's guarantee):** a pipeline run (`run_job`) whose job and `scheduled_for` match an `ok` or `degraded` `runs` row skips with reason `duplicate fire`. `sla.yml` is a read-only check that writes no `runs` row, so a duplicate sla run just checks again, which is harmless. Tests:
+    - a GitHub morning event arriving hours after the Worker's run is skipped;
+    - a late GitHub `*/15` intraday event resolves to a later slot and runs.
+  - **Failures and secrets:** the Worker retries a non-2xx dispatch once, logs the HTTP status and never logs the token.
+  - **Owner steps:** deploying the Worker and `wrangler secret put` are owner steps. After deployment the owner records one ECB-fix run's slot, dispatch and first-fetch times; the target is dispatch within 30 s of the slot.
+
+#### T44 — Contract: history job, range planning, weekly cadence, new units and fields (P-020, P-021)
+- **Depends:** none · **Owns:**
+  - `src/deskbrief/models.py`: `JobKind.HISTORY`, so `ENUMS["job"]` follows.
+  - `src/deskbrief/schemas.py`: `ENUMS` gains `interval` `1w`; `unit` `index` and `contracts`; `field` `net_position`, `open_interest` and `level`.
+  - `src/deskbrief/config.py`: `Unit` gains `index` and `contracts`; `KNOWN_SOURCES` gains `cftc`; `DatasetSchedule` gains optional `release_weekday` (0 = Monday to 6), used by `1w` datasets and absent for the rest.
+  - `src/deskbrief/cli.py`: `run` rejects `history` with "history is its own subcommand (card T53)" until T53 adds it.
+  - `src/deskbrief/sources/base.py`: an optional `plan_range(start: date, end: date, ctx: RunContext) -> list[FetchRequest]` on the adapter protocol, with a helper reporting whether an adapter has it.
+  - The `as_of` rule for `1w` in the `store/backend.py` docstring.
+  - `config.yaml` `checks.validity`: `index: [-100, 100000]`, `contracts: [-10000000, 100000000]`.
+  - `tests/contract/*`.
+  - PR title `contract: …`; the body names card T44.
+- Acceptance:
+  - Contract tests pin the new values.
+  - A `1w` row validates with `as_of` at 00:00 ET of its reference date.
+  - An adapter without `plan_range` is reported as having no range support.
+  - A `DatasetSchedule` with `release_weekday` validates; existing schedules are unchanged.
+  - `deskbrief run history` exits with the message above and runs no pipeline step.
+  - No source or check behaviour changes, and existing data still validates.
+
+#### T45 — Weekly cadence and the new fields, wherever code reads values (P-021)
+- **Depends:** T44 · **Owns:**
+  - Checks: `src/deskbrief/checks/freshness.py`, `src/deskbrief/checks/completeness.py`, `src/deskbrief/checks/feed_completeness.py`.
+  - The value readers: `VALUE_FIELDS`, `VALUE_INTERVALS`, `OFFICIAL_INTERVALS` and `field_label` in `src/deskbrief/query.py`; `DAILY_CLOSE_FIELDS` in `src/deskbrief/store/duck.py`.
+  - The `("1d", "1mo")` special cases in `src/deskbrief/report/model.py`.
+  - In the dashboard: `_MAIN_RANK` and the `build_bars` field list in `app/components/data.py`, and the interval cases and `_FIELD_TEXT` in `app/components/tearsheet.py`.
+  - Tests.
+- Acceptance:
+  - A `1w` dataset's freshness expects a release on its `DatasetSchedule.release_weekday` (T44); a holiday-delayed release is `skip`, not `fail`.
+  - Completeness counts weeks.
+  - The report and the dashboard show a weekly value's date without a time and label its change as week-on-week.
+  - End to end: a synthetic store with a `level` row (daily) and a `1w` row each yields a value, a baseline change and a P-009 label in `BriefModel`, and bars in `build_bars`. `net_position` and `open_interest` read as values with labels "net speculative position" and "open interest".
+  - Weekly series get no anomaly check (`checks/anomaly.py` reads `1d` only); this is stated in the known limits.
+  - Tests use synthetic rows only.
+
+#### T46 — FRED rates, dollar, credit and conditions (P-021a)
+- **Depends:** T44, T45 · **Owns:** `src/deskbrief/sources/fred.py` (`SERIES_SPECS` entries and `plan_range`), the FRED feeds and new instruments in `config.yaml`, `docs/sources/fred.md`, tests.
+- Series:
+
+  | FRED id | Field | Unit | Interval | Asset class |
+  |---|---|---|---|---|
+  | `DFII10` (10Y TIPS real yield) | `yield` | `pct` | `1d` | rates |
+  | `T10YIE` (10Y breakeven) | `yield` | `pct` | `1d` | rates |
+  | `DTWEXBGS` (broad dollar) | `level` | `index_pts` | `1d` | fx |
+  | `BAMLH0A0HYM2` (HY OAS) | `rate` | `pct` | `1d` | macro |
+  | `NFCI` | `level` | `index` | `1w` | macro |
+
+  The daily series use dataset `series` and its existing freshness entry (`lag_bdays: 1`). NFCI uses a new dataset, `series_weekly`, which `fred.py` plans for weekly series. Freshness is keyed by source and dataset, so NFCI gets its own entry with `release_weekday` set from FRED's release calendar (confirmed at the probe), using T45.
+- Acceptance:
+  - Each series is planned, parsed and labelled (P-009), and appears in the report model and the dashboard.
+  - A negative NFCI value passes validity, and so does a TIPS yield down to −2%.
+  - `plan_range` covers 2 years in one request per series.
+  - The owner-run live probe is recorded.
+
+#### T47 — Cboe volatility indices (P-021b)
+- **Depends:** T46 (`config.yaml`) · **Owns:** `src/deskbrief/sources/cboe.py` (generalize from VIX to a per-symbol URL and column mapping; `plan_range`), the Cboe feeds and new instruments in `config.yaml`, `docs/sources/cboe.md`, tests.
+- Acceptance:
+  - VIX9D, VIX3M, VIX6M, GVZ, VXN and SKEW are fetched daily (tier 3, `asset_class` `vol`, unit `index_pts`, field `close`).
+  - Each symbol's CSV layout, SKEW's included, is confirmed by a live probe and pinned by a synthetic fixture.
+  - VIX behaviour is unchanged.
+
+#### T48 — Yahoo daily history for ETFs and single stocks (P-019)
+- **Depends:** T47 (`config.yaml`) · **Owns:** `src/deskbrief/sources/yahoo.py` (`plan_range` for the `history` dataset; symbol mapping if needed), the Yahoo `history` feeds in `config.yaml`, `src/deskbrief/crosschecks/close_official.py`, `src/deskbrief/crosschecks/proxy_exact.py`, `docs/sources/yahoo.md`, tests.
+- Acceptance:
+  - Every ETF and single stock has a Yahoo `history` feed (tier 2, `is_fallback = false`). Live probe recorded.
+  - `close_vs_official` compares the Alpaca SIP last 1m bar before the close with the Yahoo daily close.
+  - `proxy_vs_exact` uses the proxy ETF's Yahoo daily return, with `details` saying "same provider" when both legs are Yahoo.
+  - A synthetic-store test shows SPY and MSFT getting bars through `app/components/data.build_bars`.
+  - The Yahoo `history` freshness entry covers the new feeds (checked, extended if needed). The existing `daily_fallback` behaviour is untouched.
+  - Alpaca datasets are unchanged (P-003).
+
+#### T49 — CFTC Commitments of Traders source (P-021c)
+- **Depends:** T44, T45, T48 (`config.yaml`) · **Owns:**
+  - `src/deskbrief/sources/cftc.py`, including `plan_range`.
+  - Its entries in `sources/registry.py` and `sources/catalog.py`.
+  - In `config.yaml`: the `cftc` source settings, freshness entry, feeds and instruments. Ids `COT_GC_NET`, `COT_ES_NET`, `COT_ZN_NET` take field `net_position`; `COT_GC_OI`, `COT_ES_OI`, `COT_ZN_OI` take field `open_interest`. All use unit `contracts`, `asset_class` `macro` and `kind` `macro`.
+  - `docs/sources/cftc.md`.
+  - Tests with a synthetic fixture.
+- Acceptance:
+  - Weekly rows are stored with `interval` `1w` and `as_of` = 00:00 ET of the reference Tuesday. The PR names the report variant (legacy or disaggregated) and gives the reason.
+  - Its freshness entry sets `release_weekday: 4` (Friday), using T45.
+  - User-Agent and rate limit are set, the live probe is recorded, and unit tests use no network.
+
+#### T53 — Two-year history load, and the phase's spec text (P-020)
+- **Depends:** T43, T49 · **Owns:** `src/deskbrief/pipeline/history.py` (new), a `history` subcommand in `src/deskbrief/cli.py`, `.github/workflows/history.yml` (new; own concurrency group), `plan_range` in `src/deskbrief/sources/treasury.py` and `src/deskbrief/sources/ecb.py`, `docs/runbook.md` (trigger and history sections), `docs/specs/2026-11-15-desk-brief-design.md` (D3, §5.2, §5.4, §7.2, §8.2 and the P-012 known limit, following P-018 to P-021), tests.
+- Acceptance:
+  - **Coverage:** one `history` run loads 2 years through each adapter's `plan_range`, within rate limits and budgets. Feeds without range support (Twelve Data `fx_series_1m`, Alpaca) are listed and skipped.
+  - **Files:** one `observations` file per touched date partition. A test over N dates asserts it.
+  - **Re-runs:** keys already stored are skipped, so a re-run writes nothing twice. Test covers it.
+  - **Isolation:** no checks, scorecard or serving, and the concurrency group is not `deskbrief-pipeline`.
+  - **Point in time:** rows keep their real `ingested_at`, so `obs_pit(t)` before the load does not see them.
+  - **Owner step:** dispatch writes to production R2, so the owner runs it. The PR includes a dry-run plan with requests per source and estimated rows.
+
+#### T54 — Dashboard views for the new data (follow-up)
+- **Depends:** T53 · **Owns:** `app/**`, `tests/unit/app/**`.
+- Acceptance:
+  - A VIX term-structure panel (9D, 30D, 3M, 6M).
+  - The yield curve's change by tenor against 1W and 1M, plus a 2s10s history line.
+  - Gold against the 10Y real yield.
+  - A 90-day correlation heatmap.
+  - CFTC net positioning with its weekly date.
+  - Every figure goes through `value_cell`, and hosted mode is unchanged.
+
 ### Phase 5 — Stretch (only after DoD)
 
 - **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
