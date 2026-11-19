@@ -51,15 +51,54 @@ def _meta(p: Provenance, extra: str = "") -> str:
     )
 
 
-def value_cell(text: str, p: Provenance) -> str:
-    return f'<span class="db-fig"><span class="db-val">{escape(text)}</span>{_meta(p)}</span>'
+def _hover(p: Provenance, extra: str = "") -> str:
+    """Full provenance as one line of plain text: the compact tag's tooltip."""
+    parts = [p.field, TIER_NAME[p.tier], p.hover or p.as_of, p.source]
+    return " · ".join(x for x in parts if x) + (f" · {extra}" if extra else "")
 
 
-def change_cell(text: str, p: Provenance, basis: str | None = None) -> str:
-    """A change; ``basis`` says what it is measured against ("previous NYSE close (13 Nov)")."""
-    direction = "db-down" if text.startswith(_MINUS) else "db-up" if text.startswith("+") else ""
-    extra = f" · {escape(basis)}" if basis else ""
+def compact_meta(p: Provenance, extra: str = "", *, visible: bool = True) -> str:
+    """Tier glyph and as-of on screen; field, source (and ``extra``) for screen readers and hover.
+
+    The same four facts as :func:`_meta` are in the markup (``db-field``, ``db-src``,
+    ``db-asof``, the glyph), so a figure never loses its provenance (spec 10.2, P-009, H9).
+    ``visible=False`` hides the whole tag, for a change printed right next to its value.
+    """
+    cls = "db-tagline" if visible else "db-sr"
+    tail = f'<span class="db-sr"> · {escape(extra)}</span>' if extra else ""
     return (
-        f'<span class="db-fig"><span class="db-val {direction}">{escape(text)}</span>'
-        f"{_meta(p, extra)}</span>"
+        f'<span class="{cls}" title="{escape(_hover(p, extra))}">'
+        f'<span class="db-sr"><span class="db-field">{escape(p.field)}</span> · </span>'
+        f"{tier_glyph(p.tier)} "
+        f'<span class="db-asof">{escape(p.as_of)}</span>'
+        f'<span class="db-sr"> · {TIER_NAME[p.tier]} · '
+        f'<span class="db-src">{escape(p.source)}</span></span>{tail}</span>'
     )
+
+
+def value_cell(text: str, p: Provenance, *, compact: bool = False) -> str:
+    """A value with its provenance: full line by default, the compact tag when ``compact``."""
+    meta = compact_meta(p) if compact else _meta(p)
+    return f'<span class="db-fig"><span class="db-val">{escape(text)}</span>{meta}</span>'
+
+
+def direction(text: str) -> str:
+    """CSS class for a signed change text: up, down, or flat."""
+    return "db-down" if text.startswith(_MINUS) else "db-up" if text.startswith("+") else "db-flat"
+
+
+def change_cell(
+    text: str, p: Provenance, basis: str | None = None, *, compact: bool = False
+) -> str:
+    """A change; ``basis`` says what it is measured against ("previous NYSE close (13 Nov)").
+
+    ``compact`` keeps the provenance in the markup but off screen: the value next to it already
+    shows the same tag, so printing it twice is noise.
+    """
+    cls = direction(text)
+    cls = "" if cls == "db-flat" and not compact else cls
+    if compact:
+        meta = compact_meta(p, f"vs {basis}" if basis else "", visible=False)
+    else:
+        meta = _meta(p, f" · {escape(basis)}" if basis else "")
+    return f'<span class="db-fig"><span class="db-val {cls}">{escape(text)}</span>{meta}</span>'
