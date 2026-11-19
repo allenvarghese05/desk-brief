@@ -11,8 +11,10 @@ columns are ignored. Blank / ``N/A`` cells mean "not published" and yield no obs
 holidays follow SIFMA, so ``plan`` skips non-business days for ``eod``.
 
 Backfill: ``RunContext`` carries a single ``target_date``, so ``plan(BACKFILL, ctx)`` covers the
-month containing it. Use :meth:`TreasurySource.plan_range` to cover an arbitrary date range
-(one request per month).
+month containing it. :meth:`TreasurySource.plan_range` covers an arbitrary date range with one
+request per month; it is the range planner of the one-time ``history`` job (P-020, card T53).
+Two years is 25 requests. The monthly CSV is the verified URL; a whole month is returned, so
+the history job drops rows outside the requested range.
 
 Probe status and verification steps: ``docs/sources/treasury.md``.
 """
@@ -94,8 +96,13 @@ class TreasurySource:
             return self.plan_range(ctx.target_date, ctx.target_date)
         return []
 
-    def plan_range(self, start: date, end: date) -> list[FetchRequest]:
-        """One request per calendar month overlapping ``[start, end]`` (inclusive)."""
+    def plan_range(
+        self, start: date, end: date, ctx: RunContext | None = None
+    ) -> list[FetchRequest]:
+        """One request per calendar month overlapping the ET dates ``[start, end]`` (P-020).
+
+        ``ctx`` is accepted for the range protocol (``sources/base.py``) and not needed here.
+        """
         if end < start:
             raise ValueError("end must not be before start")
         reqs: list[FetchRequest] = []

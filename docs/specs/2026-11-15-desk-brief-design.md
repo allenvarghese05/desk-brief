@@ -13,7 +13,7 @@ Companion docs: `docs/plan/implementation-plan.md` (phases, task cards), `docs/p
 |---|---|---|---|
 | D1 | Persistent storage | Private Cloudflare R2 bucket. Raw files immutable; clean/derived as Parquet; DuckDB is the query engine, not the store | $0, no egress fees, no single-writer lock, reproducible, keeps provider data out of the public repo |
 | D2 | Source of truth | `raw/` only. Everything else is rebuildable from raw | Parser bugs and provider revisions become replayable, not fatal |
-| D3 | Scheduler | GitHub Actions cron, designed as if unreliable: idempotent runs, catch-up, SLA watchdog, dead-man's-switch | Free, public run history for reviewers; failures become real incidents |
+| D3 | Scheduler | GitHub Actions workflows, triggered by a Cloudflare Worker cron (P-018) that calls `workflow_dispatch` at the scheduled minutes; the workflows' own `schedule:` crons stay as a fallback. Designed as if unreliable: idempotent runs, duplicate-fire skip, catch-up, SLA watchdog, dead-man's-switch | Free, public run history for reviewers; failures become real incidents. GitHub's own cron started every event 5–8.5 h late on 2026-11-18 (P-018) |
 | D4 | Dataframe library | pandas (transforms, Excel); DuckDB SQL for queries/joins over Parquet | Brief standard; team-familiar |
 | D5 | Excel | `.xlsx` (pandas + XlsxWriter) **and** `.xlsm` macro workbook (XlsxWriter `add_vba_project`). VBA source in repo as `.bas` | User request |
 | D6 | Report delivery | Email (HTML body + `.xlsx`/`.xlsm` attachments). Archived to R2 | User request |
@@ -256,13 +256,16 @@ class Source(Protocol):
 | Source | Datasets | Endpoint (verify) | Auth | Notes |
 |---|---|---|---|---|
 | Treasury | par_curve | home.treasury.gov daily par yield curve CSV/XML for month | none | Published after close; holidays per SIFMA |
-| FRED | series | api.stlouisfed.org/fred/series/observations | `FRED_API_KEY` | Request `realtime_start`/`end` to see vintages; values "." mean missing |
+| FRED | series, series_weekly | api.stlouisfed.org/fred/series/observations | `FRED_API_KEY` | Values "." mean missing. P-021a adds the 10Y TIPS real yield (`DFII10`), 10Y breakeven (`T10YIE`), broad dollar (`DTWEXBGS`, field `level`), HY OAS (`BAMLH0A0HYM2`) and the weekly NFCI (`series_weekly`, field `level`, unit `index`, may be negative) |
 | ECB | eurofxref | data-api.ecb.europa.eu SDMX (EXR.D.USD+GBP+JPY.EUR.SP00.A), CSV | none | ~16:00 CET; TARGET holidays |
-| Stooq | daily | stooq.com CSV download | none / verify | Verify current access policy; if blocked, mark source disabled and use Yahoo daily close as T3 fallback **labeled as fallback** |
-| Cboe | vix_history | cdn.cboe.com VIX_History.csv | none | Verify |
+| Stooq | daily | stooq.com CSV download | none | **Disabled** (`enabled: false`, owner decision): it serves a JS verification page to automated requests, and bot checks are never bypassed. ETF and single-stock daily bars come from Yahoo `history` instead (P-019) |
+| Cboe | vix_history | cdn.cboe.com `{symbol}_History.csv` | none | VIX, plus VIX9D, VIX3M, VIX6M, VXN, GVZ and SKEW (P-021b): field `close`, unit `index_pts`, `asset_class` vol |
 | Alpaca | iex_latest, sip_bars_1m, iex_bars_1m (daily_bars dropped, P-003) | data.alpaca.markets v2 stocks | key id + secret headers | Free: IEX real-time; SIP only ≥15 min old |
 | Twelve Data | fx_quote (batch), fx_series_1m | api.twelvedata.com | `apikey` param (redact!) | 8/min, 800/day; batch counts per symbol |
-| Yahoo | quote, history | yfinance | none | Unofficial; second opinion only; expect rate limits from GHA IPs |
+| Yahoo | quote, history | yfinance | none | Unofficial; expect rate limits from GHA IPs. `quote` is a second opinion. `history` (daily OHLCV, tier 2, `is_fallback = false`) is the primary daily close for every ETF and single stock (P-019; P-003 stands, no Alpaca daily bars) |
+| CFTC | cot | publicreporting.cftc.gov Socrata API, legacy futures-only report | none | Weekly Commitments of Traders (P-021c) for gold, E-mini S&P 500 and the 10Y note: `net_position` (non-commercial long − short, `is_derived`) and `open_interest`, unit `contracts`, interval `1w`, `as_of` = the position Tuesday; released Friday 15:30 ET |
+
+Range support (P-020): FRED, Treasury, ECB, Yahoo `history`, Cboe and CFTC implement `plan_range(start, end, ctx)`, used only by the `history` job (§5.4). Alpaca and Twelve Data have none, and Yahoo `quote` is not range-planned; the history job lists and skips them.
 
 ### 5.3 Request budget per day (weekday)
 
@@ -278,16 +281,21 @@ class Source(Protocol):
 
 | Job | Trigger (UTC) | Target | Steps |
 |---|---|---|---|
-| `morning` | two crons, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013); code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → scorecard → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
+| `morning` | two fire times, `15 10 * * 1-5` and `15 11 * * 1-5` (P-013); code proceeds only for the trigger landing 06:00–07:00 ET (handles DST), other one exits as `skipped` | previous NYSE business day close → now | catch-up → fetch official (T3 for D-1) + overnight (Yahoo intl indices, futures, FX, VIX) + Alpaca pre-market latest → clean → checks → alerts → scorecard → build serving → report (html/xlsx/xlsm) → email → write `runs` → ping healthcheck |
 | `intraday` | cron `*/15 13-21 * * 1-5`; code exits early outside NYSE session. Plus cron `15 12 * * 1-5` (P-012). At the 14:15 Europe/Berlin ECB fix (12:15 UTC summer, 13:15 UTC winter) the run fetches Yahoo quotes even before the NYSE open; the 12:15 trigger is `skipped` in winter | now | fetch Alpaca IEX latest, Twelve Data FX batch, Yahoo quotes (ES=F, CL=F, BZ=F, GC=F, ^TNX, ^VIX) → clean → freshness/validity/anomaly → scorecard → serving. At the ECB fix outside the session: Yahoo quotes only (`--sources yahoo`) |
-| `eod` | cron `30 22 * * 1-5` | today | Alpaca 1-min bars IEX+SIP for xcheck symbols, daily bars; Twelve Data 1-min around ECB fix; Treasury curve; ECB; Stooq; Cboe → clean → all checks + cross-checks → scorecard → compaction (last 7 ET days) → serving → ping |
+| `eod` | cron `30 22 * * 1-5` | today | Alpaca 1-min bars IEX+SIP for xcheck symbols, daily bars; Twelve Data 1-min around ECB fix; Treasury curve; ECB; Yahoo `history` (ETF and stock daily bars, P-019); Cboe; CFTC (weekly, P-021) → clean → all checks + cross-checks → scorecard → compaction (last 7 ET days) → serving → ping |
 | `sla` | cron `20 12 * * 1-5` | today | if no report for today's date: email "report missed SLA", fail job (red X = visible incident) |
-| `backfill` | `workflow_dispatch(start, end, sources)` | range | official + daily sources for range; `trigger=manual` |
+| `backfill` | `workflow_dispatch(start, end, sources)` | range | official + daily sources for range, one run per XNYS business day; `trigger=manual` |
+| `history` | `workflow_dispatch(start, end, sources, dry_run)`, owner only (P-020) | range, default the two years up to yesterday (ET) | one run: each source's `plan_range` (never `plan`) → raw → clean → skip natural keys already stored and rows outside the range → one `observations` file per touched ET date (P-008) → `source_log`, `quarantine`, `runs` (job `history`). No checks, scorecard, serving, report or notify. Rows keep their real `ingested_at`, so `obs_pit(t)` before the load does not see them. Own concurrency group `deskbrief-history`. `--dry-run` prints sources, requests, spans and estimated rows and partitions; runbook §"History load" |
 | `rebuild` | `workflow_dispatch(from_date)` | range | re-parse raw → new `clean/v{N+1}/` → recompute derived → atomically flip `clean/_CURRENT` |
 
 Every job ends with the same serving step (P-017). It rescores `scorecard_daily` for the job's target date, overwriting that date's file. In `eod` only, it then compacts `observations` and `quarantine` for today's ET date and the six before it, skipping partitions with fewer than two files. Last, it writes the serving files, anchored on the current ET date rather than the target date, so a backfill of an old date never replaces the latest view. Every intraday poll counts in the scorecard; for other jobs, the latest run of each job per source counts.
 
-DST: cron is UTC. Each job computes ET local time and NYSE calendar in code and decides; report date is always an ET date. All workflows use `concurrency: {group: deskbrief-pipeline, cancel-in-progress: false}` so runs never overlap.
+Triggers (P-018): one Cloudflare Worker (`infra/cron-worker/`) with a single every-minute Cron Trigger holds the UTC schedule table, mirrored from the four workflows' `schedule:` crons (a test fails if they differ). At each matching minute it calls `workflow_dispatch` for `morning`, `intraday`, `eod` or `sla` with two inputs: `fire`, the exact cron string, and `slot`, the scheduled minute in UTC computed from the table. A dispatch carrying both is a scheduled run: `trigger=schedule`, `scheduled_for = slot`, same gates. The GitHub `schedule:` crons stay as a fallback. A pipeline run whose job and `scheduled_for` match an `ok` or `degraded` `runs` row skips with reason `duplicate fire`, so a late GitHub fallback for a once-a-day fire is skipped, and a late `*/15` fallback resolves to a later slot and runs as one more poll. `sla` writes no `runs` row; a duplicate sla run just checks again. A human dispatch without `fire` and `slot` stays `trigger=manual` and ungated. The Worker's token is a fine-grained PAT (this repository, Actions: write), set as a Worker secret, never committed or logged.
+
+Known limit (P-012): the ECB-fix FX leg needs a Yahoo quote within about a minute of the fix. With the Worker the run is dispatched at the slot; if both the Worker and GitHub's fallback start after the fix window, the leg still skips, with its specific reason.
+
+DST: cron is UTC. Each job computes ET local time and NYSE calendar in code and decides; report date is always an ET date. The pipeline workflows use `concurrency: {group: deskbrief-pipeline, cancel-in-progress: false}` so runs never overlap. `history` has its own group (`deskbrief-history`), so it never queues behind or cancels a scheduled run.
 
 ### 5.5 Pipeline runner — sequence (morning)
 
@@ -351,7 +359,7 @@ deskbrief-data/
   reports/date={YYYY-MM-DD}/v{n}/brief.html|brief.xlsx|brief.xlsm|model.json
 ```
 
-- **Partition dates and `as_of`:** defined once in `src/deskbrief/store/backend.py` (module docstring). Raw uses the UTC date of `ingested_at`; observations use the ET date of `as_of`; run-scoped tables use `target_date`. `as_of` for `1d` = 00:00 ET on the reference date, for `1mo` = 00:00 ET on the 1st, for `1m` = bar start, for `tick` = the trade/quote instant.
+- **Partition dates and `as_of`:** defined once in `src/deskbrief/store/backend.py` (module docstring). Raw uses the UTC date of `ingested_at`; observations use the ET date of `as_of`; run-scoped tables use `target_date`. `as_of` for `1d` = 00:00 ET on the reference date, for `1w` = 00:00 ET on the date the weekly value describes (e.g. the COT report's Tuesday, not its release day; P-021), for `1mo` = 00:00 ET on the 1st, for `1m` = bar start, for `tick` = the trade/quote instant.
 - **Small-files control:** `eod` compacts `clean/.../run=*.parquet` for today's ET date and the six before it (P-017; partitions with fewer than two files are skipped) into `run=compacted-{date}.parquet` (dedup on natural key keeping all distinct versions) and deletes the inputs only after a verified row-count match. Raw is never compacted.
 - **Local backend** mirrors the same layout under `.data/` for tests and dev.
 - **Access:** DuckDB `httpfs` with `CREATE SECRET (TYPE r2, ...)`. Three R2 API tokens: `ci-writer` (GHA, read/write this bucket), `dashboard-reader` (read-only), `admin` (Allen only, never in CI).
@@ -390,13 +398,13 @@ erDiagram
 | source / dataset | VARCHAR | |
 | symbol | VARCHAR | provider symbol |
 | tier | TINYINT | 1,2,3 |
-| field | VARCHAR | open, high, low, close, last, bid, ask, mid, volume, yield, rate |
-| interval | VARCHAR | tick, 1m, 1d, 1mo |
+| field | VARCHAR | open, high, low, close, last, bid, ask, mid, volume, yield, rate, level (an index value that is neither a price nor a rate), net_position, open_interest (P-021) |
+| interval | VARCHAR | tick, 1m, 1d, 1w, 1mo |
 | as_of | TIMESTAMP (UTC) | |
 | value | DOUBLE | in `unit` |
-| unit | VARCHAR | USD, pct, fx_rate, index_pts, shares |
+| unit | VARCHAR | USD, pct, fx_rate, index_pts, shares, index (may be negative, e.g. NFCI), contracts (CFTC) |
 | is_derived | BOOLEAN | e.g. ECB cross rates |
-| is_fallback | BOOLEAN | e.g. Yahoo standing in for Stooq |
+| is_fallback | BOOLEAN | e.g. Yahoo `daily_fallback` standing in for an official close; Yahoo `history` for ETFs and stocks is primary, `false` (P-019) |
 | fetch_id / run_id | VARCHAR | lineage |
 | ingested_at | TIMESTAMP (UTC) | |
 | parser_version | VARCHAR | |
@@ -417,7 +425,7 @@ erDiagram
 
 **alerts** — `alert_id, run_id, kind (zscore_move|volume_spike|crosscheck_fail|source_down|sla_miss|stale), severity (info|warn|crit), instrument_id, source, as_of, observed, threshold, message`
 
-**runs** — `run_id, job, trigger (schedule|manual|catchup), target_date, scheduled_for, started_at, finished_at, status (ok|degraded|failed), git_sha, config_hash, n_fetch, n_fetch_failed, n_obs, n_dq_fail, n_dq_warn, report_key, schedule_delay_s`
+**runs** — `run_id, job (morning|intraday|eod|backfill|rebuild|history), trigger (schedule|manual|catchup), target_date, scheduled_for, started_at, finished_at, status (ok|degraded|failed), git_sha, config_hash, n_fetch, n_fetch_failed, n_obs, n_dq_fail, n_dq_warn, report_key, schedule_delay_s`
 
 **scorecard_daily** — `source, date, fetches, ok_rate, median_latency_ms, p95_latency_ms, median_data_age_s, error_rate, disagreement_rate, n_crosschecks`
 
@@ -484,12 +492,12 @@ classDiagram
 | Check | Computation |
 |---|---|
 | iex_vs_sip | For each config symbol and each session minute, compare IEX 1m close vs SIP 1m close (both fetched in `eod`). Report median abs gap (bps), p95, % minutes over warn. Status from `max_fail_minutes_pct`. |
-| proxy_vs_exact (return) | Daily return of proxy vs exact (USO vs CL=F, BNO vs BZ=F, GLD vs GC=F, SPY vs ES=F). Fail if direction disagrees and both moves > 25 bps; warn/fail on |diff| thresholds. Futures roll windows → cap at warn. |
+| proxy_vs_exact (return) | Daily return of proxy vs exact (USO vs CL=F, BNO vs BZ=F, GLD vs GC=F, SPY vs ES=F); the proxy ETF's return comes from Yahoo `history` (P-019). It compares two instruments, not two sources, so `details` say "same provider" when both legs are Yahoo. Fail if direction disagrees and both moves > 25 bps; warn/fail on |diff| thresholds. Futures roll windows → cap at warn. |
 | proxy_vs_exact (inverse_duration) | Expected ETF return = −D × Δy. Compare to actual ETF return (SHY↔DGS2, IEF↔DGS10/^TNX, TLT↔DGS20). |
 | fx_vs_ecb | Twelve Data 1m mid at 14:15 CET vs ECB reference (cross rates derived). Also Yahoo vs ECB. |
 | official_pair | Treasury curve vs FRED DGS* for same date. Expected ≈ exact (FRED republishes Treasury) → this check measures publication lag and revisions; documented honestly. |
 | yahoo_vs_primary | Yahoo last vs Alpaca SIP (same minute ±1) for equities; Yahoo FX vs Twelve Data. |
-| close_vs_official | Alpaca SIP last 1m bar ending 16:00 ET vs Stooq daily close (closing auction vs last trade → small gaps expected). |
+| close_vs_official | Alpaca SIP last 1m bar before the 16:00 ET close vs the Yahoo `history` daily close: two independent sources (P-019; Stooq is disabled). Closing auction vs last trade → small gaps expected. |
 
 ---
 

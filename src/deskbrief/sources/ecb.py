@@ -24,6 +24,10 @@ exactly the SDMX message "No results found." (UNVERIFIED: taken from ECB documen
 confirmed by the live probe in ``docs/sources/ecb.md``). Any other 404 (wrong URL/dataflow,
 JSON, HTML, gateway text, other content types) stays an error.
 
+Range support (P-020, card T53): :meth:`EcbSource.plan_range` asks for the whole range in one
+request (``startPeriod``/``endPeriod`` span it; two years is about 520 reference days, 1560 CSV
+rows). The same parser and window check apply.
+
 A ``TIME_PERIOD`` outside the requested window raises ``ParseError`` on purpose (fail loud: the
 server ignored the window, so the payload is not what was asked for). Revisit once the probe
 shows the API's boundary behaviour.
@@ -84,19 +88,28 @@ class EcbSource:
             ref = ctx.target_date
         else:
             return []
-        return [
-            FetchRequest(
-                source=SOURCE,
-                dataset=DATASET,
-                params={
-                    "startPeriod": ref.isoformat(),
-                    "endPeriod": ref.isoformat(),
-                    "format": "csvdata",
-                },
-                symbols=tuple(self._feeds),
-                target_date=ref,
-            )
-        ]
+        return [self._request(ref, ref)]
+
+    def plan_range(self, start: date, end: date, ctx: RunContext) -> list[FetchRequest]:
+        """One request for the ET dates ``[start, end]`` (P-020); none without ECB feeds."""
+        if end < start:
+            raise ValueError("end must not be before start")
+        if not self._feeds:
+            return []
+        return [self._request(start, end)]
+
+    def _request(self, start: date, end: date) -> FetchRequest:
+        return FetchRequest(
+            source=SOURCE,
+            dataset=DATASET,
+            params={
+                "startPeriod": start.isoformat(),
+                "endPeriod": end.isoformat(),
+                "format": "csvdata",
+            },
+            symbols=tuple(self._feeds),
+            target_date=end,
+        )
 
     # -- fetch -----------------------------------------------------------------------------
 
