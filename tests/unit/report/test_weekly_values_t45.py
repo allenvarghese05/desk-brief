@@ -4,9 +4,11 @@ and store -> ``build_bars`` -> tearsheet.
 SYNTHETIC FIXTURE: every row is made up (see ``weekly_synth``). Report: Monday 16 Nov 2026,
 07:00 ET. Weekly rows are visible from their (made-up) release time, daily rows from 17:00 ET.
 """
+# ruff: noqa: RUF001  (the true minus sign is the report's intended output)
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -14,7 +16,7 @@ import pytest
 
 from deskbrief.config import Config
 from deskbrief.query import BASIS_OFFICIAL, BASIS_WEEKLY, field_label, latest_snapshot
-from deskbrief.report.model import BriefModel, Row
+from deskbrief.report.model import BriefModel, Row, change_text
 from deskbrief.store.duck import connect
 from deskbrief.store.local import LocalBackend
 from deskbrief.timeutil import et_to_utc
@@ -83,6 +85,7 @@ def test_weekly_level_is_week_on_week_with_a_date_only(model: BriefModel) -> Non
     assert r.as_of_text == "6 Nov"  # a weekly value has a date, never a time
     assert r.basis == BASIS_WEEKLY
     assert r.change_value == pytest.approx(0.04)
+    assert r.change_text == "+0.04 pts"  # index moves by hundredths
     assert r.change_value_unit == "pts"
     assert "week-on-week, since previous weekly value (30 Oct)" in r.description
 
@@ -93,9 +96,36 @@ def test_positions_read_as_values_with_their_labels(model: BriefModel) -> None:
     assert gc.value_text == "240,000"
     assert gc.label == "Gold futures positioning (net speculative position)"
     assert gc.change_value == pytest.approx(-10_000.0)
+    assert gc.change_text == "−10,000 contracts"  # like the value: whole, with separators
+    assert gc.description.endswith(
+        "−10,000 contracts week-on-week, since previous weekly value (3 Nov)"
+    )
     assert "week-on-week, since previous weekly value (3 Nov)" in gc.description
     assert oi_row.label == "Gold futures interest (open interest)"
     assert oi_row.change_value == pytest.approx(12_000.0)
+    assert oi_row.change_text == "+12,000 contracts"
+    assert oi_row.change_value_unit == "pts"  # the Excel writer has no contracts format yet
+
+
+@pytest.mark.parametrize(
+    ("unit", "change_unit", "change", "text"),
+    [
+        ("contracts", "pts", -10_000.0, "−10,000 contracts"),
+        ("contracts", "pts", 1_234_567.0, "+1,234,567 contracts"),
+        ("contracts", "pts", 0.4, "0 contracts"),
+        # the existing units are unchanged (no separators, same decimals)
+        ("index_pts", "pts", -12_345.6, "−12345.6 pts"),
+        ("USD", "pct", 1.25, "+1.2%"),
+        ("pct", "bp", -3.0, "−3bp"),
+        ("pct", "pp", 0.125, "+0.12pp"),
+        ("index", "pts", 0.04, "+0.04 pts"),
+    ],
+)
+def test_change_text_per_unit(model: BriefModel, unit, change_unit, change, text) -> None:  # type: ignore[no-untyped-def]
+    base = rows_of(model)["GC_NET"].change
+    assert base is not None
+    ch = replace(base, last=replace(base.last, unit=unit), change=change, change_unit=change_unit)
+    assert change_text(ch) == text
 
 
 def test_weekly_series_are_named_in_the_known_limits(model: BriefModel) -> None:
@@ -143,6 +173,19 @@ def test_build_bars_reads_daily_level_and_weekly_series(
     gc = data.build_bars(conn, AT, "GC_NET", frozenset({1}))
     assert gc["close"].tolist() == [250_000.0, 240_000.0]
     assert set(gc["field"]) == {"net_position"}
+
+
+def test_build_bars_never_mixes_weekly_into_daily(tmp_path: Path, wconfig: Config) -> None:
+    """An instrument holding both 1d and 1w rows gets daily bars only."""
+    from app.components import data
+
+    s = LocalBackend(tmp_path / "d4")
+    thu, fri, wk = date(2026, 11, 12), date(2026, 11, 13), date(2026, 11, 6)
+    weekly = {**broad(wk, 50.0, _at(date(2026, 11, 11))), "interval": "1w", "fetch_id": "W1"}
+    write(s, wconfig, [broad(thu, 120.0, _at(thu)), broad(fri, 121.5, _at(fri)), weekly])
+    bars = data.build_bars(connect(s, wconfig), AT, "USD_BROAD", frozenset({1}))
+    assert bars["close"].tolist() == [120.0, 121.5]
+    assert set(bars["interval"]) == {"1d"}
 
 
 def test_build_bars_hosted_hides_tier1_weekly_rows(tmp_path: Path, wconfig: Config) -> None:

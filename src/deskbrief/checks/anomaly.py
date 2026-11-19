@@ -6,6 +6,10 @@ std`` of ``|move|`` over the ``window_days`` moves before it. ``warn`` at ``z_wa
 ``z_fail`` (config: 3 and 5; ``fail`` means "verify", not "wrong"). ``skip`` when there are fewer
 than ``MIN_MOVES`` earlier moves, or the window has zero variance.
 
+A relative return needs a positive base: a move from a value <= 0 is ``nan`` and is left out of
+the window (a daily ``level`` series, P-021, may in principle reach zero or go negative). If the
+latest move is ``nan`` the series is ``skip`` ("history too short").
+
 Only a move that belongs to the expected data day is scored. The newest observation must not be
 older than :func:`expected_last_day` (the latest business day on the dataset's calendar up to
 the cutoff, less ``lag_bdays``; series with no schedule use XNYS). A series that stopped updating
@@ -44,12 +48,14 @@ _SERIES = ["instrument_id", "source", "dataset", "field", "unit"]
 
 
 def daily_moves(values: np.ndarray, unit: str) -> np.ndarray:
-    """Absolute daily moves: |delta| in bp for yields/rates (``pct``), |return| otherwise."""
+    """Absolute daily moves: |delta| in bp for yields/rates (``pct``), |return| otherwise.
+
+    A return from a base <= 0 is meaningless, so that move is ``nan`` (never scored)."""
     if unit == "pct":
         return np.abs(np.diff(values) * 100.0)
     prev = values[:-1]
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.abs(np.where(prev != 0, values[1:] / prev - 1.0, np.nan))
+        return np.abs(np.where(prev > 0, values[1:] / prev - 1.0, np.nan))
 
 
 def expected_last_day(

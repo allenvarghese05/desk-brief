@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 from checks_support import ET_NOW, find
 
 from deskbrief.calendars import add_business_days, is_business_day
-from deskbrief.checks.anomaly import AnomalyCheck
+from deskbrief.checks.anomaly import AnomalyCheck, daily_moves
 from deskbrief.checks.completeness import CompletenessCheck
 from deskbrief.checks.freshness import DELAYED, FreshnessCheck, weekly_expected
 from deskbrief.checks.validity import ValidityCheck
@@ -225,3 +226,28 @@ def test_anomaly_covers_daily_level_and_skips_weekly(store, wconfig) -> None:  #
     assert level[0].details["field"] == "level"
     assert level[0].status in (S.WARN, S.FAIL)
     assert not [r for r in res if r.instrument_id == "NFCI"]
+
+
+def test_daily_moves_never_take_a_return_from_a_base_at_or_below_zero() -> None:
+    moves = daily_moves(np.array([-0.5, -0.4, 0.0, 0.2, 0.3]), "index")
+    assert np.isnan(moves[:3]).all()  # bases -0.5, -0.4 and 0: no relative return
+    np.testing.assert_allclose(moves[3], 0.5)
+    np.testing.assert_allclose(daily_moves(np.array([100.0, 110.0]), "index_pts"), [0.1])
+
+
+def test_anomaly_skips_a_daily_level_whose_latest_base_is_not_positive(store, wconfig) -> None:  # type: ignore[no-untyped-def]
+    """A level that crosses zero is never scored on a relative return (skip, not a z-score)."""
+    span = (date(2026, 10, 1) + timedelta(days=n) for n in range(60))
+    days = [x for x in span if is_business_day("SIFMA_US", x)][:30]
+    values = [1.0 + (0.1 if i % 2 else -0.1) for i in range(len(days))]
+    values[-2], values[-1] = -0.2, 5.0  # INJECTED FAULT: base below zero, then a large jump
+    rows = [broad(x, v, ET_NOW(x, "17:00")) for x, v in zip(days, values, strict=True)]
+    write(store, wconfig, rows)
+    ctx = ctx_at(wconfig, store, ET_NOW(add_business_days("SIFMA_US", days[-1], 1), "18:00"))
+    res = [
+        r
+        for r in AnomalyCheck().evaluate(ctx, connect(store, wconfig))
+        if r.instrument_id == "USD_BROAD"
+    ]
+    assert [r.status for r in res] == [S.SKIP]
+    assert res[0].details["reason"] == "history too short"

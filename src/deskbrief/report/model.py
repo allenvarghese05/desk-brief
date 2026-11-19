@@ -271,10 +271,11 @@ class BriefModel:
 # ---------------------------------------------------------------------------
 
 
-def signed(x: float, decimals: int) -> str:
-    """``+0.4`` / ``−0.4`` (true minus sign); values that round to zero print unsigned."""
-    text = f"{x:+.{decimals}f}"
-    if float(text) == 0:
+def signed(x: float, decimals: int, *, grouped: bool = False) -> str:
+    """``+0.4`` / ``−0.4`` (true minus sign); values that round to zero print unsigned.
+    ``grouped`` adds thousands separators (``−10,000``)."""
+    text = f"{x:+,.{decimals}f}" if grouped else f"{x:+.{decimals}f}"
+    if float(text.replace(",", "")) == 0:
         return f"{0:.{decimals}f}"
     return text.replace("-", _MINUS)
 
@@ -282,9 +283,14 @@ def signed(x: float, decimals: int) -> str:
 def change_text(change: ChangeRow) -> str:
     if change.change is None:
         return "n/a"
-    return (
-        signed(change.change, _UNIT_DECIMALS[change.change_unit]) + _UNIT_SUFFIX[change.change_unit]
-    )
+    if change.last.unit == "contracts":
+        # whole contracts, like the value ("240,000"); ``change_unit`` stays "pts" because the
+        # Excel writer has no contracts format (follow-up in the T45 PR)
+        return signed(change.change, 0, grouped=True) + " contracts"
+    decimals = _UNIT_DECIMALS[change.change_unit]
+    if change.last.unit == "index" and change.change_unit == "pts":
+        decimals = 2  # an index such as NFCI moves by hundredths: "+0.04 pts", not "0.0 pts"
+    return signed(change.change, decimals) + _UNIT_SUFFIX[change.change_unit]
 
 
 def value_text(row: ValueRow) -> str:
