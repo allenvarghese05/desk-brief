@@ -1,4 +1,5 @@
-"""Dashboard pages 2-6 (T35): AppTest smoke per page, hosted rule, P-009 labels, ref_date labels.
+"""Dashboard pages 3-6 (T35): AppTest smoke per page, hosted rule, P-009 labels, ref_date labels.
+The Instrument page moved into Home in T36; its tests are in test_home.
 
 SYNTHETIC FIXTURE: a store built from ``brief_synth`` (made-up values, Monday 16 Nov 2026 07:00
 ET) plus serving files built by ``deskbrief.pipeline.serving``. SPY is the only tier-1 instrument
@@ -27,7 +28,6 @@ from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, monday_rows
 REPO = Path(__file__).resolve().parents[3]
 PAGES = REPO / "app" / "pages"
 PAGE_FILES = {
-    "instrument": "2_Instrument.py",
     "xchecks": "3_Cross_checks.py",
     "health": "4_Data_health.py",
     "sources": "5_Sources.py",
@@ -150,41 +150,6 @@ def test_every_page_is_smoke_clean_and_empty_store_does_not_crash(run_page: RunP
         assert not empty.exception, page
 
 
-# --- page 2: instrument ---------------------------------------------------------------------
-
-
-def pick(at: AppTest, instrument: str) -> AppTest:
-    box = at.selectbox(key="instrument")
-    return box.select(instrument).run()
-
-
-def test_instrument_ladder_uses_p009_labels(run_page: RunPage) -> None:
-    at = pick(run_page("instrument", "local"), "UST_10Y")
-    t = text(at)
-    assert "yield" in t
-    assert "close" not in t.replace("previous close", "")  # a yield is not a close
-    t = text(pick(run_page("instrument", "local"), "EURUSD"))
-    assert "ECB reference rate" in t
-
-
-def test_instrument_hosted_never_shows_tier1(run_page: RunPage) -> None:
-    at = run_page("instrument", "hosted")
-    box = at.selectbox(key="instrument")
-    assert box.options  # SPY still has delayed/official data
-    t = text(pick(at, "SPY"))
-    assert "alpaca" not in t
-    assert "600.0000" not in t
-    assert 'title="live"' not in t
-
-
-def test_instrument_local_shows_three_tier_ladder_and_lineage(run_page: RunPage) -> None:
-    t = text(pick(run_page("instrument", "local"), "SPY"))
-    assert "alpaca" in t
-    assert "live" in t
-    assert "Lineage" in t or "sha256" in t
-    assert "Check history" in t
-
-
 # --- page 3: cross-checks -------------------------------------------------------------------
 
 
@@ -266,7 +231,7 @@ def test_runs_table_start_delay_and_links(run_page: RunPage) -> None:
     assert "degraded" in t
     assert "ok" in t
     assert "morning" in t
-    assert "300 s" in t  # scheduled 06:50, started 06:55
+    assert "5 min" in t  # scheduled 06:50, started 06:55
     assert "github.com/allenvarghese05/desk-brief/actions" in t
     # the template block inside the code fence is not an incident
     assert "YYYY-MM-DD" not in t
@@ -276,7 +241,7 @@ def test_parse_incidents_skips_the_template_fence() -> None:
     import sys
 
     sys.path.insert(0, str(REPO))
-    from app.pages import _incidents
+    from app.components import incidents as _incidents
 
     md = (
         "# Incidents\n\n```\n## 2026-01-01 — Template example\n- Detected by:\n```\n\n"
@@ -288,15 +253,6 @@ def test_parse_incidents_skips_the_template_fence() -> None:
     assert items[0].date == "2026-11-20"
     assert "freshness" in items[0].body
     assert _incidents.parse("# Incidents\n\nnone yet") == []
-
-
-def test_instrument_hosted_history_and_tolerance_exclude_tier1(run_page: RunPage) -> None:
-    hosted = text(pick(run_page("instrument", "hosted"), "SPY"))
-    assert "590.25" not in hosted  # the tier-1 daily value in the 30-day window
-    assert "warn 7" not in hosted  # tolerance of the check that names alpaca
-    assert "warn 5 bp" in hosted
-    local = text(pick(run_page("instrument", "local"), "SPY"))
-    assert "590.25" in local
 
 
 def test_skipped_crosscheck_has_no_nan_in_strip_or_chart(run_page: RunPage) -> None:
@@ -315,3 +271,34 @@ def test_data_health_quarantine_hosted_withholds_tier1_source(run_page: RunPage)
     assert "negative_price" in hosted
     assert "withheld" in hosted
     assert "tier1_bad_tick" in text(run_page("health", "local"))
+
+
+# --- T36 phase 1: headline numbers first ------------------------------------------------------
+
+
+def test_every_system_page_has_top_bar_navigation(run_page: RunPage) -> None:
+    for page in PAGE_FILES:
+        t = text(run_page(page, "hosted"))
+        assert 'aria-label="Pages"' in t, page
+        assert 'aria-current="page"' in t, page
+
+
+def test_crosschecks_put_problems_first_and_fold_skipped(run_page: RunPage) -> None:
+    t = text(run_page("xchecks", "local"))
+    assert "SPY vs ES" in t  # readable name, raw id kept beside it
+    assert "Show 1 skipped check" in t
+    assert t.index("spy_vs_es") < t.index("es_vs_yahoo")  # warn sorts before pass
+
+
+def test_data_health_leads_with_failing_count(run_page: RunPage) -> None:
+    t = text(run_page("health", "local"))
+    assert "Failing" in t
+    assert t.index("Failing") < t.index("Freshness, last 7 days")
+    assert "Needs attention" in t
+
+
+def test_sources_leave_out_switched_off_sources(run_page: RunPage) -> None:
+    at = run_page("sources", "hosted")
+    df = at.dataframe[0].value
+    assert "stooq" not in set(df["Source"])
+    assert "Median data age" in df.columns

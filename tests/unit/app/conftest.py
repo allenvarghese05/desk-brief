@@ -43,9 +43,15 @@ def run_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., A
     st.cache_data.clear()
     runs = itertools.count()
 
-    def run(mode: str | None = "hosted", rows: list | None = None) -> AppTest:  # type: ignore[type-arg]
+    def run(
+        mode: str | None = "hosted",
+        rows: list | None = None,  # type: ignore[type-arg]
+        extra: Callable[[World], None] | None = None,
+    ) -> AppTest:
         world = World(tmp_path / f"w{next(runs)}")
         world.observations(monday_rows() if rows is None else rows)
+        if extra is not None:  # more tables: cross-checks, data checks, ...
+            extra(world)
         world.dq(
             brief_synth.MON, [("fresh_a", "pass", None, None), ("fresh_b", "pass", None, None)]
         )
