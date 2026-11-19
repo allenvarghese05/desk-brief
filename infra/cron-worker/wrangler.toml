@@ -1,0 +1,18 @@
+# Desk Brief cron Worker (P-018, card T43). No secrets here: GITHUB_TOKEN is set with
+# `wrangler secret put GITHUB_TOKEN` (see README.md).
+name = "desk-brief-cron"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+# One trigger, every minute. The schedule table lives in src/index.js (UTC).
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+GITHUB_REPO = "allenvarghese05/desk-brief"
+GITHUB_REF = "main"
+
+# Keeps the dispatch log lines (status, slot, dispatched_at) for the latency check.
+[observability]
+enabled = true

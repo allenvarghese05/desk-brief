@@ -50,7 +50,7 @@ CODE_ENV = {
     "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
     "R2_READER_ACCESS_KEY_ID", "R2_READER_SECRET_ACCESS_KEY",
     "SMTP_USER", "SMTP_APP_PASSWORD", "SMTP_HOST", "SMTP_PORT", "REPORT_RECIPIENTS",
-    "GITHUB_EVENT_SCHEDULE", "PYTHONUNBUFFERED", "SLA_DATE",
+    "GITHUB_EVENT_SCHEDULE", "DESKBRIEF_SLOT", "PYTHONUNBUFFERED", "SLA_DATE",
     "IN_START", "IN_END", "IN_SOURCES", "IN_FROM_DATE", "HC_URL",
 }  # fmt: skip
 
@@ -204,8 +204,10 @@ def test_intraday_passes_yahoo_only_on_the_12_15_trigger(tmp_path: Path, stub_bi
 
 
 def test_intraday_maps_the_schedule_for_the_gate() -> None:
-    assert job("intraday")["env"]["GITHUB_EVENT_SCHEDULE"] == "${{ github.event.schedule }}"
-    assert job("eod")["env"]["GITHUB_EVENT_SCHEDULE"] == "${{ github.event.schedule }}"
+    # T43: a cron-Worker dispatch passes the same cron string as its ``fire`` input
+    mapped = "${{ github.event.schedule || inputs.fire }}"
+    assert job("intraday")["env"]["GITHUB_EVENT_SCHEDULE"] == mapped
+    assert job("eod")["env"]["GITHUB_EVENT_SCHEDULE"] == mapped
 
 
 def test_backfill_accepts_start_end_and_sources(tmp_path: Path, stub_bin: Path) -> None:

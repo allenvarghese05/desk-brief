@@ -1,7 +1,10 @@
 """Job wiring: run gates, step hooks, schedule delay, and store / HTTP construction (spec §5.4).
 
-Gates (scheduled triggers only; ``workflow_dispatch`` and local runs always proceed)
------------------------------------------------------------------------------------
+Gates (scheduled triggers only; a human ``workflow_dispatch`` and local runs always proceed)
+--------------------------------------------------------------------------------------------
+A ``workflow_dispatch`` from the cron Worker (inputs ``fire`` and ``slot``, P-018) is a scheduled
+run: same trigger, same ``scheduled_for``, same gate as the GitHub schedule event it mirrors.
+
 GitHub cron is UTC, so ``morning`` is scheduled twice (10:15 and 11:15 UTC) and the code picks
 the one that lands in the 06:00-07:00 ET window on an XNYS business day (DST-safe). The other
 trigger, a weekend or a holiday is a **skip**, not a failure.
@@ -202,9 +205,40 @@ def evaluate_gate(
     return Gate(True)
 
 
+#: P-018: the cron Worker's ``slot`` input (scheduled minute, ISO 8601 UTC), mapped by the workflow.
+SLOT_ENV = "DESKBRIEF_SLOT"
+#: The workflow maps ``github.event.schedule`` (a schedule event) or the ``fire`` input (a Worker
+#: dispatch) into this variable.
+FIRE_ENV = "GITHUB_EVENT_SCHEDULE"
+
+
+def is_worker_dispatch(env: Mapping[str, str]) -> bool:
+    """A ``workflow_dispatch`` carrying both ``fire`` and ``slot`` (the cron Worker, P-018)."""
+    return (
+        env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and bool(env.get(FIRE_ENV, "").strip())
+        and bool(env.get(SLOT_ENV, "").strip())
+    )
+
+
 def trigger_from_env(env: Mapping[str, str]) -> Trigger:
-    """``schedule`` when GitHub says the event was a cron; everything else is manual."""
-    return Trigger.SCHEDULE if env.get("GITHUB_EVENT_NAME") == "schedule" else Trigger.MANUAL
+    """``schedule`` for a GitHub cron event or a Worker dispatch (P-018); everything else manual.
+
+    A human ``workflow_dispatch`` leaves ``fire`` and ``slot`` empty, so it stays manual and
+    ungated.
+    """
+    if env.get("GITHUB_EVENT_NAME") == "schedule" or is_worker_dispatch(env):
+        return Trigger.SCHEDULE
+    return Trigger.MANUAL
+
+
+def dispatcher_from_env(env: Mapping[str, str]) -> str:
+    """Who started the run, for the run log (``runs.trigger`` only says ``schedule``)."""
+    if is_worker_dispatch(env):
+        return "cron-worker"
+    if env.get("GITHUB_EVENT_NAME") == "schedule":
+        return "github-schedule"
+    return env.get("GITHUB_EVENT_NAME") or "local"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -262,13 +296,37 @@ def last_cron_fire(expr: str, now_utc: datetime) -> datetime | None:
     return None
 
 
-def scheduled_for_from_env(env: Mapping[str, str], now_utc: datetime) -> datetime | None:
-    """The instant GitHub meant to start this run, from ``GITHUB_EVENT_SCHEDULE``.
+def _slot_from_env(env: Mapping[str, str]) -> datetime | None:
+    value = env.get(SLOT_ENV, "").strip()
+    if not value:
+        return None
+    try:
+        slot = ensure_utc(datetime.fromisoformat(value))
+    except ValueError as exc:
+        get_logger().warning("slot.unparseable", value=value, error=str(exc))
+        return None
+    fire = env.get(FIRE_ENV, "").strip()
+    try:
+        if fire and len(fire.split()) == 5 and last_cron_fire(fire, slot) != slot:
+            get_logger().warning("slot.not_a_fire_of_cron", slot=value, fire=fire)
+    except ValueError:
+        pass  # the fire string is reported by the cron path below if it is used
+    return slot
 
-    The workflow maps ``github.event.schedule`` (a cron expression) into that variable; an ISO
-    8601 UTC timestamp is also accepted. Unusable values give ``None`` (logged), never an error.
+
+def scheduled_for_from_env(env: Mapping[str, str], now_utc: datetime) -> datetime | None:
+    """The instant this scheduled run was meant to start.
+
+    ``DESKBRIEF_SLOT`` wins when set (P-018: the cron Worker's ``slot`` input, the scheduled
+    minute computed from its table). Otherwise ``GITHUB_EVENT_SCHEDULE``: the workflow maps
+    ``github.event.schedule`` (a cron expression; the last fire at or before ``now_utc`` is
+    used) into it; an ISO 8601 UTC timestamp is also accepted. Unusable values give ``None``
+    (logged), never an error.
     """
-    value = env.get("GITHUB_EVENT_SCHEDULE", "").strip()
+    slot = _slot_from_env(env)
+    if slot is not None:
+        return slot
+    value = env.get(FIRE_ENV, "").strip()
     if not value:
         return None
     try:
@@ -334,7 +392,9 @@ __all__ = [
     "budget_store",
     "build_http",
     "build_store",
+    "dispatcher_from_env",
     "evaluate_gate",
+    "is_worker_dispatch",
     "last_cron_fire",
     "parse_sources_arg",
     "run_checks_step",
