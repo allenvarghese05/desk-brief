@@ -139,7 +139,9 @@ def _chart(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) 
             st.altair_chart(chart.compare_chart(long, names[0], names[1]), theme=None)
             st.caption(
                 "Both series set to 100 on the first common day; dashed: "
-                f"{escape(others[vs])}. {chart.caption(view, latest_line=False)}"
+                f"{escape(others[vs])}. {panels.short(row)}: "
+                f"{chart.caption(view, latest_line=False)} {others[vs].split(' · ')[0]}: "
+                f"{chart.caption(other, latest_line=False)}"
             )
             return bars
     if len(view) < 2:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -89,12 +90,35 @@ def open_connection(config: Config, env: Mapping[str, str]) -> duckdb.DuckDBPyCo
     return duck.connect(LocalBackend(config.storage.local_root), config)
 
 
-@st.cache_resource(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _shared(
-    _config: Config, backend: str, where: str
-) -> tuple[duckdb.DuckDBPyConnection, threading.Lock]:
-    # backend and where are the cache key; rebuilt every 60 s so new files are seen
-    return open_connection(_config, os.environ), threading.Lock()
+@dataclass
+class _Shared:
+    conn: duckdb.DuckDBPyConnection
+    lock: threading.Lock
+    built: float
+    closed: bool = False
+
+
+_SHARED: dict[tuple[str, str], _Shared] = {}
+_SHARED_GUARD = threading.Lock()  # guards _SHARED itself, never held during a query
+
+
+def _shared(config: Config, backend: str, where: str) -> _Shared:
+    """The process's connection for (backend, where), rebuilt once it is a minute old.
+
+    The old connection is closed after taking its lock, so a query still running on it
+    finishes first and only one in-memory copy is kept."""
+    key = (backend, where)
+    with _SHARED_GUARD:
+        cur = _SHARED.get(key)
+        if cur is not None and time.monotonic() - cur.built < CACHE_TTL_SECONDS:
+            return cur
+        fresh = _Shared(open_connection(config, os.environ), threading.Lock(), time.monotonic())
+        _SHARED[key] = fresh
+    if cur is not None:
+        with cur.lock:
+            cur.closed = True
+            cur.conn.close()
+    return fresh
 
 
 def _where(config: Config) -> str:
@@ -111,9 +135,13 @@ def shared_connection(config: Config) -> Iterator[duckdb.DuckDBPyConnection]:
     two browser sessions from using it at the same time (DuckDB connections are not
     thread-safe; cursors would not see its temporary tables).
     """
-    conn, lock = _shared(config, config.storage.backend, _where(config))
-    with lock:
-        yield conn
+    while True:  # a connection replaced between lookup and lock is skipped, never used closed
+        shared = _shared(config, config.storage.backend, _where(config))
+        with shared.lock:
+            if shared.closed:
+                continue
+            yield shared.conn
+            return
 
 
 @dataclass(frozen=True)
@@ -121,8 +149,8 @@ class Snapshot:
     """Everything the Overview needs, unfiltered (tiers are filtered later, per mode)."""
 
     model: BriefModel
-    #: (tier, value, ET date) of official daily values, oldest first
-    series: dict[str, tuple[tuple[int, float, date], ...]]
+    #: (tier, value, ET date, source) of official daily values, oldest first
+    series: dict[str, tuple[tuple[int, float, date, str], ...]]
 
 
 def build_snapshot(
@@ -145,7 +173,10 @@ def build_snapshot(
         conn.close()
     return Snapshot(
         model,
-        {k: tuple((r.tier, r.value, et_date(r.as_of)) for r in v) for k, v in history.items()},
+        {
+            k: tuple((r.tier, r.value, et_date(r.as_of), r.source) for r in v)
+            for k, v in history.items()
+        },
     )
 
 
@@ -243,7 +274,8 @@ class Overview:
     known_limits: tuple[KnownLimit, ...]
     withheld: int  # rows hidden by the mode (shown as one honest note, never as values)
     moves: tuple[Notable, ...] = ()  # unusual moves, largest first (the report's own scoring)
-    curve: dict[str, tuple[tuple[date, float], ...]] = field(default_factory=dict)  # UST tenors
+    #: UST tenors: (ET date, yield, source) of official values, oldest first
+    curve: dict[str, tuple[tuple[date, float, str], ...]] = field(default_factory=dict)
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -272,7 +304,7 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
             if lg.role == "value" and lg.value.tier not in hidden
         },
         sparks={
-            k: tuple(v for t, v, _ in pts if t not in hidden)
+            k: tuple(v for t, v, _, _ in pts if t not in hidden)
             for k, pts in snap.series.items()
             if k in by_id
         },
@@ -282,7 +314,7 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
             if n.kind == "move" and n.instrument_id in by_id and by_id[n.instrument_id].available
         ),
         curve={
-            k: tuple((d, v) for t, v, d in snap.series.get(k, ()) if t == 3)
+            k: tuple((d, v, src) for t, v, d, src in snap.series.get(k, ()) if t == 3)
             for k in CURVE_TENORS
             if k in by_id
         },

@@ -68,14 +68,25 @@ def _latest(row: Row, bars: pd.DataFrame) -> tuple[float, date] | None:
     return float(bars["close"].iloc[-1]), bars["d"].iloc[-1].date()
 
 
-def _bar_prov(bars: pd.DataFrame, what: str, since: date | None = None) -> Provenance:
+def _bar_prov(
+    bars: pd.DataFrame, what: str, since: date | None = None, latest: Row | None = None
+) -> Provenance:
+    """Provenance of a statistic over daily bars (plus the report's latest value, if used).
+
+    The glyph shows the lowest (most live) tier involved, so a tier-1 input is never hidden
+    behind an "official" glyph; a mix of tiers is said in words."""
     used = bars if since is None else bars[bars["d"].dt.date >= since]
     used = used if not used.empty else bars
-    tier = int(used["tier"].max())
-    src = ", ".join(sorted({str(s) for s in used["source"]}))
+    tiers = {int(t) for t in used["tier"]}
+    sources = {str(s) for s in used["source"]}
+    if latest is not None and latest.change is not None:
+        tiers.add(latest.change.last.tier)
+        sources.add(latest.change.last.source)
     a, b = used["d"].iloc[0], used["d"].iloc[-1]
     span = f"{b:%d %b}" if a == b else f"{a:%d %b} – {b:%d %b}"
-    return Provenance(src, tier, span, what)
+    if len(tiers) > 1:
+        what += "; mixed tiers: " + ", ".join(TIER_NAME[t] for t in sorted(tiers, reverse=True))
+    return Provenance(", ".join(sorted(sources)), min(tiers), span, what)
 
 
 def _move(now: float, then: float, yields: bool) -> tuple[float, str]:
@@ -140,12 +151,19 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
             continue
         base = before.iloc[-1]
         chg, unit = _move(value, float(base["close"]), yields)
-        p = Provenance(
-            str(base["source"]),
-            int(base["tier"]),
-            f"{base['d']:%d %b %Y}",
-            f"change since the {base['field']} of {base['d']:%d %b %Y}",
-        )
+        base_tier, base_src = int(base["tier"]), str(base["source"])
+        if row.change is not None:  # the latest value can be another feed than the base close
+            last = row.change.last
+            what = (
+                f"change of the latest value ({last.source}, {TIER_NAME[last.tier]}) since the "
+                f"{base['field']} of {base['d']:%d %b %Y} ({base_src}, {TIER_NAME[base_tier]})"
+            )
+            src = base_src if last.source == base_src else f"{last.source} vs {base_src}"
+            tier = min(last.tier, base_tier)
+        else:
+            what = f"change since the {base['field']} of {base['d']:%d %b %Y}"
+            src, tier = base_src, base_tier
+        p = Provenance(src, tier, f"{base['d']:%d %b %Y}", what)
         text = _signed(chg, unit)
         cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
         out.append(
@@ -208,6 +226,7 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
             p = _bar_prov(
                 bars.tail(61),
                 f"latest move in standard deviations of {len(hist.tail(60))} daily moves",
+                latest=row if intraday else None,
             )
             facts.append(("Latest move", value_cell(f"{today / sd:+.1f}σ".replace("-", _MINUS), p)))
     else:

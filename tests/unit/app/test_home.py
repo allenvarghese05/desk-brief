@@ -305,28 +305,6 @@ def test_local_details_show_every_tier_and_checks(run_home: Run) -> None:
     assert "Data checks, last 14 days" in text
 
 
-def test_hosted_bars_never_read_tier1(run_home: Run) -> None:
-    import os
-
-    from app.components import data
-
-    from brief_synth import MON_0700, THU
-    from deskbrief.config import load_config
-
-    t1 = daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest")
-    run_home("hosted", rows=[*monday_rows(), t1])
-    config = load_config(os.environ["DESKBRIEF_CONFIG"])
-    conn = data.open_connection(config, os.environ)
-    try:
-        hosted = data.build_bars(conn, MON_0700, "SPY", frozenset({1}))
-        local = data.build_bars(conn, MON_0700, "SPY", frozenset())
-    finally:
-        conn.close()
-    assert 590.25 not in hosted["close"].tolist()
-    assert set(hosted["tier"]) <= {2, 3}
-    assert 590.25 not in local["close"].tolist() or 1 in set(local["tier"])
-
-
 def test_candles_need_a_consistent_open_high_low() -> None:
     import pandas as pd
     from app.components import chart

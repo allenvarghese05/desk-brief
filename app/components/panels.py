@@ -354,10 +354,16 @@ def overview(ov: Overview, sel: str = "", keep: Mapping[str, str] | None = None)
 # ---------------------------------------------------------------------------
 
 
-def _nearest(points: Sequence[tuple[date, float]], target: date) -> tuple[date, float] | None:
+def _nearest(
+    points: Sequence[tuple[date, float, str]], target: date
+) -> tuple[date, float, str] | None:
     """The last point on or before ``target``."""
     before = [p for p in points if p[0] <= target]
     return before[-1] if before else None
+
+
+def _curve_prov(point: tuple[date, float, str]) -> Provenance:
+    return Provenance(point[2], 3, f"{point[0]:%d %b}", "yield")
 
 
 def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
@@ -371,7 +377,7 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
     now = {t: ov.curve[t][-1] for t in tenors}
     then = {t: _nearest(ov.curve[t], latest - timedelta(days=back_days)) for t in tenors}
     have_then = all(then[t] is not None for t in tenors)
-    values = [v for _, v in now.values()] + [p[1] for p in then.values() if p is not None]
+    values = [p[1] for p in now.values()] + [p[1] for p in then.values() if p is not None]
     lo, hi = min(values), max(values)
     pad = max((hi - lo) * 0.15, 0.05)
     lo, hi = lo - pad, hi + pad
@@ -397,10 +403,8 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
         f'<text x="{x(t):.1f}" y="{h - 10}" text-anchor="middle">{SHORT[t]}</text>' for t in tenors
     )
     line_now = " ".join(f"{x(t):.1f},{y(now[t][1]):.1f}" for t in tenors)
-    marks = "".join(
+    marks = "".join(  # points only: the figures are in the tenor strip, with provenance
         f'<circle cx="{x(t):.1f}" cy="{y(now[t][1]):.1f}" r="2.6" fill="currentColor"/>'
-        f'<text x="{x(t):.1f}" y="{y(now[t][1]) - 8:.1f}" text-anchor="middle">'
-        f"{now[t][1]:.2f}</text>"
         for t in tenors
     )
     then_svg, legend_then = "", ""
@@ -409,14 +413,22 @@ def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
         then_svg = f'<polyline class="db-curve-then" points="{pts}"/>'
         d = min(p[0] for p in then.values() if p is not None)
         legend_then = f"<span>- - - {d.day} {d:%b}</span>"
-    desc = ", ".join(f"{SHORT[t]} {now[t][1]:.2f}%" for t in tenors)
+    strip = "".join(
+        f'<div class="db-tenor"><span class="db-hz-label">{SHORT[t]}</span>'
+        f"{value_cell(f'{now[t][1]:.2f}%', _curve_prov(now[t]), compact=True)}"
+        "</div>"
+        for t in tenors
+    )
     svg = (
         f'<svg class="db-curve" viewBox="0 0 {w} {h}" width="100%" role="img" '
-        f'aria-label="Treasury yield curve on {latest.day} {latest:%b}: {desc}" '
+        f"aria-label=\"Treasury yield curve on {latest.day} {latest:%b}; each tenor's yield is "
+        'listed under the chart" '
         f'style="color:#6ea8ff">{grid}{then_svg}'
         f'<polyline class="db-curve-now" points="{line_now}"/>{marks}{ticks}</svg>'
     )
+    sources = ", ".join(sorted({now[t][2] for t in tenors}))
     return (
         f'{svg}<div class="db-curve-legend"><span>— {latest.day} {latest:%b}</span>'
-        f"{legend_then}<span>{tier_glyph(3)} treasury</span></div>"
+        f"{legend_then}<span>{tier_glyph(3)} official · {escape(sources)}</span></div>"
+        f'<div class="db-tenors">{strip}</div>'
     )

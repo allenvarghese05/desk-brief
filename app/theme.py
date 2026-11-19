@@ -232,6 +232,10 @@ div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
 .db-curve .db-curve-now {{ stroke: {ACCENT}; stroke-width: 1.8; fill: none; }}
 .db-curve .db-curve-then {{ stroke: {MUTED}; stroke-width: 1.2; fill: none;
   stroke-dasharray: 4 3; }}
+.db-tenors {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .3rem;
+  margin-top: .5rem; }}
+.db-tenor {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.db-tenor .db-fig {{ display: block; text-align: left; }}
 .db-curve-legend {{ display: flex; gap: 1rem; color: {MUTED}; font-size: .76rem; }}
 </style>
 """
