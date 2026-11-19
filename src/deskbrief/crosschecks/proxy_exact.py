@@ -21,6 +21,12 @@ so some structural bp gap between the two legs is expected even on a clean day.
   return, ``expected_value`` = expected return, right = the current yield. The yield comes from
   the group's ``official`` instrument, else its ``exact`` one (e.g. FRED ``DGS10``, else ``^TNX``).
 
+Provider (P-019, card T48): the proxy ETF's daily close comes from Yahoo ``history``, and the exact
+leg of a ``return`` group is a Yahoo future, so both legs are often one provider. The check still
+means something because it compares two *instruments*, not two sources; ``details.provider`` says
+``"same provider"`` when both legs come from one source and ``"different providers"`` otherwise
+(absent when a leg is missing). It is a label only and never changes the status.
+
 Skips (missing day or side, zero previous value) carry a ``reason``. ``in_roll_window`` is an
 APPROXIMATION of the exchange calendars (VERIFY against CME/ICE): it only softens a fail to a warn.
 """
@@ -56,6 +62,8 @@ CLOSE = ("close",)
 YIELD = ("yield", "close")
 ROLL_MODELLED = ("ES_F", "BRENT")  # no calendar for WTI or gold yet
 EXACT_SOURCES = ("yahoo",)  # spec §3: the exact leg is the Yahoo future
+SAME_PROVIDER = "same provider"
+DIFFERENT_PROVIDERS = "different providers"
 Pair = tuple[Obs, Obs]  # (previous day, reference day)
 
 
@@ -270,6 +278,8 @@ def _result(
     details: dict[str, Any],
     reason: str | None,
 ) -> XResult:
+    if left[1] != "*" and right[1] != "*":
+        details["provider"] = SAME_PROVIDER if left[1] == right[1] else DIFFERENT_PROVIDERS
     if reason is not None:
         details["reason"] = reason
         diff, status = None, DQStatus.SKIP

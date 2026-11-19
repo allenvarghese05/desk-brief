@@ -1,21 +1,76 @@
-# Yahoo Finance source (T16)
+# Yahoo Finance source (T16, T48)
 
-Code: `src/deskbrief/sources/yahoo.py`. Tier 2 "second opinion" source, unofficial, wraps the
-`yfinance` library. Registered with `register("yahoo", YahooSource)`.
+Code: `src/deskbrief/sources/yahoo.py`. Tier 2, unofficial, wraps the `yfinance` library.
+Registered with `register("yahoo", YahooSource)`. For quotes it is a second opinion; since P-019
+(card T48) its `history` dataset is the **primary daily close for every ETF and single stock**.
 
 ## Datasets
 
 | Dataset | Rows | Notes |
 |---|---|---|
 | `quote` | `field=last`, `interval=tick`, `as_of` = Yahoo `regularMarketTime` (the quote instant, P-006) | One `Ticker.history(period="1d")` call per symbol, then `history_metadata` (`regularMarketPrice`, `regularMarketTime`). |
-| `history` | `field` in open/high/low/close, `interval=1d`, `as_of` = 00:00 ET on the bar's exchange-local date | Window `[target_date - 10d, target_date + 1d)`, `auto_adjust=False`. Only final trading-day bars are kept (see below). A null field is skipped. |
+| `history` | `field` in open/high/low/close, `interval=1d`, `as_of` = 00:00 ET on the bar's exchange-local date, `is_fallback=false` | Window `[target_date - 10d, target_date + 1d)`, `auto_adjust=False`. Only final trading-day bars are kept (see below). A null field is skipped. Configured for the 12 ETFs and stocks (P-019), the four futures, `^IRX`, `^TNX`, `^VIX` and the three foreign indices. |
 | `daily_fallback` | `field=close`, `interval=1d`, `is_fallback=true` | T3 fallback for symbols Stooq normally serves. See below. |
 
 Planned per job: morning and eod = quote + history + daily_fallback; intraday = quote only;
 backfill/rebuild = history + daily_fallback. A dataset with no configured feeds is not planned.
+The one-time `history` job (P-020, card T53) uses `plan_range` instead (below).
 `tier`, `unit` and `scale` always come from the `config.yaml` feed (`scale` multiplies every
 price field; volume is never emitted because it means shares, contracts or zero depending on
 the instrument).
+
+## ETF and stock daily close (P-019, card T48)
+
+Every ETF and single stock in `config.yaml` (SPY, QQQ, IWM, AAPL, MSFT, NVDA, USO, BNO, GLD, SHY,
+IEF, TLT) has one feed `{source: yahoo, dataset: history, symbol: <ticker>, tier: 2}`. It replaces
+the Stooq daily close, which is disabled by owner decision (Stooq serves a browser-verification
+page to automated requests; its feeds stay in `config.yaml` with `enabled: false`). The rows are
+the primary daily close, not a fallback: `is_fallback=false`, tier 2, so hosted mode shows them.
+`daily_fallback` is unchanged and still has no feeds.
+
+What reads them:
+
+- **Dashboard bars** (`app/components/data.build_bars`) and every `1d` reader (`query.py`,
+  `store/duck.daily_close`) take the highest visible tier per day; with Stooq off that is Yahoo.
+- **`close_vs_official`** compares the Alpaca SIP close of the 1m bar ending at the session close
+  with the Yahoo daily close: two independent sources (SIP tape vs Yahoo's consolidated close).
+  The Yahoo close is the official closing-auction price, the SIP bar the last trades before it,
+  so small gaps remain expected.
+- **`proxy_vs_exact`** reads the proxy ETF's daily return from Yahoo. For the `return` groups the
+  exact leg is a Yahoo future, so both legs are one provider; the check compares two
+  *instruments*, so it stays meaningful, and `details.provider` says `"same provider"`.
+  Duration groups pair Yahoo with FRED/Treasury yields: `"different providers"`.
+
+### Adjusted vs unadjusted close
+
+`auto_adjust=False`, and `parse` emits `Close`, not `Adj Close`. Yahoo's `Close` is
+split-adjusted but **not dividend-adjusted**: the price that traded. The card does not name one;
+`close_vs_official` needs the traded price to match the SIP bar, so unadjusted is required. The
+probe shows the difference: SPY on 2024-11-19 has `Close` 590.30 and `Adj Close` 576.98. Known
+limit: a daily return across an ex-dividend date includes the dividend drop (SPY, QQQ and the
+bond ETFs pay quarterly or monthly; a few bp on those days for `proxy_vs_exact`). `Adj Close`
+is not stored; Yahoo revises it at every dividend, so it would rewrite history.
+
+### Freshness and completeness
+
+- **Completeness** already covers every `yahoo/history` feed, per instrument
+  (`checks/feed_completeness.py`: one `close` bar for the last finished XNYS session, index
+  instruments `skip`). The new feeds are picked up from `config.yaml` without a code change.
+- **Freshness**: there is no `yahoo/history` entry in `config.datasets`, and T48 adds none. A
+  `datasets` entry would also make `checks/completeness.py` judge every Yahoo history feed a
+  second time on the dataset's calendar, which would fail the foreign indices (no exchange
+  calendar) and duplicate the per-instrument rows. Checked, not extended; see the follow-ups in
+  the T48 PR.
+
+## Range planning (`plan_range`, P-020)
+
+`plan_range(start, end, ctx)` covers the `history` dataset only. It returns **one** request with
+every configured `history` symbol, `start` = the first ET date and `end` = the day after the last
+(yfinance's `end` is exclusive). `fetch` makes one `Ticker.history` call per symbol for the whole
+range, so a 2-year load of all 22 history symbols is 22 calls, under a minute at 30/min. The same
+final-bar filter applies (judged at the fetch time). `end` before `start` raises `ValueError`; no
+`history` feeds means no request. `quote` (a quote is always "now") and `daily_fallback` have no
+range support.
 
 ## Raw is a serialization, not the provider's bytes (limitation)
 
@@ -56,7 +111,7 @@ so a NYSE holiday does not excuse an empty answer for `ES=F` or `^TNX`. A weeken
 
 `parse` judges each bar at the fetch time (`RawResponse.responded_at`):
 
-- `etf`/`stock` instruments (the `daily_fallback` symbols): XNYS calendar. The bar's date must be a
+- `etf`/`stock` instruments (the P-019 `history` feeds, and any `daily_fallback` ones): XNYS calendar. The bar's date must be a
   session and the session (early closes honoured) must have closed.
 - Everything else (futures, indices, yields): no exchange calendar is modelled. Saturday and
   Sunday bars are dropped (e.g. the `ES=F` Sunday-evening session bar), and so is any bar dated
@@ -84,8 +139,8 @@ Stooq, which then stays `enabled: false`):
 ```
 
 Yahoo symbols are plain tickers (`SPY`, not Stooq's `spy.us`). Rows carry `is_fallback=true`
-and must be labeled as fallback wherever shown. `config.yaml` has no such feeds today because
-T13 has not disabled Stooq.
+and must be labeled as fallback wherever shown. `config.yaml` has no such feeds: since P-019 the
+ETFs and stocks read `history` (tier 2, not a fallback) instead.
 
 ## `^TNX` / `^IRX` scale: VERIFY at live probe
 
@@ -107,7 +162,28 @@ Actions IPs, about 10 calls, no rate limiting or blocking seen.
 - Index timezones differ per exchange (`^TNX` America/Chicago, `ES=F` America/New_York), so bars
   are dated by their exchange-local date.
 
-## Live probe
+## Live probe: `history` for ETFs and stocks (T48, 2026-11-19)
+
+Run by the implementer from a local machine (not GitHub Actions IPs) at 20:38 UTC (15:38 ET, a
+trading day, session still open), yfinance 1.8.0, `Ticker.history(start="2024-11-19",
+end="2026-11-20", interval="1d", auto_adjust=False)`. No block, CAPTCHA or rate limit seen.
+
+| Symbol | HTTP | Rows (2 years) | Newest final bar (2026-11-18): Close | Adj Close | 2024-11-19 Close / Adj Close |
+|---|---|---|---|---|---|
+| SPY | 200 | 502 | 730.20 | 730.20 | 590.30 / 576.98 |
+| QQQ | 200 | 502 | 659.51 | 659.51 | 503.46 / 498.42 |
+| GLD | 200 | 502 | 341.19 | 341.19 | 243.25 / 243.25 (no dividends) |
+| MSFT | 200 | 502 | 508.29 | 508.29 | 417.79 / 411.29 |
+
+- HTTP status from yfinance's debug log (`response code=200`).
+- The 502 rows include 2026-11-19, the unfinished session (SPY 717.30 at probe time); `parse`
+  drops it (XNYS session not closed at fetch time), leaving 501 final bars.
+- Index timezone `America/New_York`. Columns: Open, High, Low, Close, Adj Close, Volume,
+  Dividends, Stock Splits (ETFs add Capital Gains).
+- Owner re-run (keyless):
+  `uv run python -c "import yfinance as yf; f=yf.Ticker('SPY').history(period='2y', interval='1d', auto_adjust=False); print(len(f), f.index[-2].date(), f['Close'].iloc[-2])"`
+
+## Live probe: quotes and `^TNX` (T16)
 
 PENDING (formal). Record here: date, yfinance version, one quote and one history call, observed
 `^TNX`/`^IRX` magnitude, rate-limit or blocking behaviour, whether GitHub Actions IPs are blocked.

@@ -1,13 +1,18 @@
-"""``close_vs_official``: Alpaca SIP last 1m bar before the close vs the Stooq daily close.
+"""``close_vs_official``: Alpaca SIP last 1m bar before the close vs the Yahoo daily close.
+
+P-019 (card T48): the daily close of ETFs and stocks comes from Yahoo ``history`` (tier 2), so
+this check compares two independent sources: Alpaca's SIP tape and Yahoo's daily bar. Stooq, the
+earlier reference, is disabled (it serves a browser-verification page to automated requests).
 
 Members: instruments in ``crosschecks.iex_vs_sip.symbols`` that have both an
-``alpaca/sip_bars_1m`` and a ``stooq/daily`` feed (the Alpaca source, T14, fetches SIP bars only
+``alpaca/sip_bars_1m`` and a ``yahoo/history`` feed (the Alpaca source, T14, fetches SIP bars only
 for those symbols, so the other equities would skip every day). Evaluated on the last
 completed XNYS session before today (P-009; reading ``obs_pit``):
 
 * left  = SIP ``close`` of the 1m bar *ending* at the session close, i.e. the bar starting one
   minute before ``session_bounds_utc(date)[1]`` (16:00 ET, or 13:00 ET on early-close days),
-* right = Stooq ``close`` for the date (the official reference).
+* right = Yahoo ``history`` ``close`` for the date (unadjusted, ``auto_adjust=False``, so it is the
+  traded closing price, not a dividend-adjusted one).
 
 The closing auction prints after the last 1m bar, so small gaps are expected (spec §8.2). Prices
 use relative bp. A missing bar (no trade in the last minute) is a ``skip``, not a fallback.
@@ -34,6 +39,7 @@ from deskbrief.crosschecks.base import (
 from deskbrief.models import RunContext, XResult
 
 NAME = "close_vs_official"
+DAILY_SOURCE, DAILY_DATASET = "yahoo", "history"  # P-019: the ETF/stock daily close
 
 
 class CloseVsOfficial:
@@ -52,24 +58,28 @@ class CloseVsOfficial:
             start=bar_start, end=close_utc, fields=("close",),
         )  # fmt: skip
         d_start, d_end = et_day_bounds(ref)
-        stooq = query_obs(
-            ctx, duck, source="stooq", dataset="daily", interval="1d",
+        daily = query_obs(
+            ctx, duck, source=DAILY_SOURCE, dataset=DAILY_DATASET, interval="1d",
             start=d_start, end=d_end, fields=("close",),
         )  # fmt: skip
         wanted = set(cfg.crosschecks.iex_vs_sip.symbols)
         sip_ids = {i.id for i, _ in cfg.feeds_for("alpaca", "sip_bars_1m")}
-        stooq_ids = {i.id for i, _ in cfg.feeds_for("stooq", "daily")}
+        daily_ids = {i.id for i, _ in cfg.feeds_for(DAILY_SOURCE, DAILY_DATASET)}
         early = is_early_close(ref)
         out: list[XResult] = []
         for inst in cfg.instruments:
-            if inst.id not in wanted or inst.id not in sip_ids or inst.id not in stooq_ids:
+            if inst.id not in wanted or inst.id not in sip_ids or inst.id not in daily_ids:
                 continue
             s_obs = pick_by_field((o for o in sip if o.instrument_id == inst.id), ("close",))
-            o_obs = pick_by_field((o for o in stooq if o.instrument_id == inst.id), ("close",))
+            o_obs = pick_by_field((o for o in daily if o.instrument_id == inst.id), ("close",))
             left = (
                 Side.from_obs(s_obs) if s_obs else Side(inst.id, "alpaca", "sip_bars_1m", inst.unit)
             )
-            right = Side.from_obs(o_obs) if o_obs else Side(inst.id, "stooq", "daily", inst.unit)
+            right = (
+                Side.from_obs(o_obs)
+                if o_obs
+                else Side(inst.id, DAILY_SOURCE, DAILY_DATASET, inst.unit)
+            )
             out.append(
                 compare(
                     ctx,
@@ -86,6 +96,7 @@ class CloseVsOfficial:
                         "expected_bar_start_utc": bar_start.isoformat(),
                         "early_close": early,
                         "expected": "small gaps: closing auction vs last 1m bar",
+                        "independent_sources": True,
                     },
                 )
             )

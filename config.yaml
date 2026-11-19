@@ -35,6 +35,7 @@ instruments:
       - {source: alpaca, dataset: iex_bars_1m, symbol: SPY, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: SPY, tier: 2}
       - {source: yahoo, dataset: quote, symbol: SPY, tier: 2}
+      - {source: yahoo, dataset: history, symbol: SPY, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: spy.us, tier: 3}
   - id: QQQ
     name: Invesco QQQ (Nasdaq-100)
@@ -46,6 +47,7 @@ instruments:
       - {source: alpaca, dataset: iex_bars_1m, symbol: QQQ, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: QQQ, tier: 2}
       - {source: yahoo, dataset: quote, symbol: QQQ, tier: 2}
+      - {source: yahoo, dataset: history, symbol: QQQ, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: qqq.us, tier: 3}
   - id: IWM
     name: iShares Russell 2000 ETF
@@ -57,6 +59,7 @@ instruments:
       - {source: alpaca, dataset: iex_bars_1m, symbol: IWM, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: IWM, tier: 2}
       - {source: yahoo, dataset: quote, symbol: IWM, tier: 2}
+      - {source: yahoo, dataset: history, symbol: IWM, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: iwm.us, tier: 3}
   - id: ES_F
     name: E-mini S&P 500 futures (front month)
@@ -75,6 +78,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: AAPL, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: AAPL, tier: 2}
       - {source: yahoo, dataset: quote, symbol: AAPL, tier: 2}
+      - {source: yahoo, dataset: history, symbol: AAPL, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: aapl.us, tier: 3}
   - id: MSFT
     name: Microsoft Corp.
@@ -85,6 +89,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: MSFT, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: MSFT, tier: 2}
       - {source: yahoo, dataset: quote, symbol: MSFT, tier: 2}
+      - {source: yahoo, dataset: history, symbol: MSFT, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: msft.us, tier: 3}
   - id: NVDA
     name: NVIDIA Corp.
@@ -95,6 +100,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: NVDA, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: NVDA, tier: 2}
       - {source: yahoo, dataset: quote, symbol: NVDA, tier: 2}
+      - {source: yahoo, dataset: history, symbol: NVDA, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: nvda.us, tier: 3}
 
   # ---------------- Commodities ----------------
@@ -109,6 +115,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: USO, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: USO, tier: 2}
       - {source: yahoo, dataset: quote, symbol: USO, tier: 2}
+      - {source: yahoo, dataset: history, symbol: USO, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: uso.us, tier: 3}
   - id: BNO
     name: United States Brent Oil Fund
@@ -121,6 +128,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: BNO, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: BNO, tier: 2}
       - {source: yahoo, dataset: quote, symbol: BNO, tier: 2}
+      - {source: yahoo, dataset: history, symbol: BNO, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: bno.us, tier: 3}
   - id: GLD
     name: SPDR Gold Shares
@@ -134,6 +142,7 @@ instruments:
       - {source: alpaca, dataset: iex_bars_1m, symbol: GLD, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: GLD, tier: 2}
       - {source: yahoo, dataset: quote, symbol: GLD, tier: 2}
+      - {source: yahoo, dataset: history, symbol: GLD, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: gld.us, tier: 3}
   - id: WTI
     name: WTI crude oil
@@ -174,6 +183,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: SHY, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: SHY, tier: 2}
       - {source: yahoo, dataset: quote, symbol: SHY, tier: 2}
+      - {source: yahoo, dataset: history, symbol: SHY, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: shy.us, tier: 3}
   - id: IEF
     name: iShares 7-10 Year Treasury Bond ETF
@@ -186,6 +196,7 @@ instruments:
       - {source: alpaca, dataset: iex_latest, symbol: IEF, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: IEF, tier: 2}
       - {source: yahoo, dataset: quote, symbol: IEF, tier: 2}
+      - {source: yahoo, dataset: history, symbol: IEF, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: ief.us, tier: 3}
   - id: TLT
     name: iShares 20+ Year Treasury Bond ETF
@@ -199,6 +210,7 @@ instruments:
       - {source: alpaca, dataset: iex_bars_1m, symbol: TLT, tier: 1}
       - {source: alpaca, dataset: sip_bars_1m, symbol: TLT, tier: 2}
       - {source: yahoo, dataset: quote, symbol: TLT, tier: 2}
+      - {source: yahoo, dataset: history, symbol: TLT, tier: 2}       # P-019 primary daily close
       - {source: stooq, dataset: daily, symbol: tlt.us, tier: 3}
   - id: UST_3M
     name: US 3-month bill yield
