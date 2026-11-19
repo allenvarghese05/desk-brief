@@ -9,6 +9,8 @@ reader sees (labels, signed changes, tier glyphs, "data unavailable") is decided
 Labelling rules (P-009): a value is labelled by its ``field``/``unit``. "since previous NYSE
 close" is used only for price-family ``close`` instruments; yields, ECB reference rates and macro
 series say "since previous official value". Nothing outside ``field = close`` is called a close.
+Weekly (``1w``) values show their date without a time and say "week-on-week, since previous
+weekly value (date)"; they get no anomaly scoring, which a known limit states.
 
 Per-row qualifiers (fallback source, IEX single exchange, delayed quote, derived) sit on each
 ``Row``, so a value never loses its caveat when a renderer drops the known-limits block.
@@ -39,6 +41,7 @@ from deskbrief.config import Config, Instrument, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
     CHANGE_DECIMALS,
+    OFFICIAL_INTERVALS,
     ChangeRow,
     CheckItem,
     HealthSummary,
@@ -292,13 +295,16 @@ def value_text(row: ValueRow) -> str:
         return f"${v:,.2f}"
     if row.unit == "fx_rate":
         return f"{v:.2f}" if abs(v) >= 20 else f"{v:.4f}"
+    if row.unit == "contracts":
+        return f"{v:,.0f}"
     return f"{v:,.2f}"
 
 
 def _as_of_text(row: ValueRow, report_date: date) -> str:
-    """Daily values show their date; intraday ones show the time, plus the date unless today."""
+    """Daily, weekly and monthly values show their date; intraday ones show the time, plus the
+    date unless today."""
     et = to_et(row.as_of)
-    if row.interval in ("1d", "1mo"):
+    if row.interval in OFFICIAL_INTERVALS:
         return f"{et.day} {et:%b}"
     if et.date() == report_date:
         return f"{et:%H:%M}"
@@ -351,7 +357,8 @@ def _qualifiers(last: ValueRow, report_time: datetime) -> tuple[str, ...]:
 
 def _tail(change: ChangeRow) -> str:
     if change.status == "ok":
-        return f"{change_text(change)} since {_basis_text(change)}"
+        wow = " week-on-week," if change.last.interval == "1w" else ""
+        return f"{change_text(change)}{wow} since {_basis_text(change)}"
     if change.status == "no_move_yet":
         return f"no move to report since {change.basis}"
     if change.previous is not None:  # found, but a percentage of zero is undefined
@@ -635,6 +642,15 @@ def _known_limits(
     if derived:
         out.append(
             KnownLimit("derived", "Derived values, not published directly: " + ", ".join(derived))
+        )
+    weekly = sorted({r.instrument_id for r in snapshot if r.interval == "1w"})
+    if weekly:
+        out.append(
+            KnownLimit(
+                "weekly",
+                "Weekly series get no anomaly check (it reads daily values only): "
+                + ", ".join(weekly),
+            )
         )
     missing = [r.instrument_id for r in rows.values() if not r.available]
     if missing:

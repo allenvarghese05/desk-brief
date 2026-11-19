@@ -28,8 +28,11 @@ morning run). ``scorecard_daily`` is overwritten in place, so its view still rea
 ========================  =====================================================================
 
 ``daily_close`` reads ``interval = '1d'`` rows whose field is one of ``DAILY_CLOSE_FIELDS``
-(``close`` for prices, ``yield`` for Treasury par yields, ``rate`` for fixes), and exposes the
-value as column ``close``; the original ``field`` is kept alongside.
+(``close`` for prices, ``yield`` for Treasury par yields, ``rate`` for fixes, ``level`` for an
+index value that is neither, e.g. the broad dollar index, P-021), and exposes the value as column
+``close``; the original ``field`` is kept alongside. Weekly (``1w``) rows are not daily values
+and never appear here; the anomaly check, which reads the same fields, therefore covers daily
+``level`` series but no weekly series.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ TABLE_VIEWS: dict[str, str] = {
 }
 
 #: fields that count as "the day's value" in ``daily_close`` (priority order)
-DAILY_CLOSE_FIELDS: tuple[str, ...] = ("close", "yield", "rate")
+DAILY_CLOSE_FIELDS: tuple[str, ...] = ("close", "yield", "rate", "level")
 
 _SQL_TYPES = {"str": "VARCHAR", "ts": "TIMESTAMPTZ", "date": "DATE", "int": "BIGINT",
               "float": "DOUBLE", "bool": "BOOLEAN"}  # fmt: skip

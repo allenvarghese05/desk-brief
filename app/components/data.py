@@ -51,8 +51,12 @@ CURVE_TENORS = ("UST_3M", "UST_2Y", "UST_10Y", "UST_20Y", "UST_30Y")
 CACHE_TTL_SECONDS = 60
 #: how far back the price chart reads daily bars (calendar days; the store may hold less)
 BAR_DAYS = 400
-BAR_COLUMNS = ("d", "open", "high", "low", "close", "volume", "tier", "source", "field", "unit")
-_MAIN_RANK = {"close": 0, "yield": 1, "rate": 2}
+BAR_COLUMNS = (
+    "d", "open", "high", "low", "close", "volume", "tier", "source", "field", "unit", "interval",
+)  # fmt: skip
+#: a bar's main value, best first; level, net_position and open_interest are P-021's fields
+_MAIN_RANK = {"close": 0, "yield": 1, "rate": 2, "level": 3, "net_position": 4, "open_interest": 5}
+_BAR_FIELDS = ", ".join(f"'{f}'" for f in (*_MAIN_RANK, "open", "high", "low", "volume"))
 
 
 def current_time() -> datetime:
@@ -201,9 +205,12 @@ def build_bars(
     exclude_tiers: frozenset[int],
     days: int = BAR_DAYS,
 ) -> pd.DataFrame:
-    """Completed daily bars of one instrument, oldest first: one row per ET date.
+    """Completed daily (or weekly) bars of one instrument, oldest first: one row per ET date.
 
-    Each day takes its main value (close, else yield, else rate) from the highest visible tier,
+    ``interval`` says which: a weekly series (``1w``, e.g. CFTC positioning) has one bar per
+    reference date, and an instrument with daily bars never mixes in weekly ones.
+    Each day takes its main value (close, else yield, rate, level, net position, open interest)
+    from the highest visible tier,
     then open / high / low / volume from that same tier and source only, so a candle is never
     stitched together from two feeds. Hidden tiers are excluded in SQL: hosted mode never reads
     a tier-1 bar. Point-in-time at ``now``; the current ET date is left out (still forming).
@@ -212,20 +219,24 @@ def build_bars(
     marks = ", ".join(str(int(t)) for t in tiers)
     raw = conn.execute(
         "SELECT CAST(timezone('America/New_York', as_of) AS DATE) AS d, field, value, tier, "  # noqa: S608 (the interpolated tiers are ints)
-        "source, unit, ingested_at FROM obs_pit(?) WHERE instrument_id = ? "
-        "AND interval = '1d' AND field IN ('open', 'high', 'low', 'close', 'yield', 'rate', "
-        f"'volume') AND as_of > ? AND tier IN ({marks}) "
+        "source, unit, interval, ingested_at FROM obs_pit(?) WHERE instrument_id = ? "
+        f"AND interval IN ('1d', '1w') AND field IN ({_BAR_FIELDS}) "
+        f"AND as_of > ? AND tier IN ({marks}) "
         "AND CAST(timezone('America/New_York', as_of) AS DATE) < ?",
         [now, instrument_id, now - timedelta(days=days), et_date(now)],
     ).fetchdf()
     if raw.empty:
         return pd.DataFrame(columns=list(BAR_COLUMNS))
+    if (raw["interval"] == "1d").any():
+        raw = raw[raw["interval"] == "1d"]
     main = raw[raw["field"].isin(list(_MAIN_RANK))].copy()
     main["rank"] = main["field"].map(_MAIN_RANK)
     main = main.sort_values(
         ["d", "tier", "rank", "source", "ingested_at"], ascending=[True, False, True, True, False]
     ).drop_duplicates("d")
-    out = main[["d", "tier", "source", "field", "unit", "value"]].rename(columns={"value": "close"})
+    out = main[["d", "tier", "source", "field", "unit", "interval", "value"]].rename(
+        columns={"value": "close"}
+    )
     extra = raw[raw["field"].isin(["open", "high", "low", "volume"])]
     if not extra.empty:
         extra = extra.sort_values("ingested_at").drop_duplicates(

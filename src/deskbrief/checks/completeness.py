@@ -9,6 +9,10 @@
   shut although SIFMA is open (see ``base.OIL_CALENDARS``). A FRED series with its own
   ``SeriesSpec.lag_bdays`` is judged on that lag instead of the dataset's: the EIA spot prices
   behind the oil series are published weekly, so a 1-day lag failed them most days (T25c).
+* Weekly feeds (``DatasetSchedule.release_weekday`` set, P-021) are counted in weeks: each feed
+  needs >= 1 ``1w`` observation dated inside its latest due release's window
+  (``freshness.weekly_expected``). Missing -> fail; before the due time + grace, or while a
+  holiday delays the release, ``skip``, the same reasons freshness gives.
 * Alpaca minute bars need >= 95% of the session's minutes on the last finished XNYS session
   (early closes use their shorter session): 100% pass, [95%, 100%) warn, below fail. Only the
   bar feeds the Alpaca plan fetches (``crosschecks.iex_vs_sip.symbols``, see
@@ -45,6 +49,7 @@ from deskbrief.checks.base import (
     within_grace,
 )
 from deskbrief.checks.feed_completeness import evaluate_feeds
+from deskbrief.checks.freshness import weekly_expected, weekly_info
 from deskbrief.config import DatasetSchedule
 from deskbrief.models import CheckType, DQResult, DQStatus, RunContext
 from deskbrief.sources.alpaca import bar_symbols
@@ -91,6 +96,9 @@ class CompletenessCheck:
         for sched in ctx.config.datasets:
             if not source_enabled(ctx, sched.source):
                 continue  # switched off in config.yaml: nothing is expected from it
+            if sched.release_weekday is not None:
+                out.extend(self._weekly(ctx, duck, sched))
+                continue
             exp = expected_for(ctx, sched)
             waiting = exp.skip_reason is None and within_grace(ctx, exp)
             feeds = [
@@ -137,6 +145,46 @@ class CompletenessCheck:
                         early_close=early, **info,
                     )
                 )  # fmt: skip
+        return out
+
+    def _weekly(
+        self, ctx: RunContext, duck: duckdb.DuckDBPyConnection, sched: DatasetSchedule
+    ) -> list[DQResult]:
+        w = weekly_expected(ctx, sched)
+        feeds = [
+            (inst, feed)
+            for inst, feed in ctx.config.feeds_for(sched.source, sched.dataset)
+            if SERIES_SPECS.get(feed.symbol) is None or SERIES_SPECS[feed.symbol].interval == "1w"
+        ]
+        df = query(
+            duck,
+            f"SELECT DISTINCT instrument_id FROM obs_pit(?) "  # noqa: S608
+            f"WHERE source = ? AND dataset = ? AND interval = '1w' "
+            f"AND {ET_DATE_SQL} BETWEEN ? AND ?",
+            [ctx.now_utc, sched.source, sched.dataset, w.data_from, w.exp.publication_day],
+        )
+        present = set(df["instrument_id"])
+        waiting = within_grace(ctx, w.exp)
+        info: dict[str, Any] = {"dataset": sched.dataset, **weekly_info(w)}
+        out: list[DQResult] = []
+        for inst, _ in feeds:
+            have = inst.id in present
+            reason = None if have else w.exp.skip_reason or ("waiting" if waiting else None)
+            if reason:
+                out.append(
+                    make_result(
+                        ctx, self, DQStatus.SKIP, source=sched.source, instrument_id=inst.id,
+                        reason=reason, **info,
+                    )
+                )  # fmt: skip
+                continue
+            out.append(
+                make_result(
+                    ctx, self, DQStatus.PASS if have else DQStatus.FAIL, source=sched.source,
+                    instrument_id=inst.id, observed=1.0 if have else 0.0, threshold=1.0,
+                    weeks=1 if have else 0, **info,
+                )
+            )  # fmt: skip
         return out
 
     def _minutes(self, ctx: RunContext, duck: duckdb.DuckDBPyConnection) -> list[DQResult]:
