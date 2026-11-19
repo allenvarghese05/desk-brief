@@ -501,9 +501,9 @@ def test_build_store_local_and_r2(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 # --- catalog ------------------------------------------------------------------------------------
 
 
-def test_catalog_lists_the_eight_known_modules() -> None:
+def test_catalog_lists_the_nine_known_modules() -> None:
     assert [m.rsplit(".", 1)[1] for m in catalog.KNOWN_SOURCE_MODULES] == [
-        "treasury", "fred", "ecb", "stooq", "cboe", "alpaca", "twelvedata", "yahoo",
+        "treasury", "fred", "ecb", "stooq", "cboe", "alpaca", "twelvedata", "yahoo", "cftc",
     ]  # fmt: skip
 
 

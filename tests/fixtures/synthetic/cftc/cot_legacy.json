@@ -1,0 +1,89 @@
+{
+ "_synthetic": "SYNTHETIC FIXTURE: schema-faithful to the CFTC Socrata legacy futures-only COT JSON (6dca-aqww, the $select columns of sources/cftc.py); values invented, never fetched from CFTC. Tests send only the 'rows' list as the response body.",
+ "rows": [
+  {
+   "cftc_contract_market_code": "088691",
+   "report_date_as_yyyy_mm_dd": "2026-10-20T00:00:00.000",
+   "open_interest_all": "400000",
+   "noncomm_positions_long_all": "220000",
+   "noncomm_positions_short_all": "40000"
+  },
+  {
+   "cftc_contract_market_code": "13874A",
+   "report_date_as_yyyy_mm_dd": "2026-10-20T00:00:00.000",
+   "open_interest_all": "2000000",
+   "noncomm_positions_long_all": "210000",
+   "noncomm_positions_short_all": "350000"
+  },
+  {
+   "cftc_contract_market_code": "043602",
+   "report_date_as_yyyy_mm_dd": "2026-10-20T00:00:00.000",
+   "open_interest_all": "6000000",
+   "noncomm_positions_long_all": "700000",
+   "noncomm_positions_short_all": "1650000"
+  },
+  {
+   "cftc_contract_market_code": "088691",
+   "report_date_as_yyyy_mm_dd": "2026-10-27T00:00:00.000",
+   "open_interest_all": "401000",
+   "noncomm_positions_long_all": "220100",
+   "noncomm_positions_short_all": "39950"
+  },
+  {
+   "cftc_contract_market_code": "13874A",
+   "report_date_as_yyyy_mm_dd": "2026-10-27T00:00:00.000",
+   "open_interest_all": "2001000",
+   "noncomm_positions_long_all": "210100",
+   "noncomm_positions_short_all": "349950"
+  },
+  {
+   "cftc_contract_market_code": "043602",
+   "report_date_as_yyyy_mm_dd": "2026-10-27T00:00:00.000",
+   "open_interest_all": "6001000",
+   "noncomm_positions_long_all": "700100",
+   "noncomm_positions_short_all": "1649950"
+  },
+  {
+   "cftc_contract_market_code": "088691",
+   "report_date_as_yyyy_mm_dd": "2026-11-03T00:00:00.000",
+   "open_interest_all": "402000",
+   "noncomm_positions_long_all": "220200",
+   "noncomm_positions_short_all": "39900"
+  },
+  {
+   "cftc_contract_market_code": "13874A",
+   "report_date_as_yyyy_mm_dd": "2026-11-03T00:00:00.000",
+   "open_interest_all": "2002000",
+   "noncomm_positions_long_all": "210200",
+   "noncomm_positions_short_all": "349900"
+  },
+  {
+   "cftc_contract_market_code": "043602",
+   "report_date_as_yyyy_mm_dd": "2026-11-03T00:00:00.000",
+   "open_interest_all": "6002000",
+   "noncomm_positions_long_all": "700200",
+   "noncomm_positions_short_all": "1649900"
+  },
+  {
+   "cftc_contract_market_code": "088691",
+   "report_date_as_yyyy_mm_dd": "2026-11-10T00:00:00.000",
+   "open_interest_all": "403000",
+   "noncomm_positions_long_all": "220300",
+   "noncomm_positions_short_all": "39850"
+  },
+  {
+   "cftc_contract_market_code": "13874A",
+   "report_date_as_yyyy_mm_dd": "2026-11-10T00:00:00.000",
+   "open_interest_all": "2003000",
+   "noncomm_positions_long_all": "210300",
+   "noncomm_positions_short_all": "349850"
+  },
+  {
+   "cftc_contract_market_code": "043602",
+   "report_date_as_yyyy_mm_dd": "2026-11-10T00:00:00.000",
+   "open_interest_all": "6003000",
+   "noncomm_positions_long_all": "700300",
+   "noncomm_positions_short_all": "1649850"
+  }
+ ]
+}
