@@ -1,32 +1,103 @@
-# Cboe VIX history (daily close, tier 3)
+# Cboe daily index history (daily close, tier 3)
 
-Code: `src/deskbrief/sources/cboe.py` · dataset `vix_history` · symbol `VIX`.
+Code: `src/deskbrief/sources/cboe.py` · dataset `vix_history` · symbols VIX (T13), and VIX9D,
+VIX3M, VIX6M, VXN, GVZ and SKEW (T47, ruling P-021b).
+
+| Symbol | Instrument | What it is | Layout |
+|---|---|---|---|
+| `VIX` | `VIX` | S&P 500 30-day implied vol | OHLC |
+| `VIX9D` | `VIX9D` | S&P 500 9-day implied vol | OHLC |
+| `VIX3M` | `VIX3M` | S&P 500 3-month implied vol | OHLC |
+| `VIX6M` | `VIX6M` | S&P 500 6-month implied vol | OHLC |
+| `VXN` | `VXN` | Nasdaq-100 30-day implied vol | OHLC |
+| `GVZ` | `GVZ` | Gold ETF (GLD) 30-day implied vol | single |
+| `SKEW` | `SKEW` | S&P 500 tail-risk (skew) index | single |
+
+All are `asset_class: vol`, `kind: index`, unit `index_pts`, field `close`, interval `1d`, tier 3.
+The dataset keeps its T13 name `vix_history` for every symbol, so the one freshness entry
+(`expected_by_et: "20:00"`, `lag_bdays: 0`, XNYS) covers all seven.
 
 ## Endpoint
 
-`GET https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv` (no auth, no
-params): the whole history since 1990, columns `DATE,OPEN,HIGH,LOW,CLOSE`, dates `MM/DD/YYYY`.
-The URL was moved by Cboe to `cdn-api.cboe.com` (see the live probe below).
+`GET https://cdn-api.cboe.com/api/global/us_indices/daily_prices/{SYMBOL}_History.csv` (no auth,
+no params): each file is the symbol's whole history. Dates are `MM/DD/YYYY`. Two layouts exist
+(`SYMBOL_SPECS` in the code):
+
+- **OHLC:** `DATE,OPEN,HIGH,LOW,CLOSE`. `CLOSE` is emitted.
+- **single:** `DATE,<SYMBOL>` (`DATE,GVZ`, `DATE,SKEW`). The one value column is emitted.
+
+The old host `cdn.cboe.com` answers 307 to `cdn-api.cboe.com` (probe 2026-11-18, below).
 
 ## Plan and parse
 
-`plan` emits one request carrying `lookback_days=10` and `target_date`. The whole file is
-downloaded (and stored raw, so any date can be replayed); `parse` emits **only** rows dated within
-`[target_date - lookback_days, target_date]`. A request without `lookback_days` (e.g. a backfill)
-yields every row. Only `close` is emitted: unit `index_pts`, interval `1d`, tier 3, `as_of` =
-00:00 ET of the row date (P-006). Not planned for `intraday`.
+- `plan` emits one request per configured symbol, each carrying `lookback_days=10` and
+  `target_date`. Not planned for `intraday`. A configured symbol with no layout in
+  `SYMBOL_SPECS` is logged (`cboe.plan.skip`) and not fetched.
+- `plan_range(start, end, ctx)` (P-020) emits one request per symbol carrying `start` and `end`
+  (ISO dates) and `target_date = end`. Each file holds the whole history, so two years is one
+  download per symbol. End before start raises `ValueError`.
+- The whole file is downloaded (and stored raw, so any date can be replayed). `parse` emits
+  **only** rows dated within `[target_date - lookback_days, target_date]` or `[start, end]`. A
+  request with neither (e.g. a backfill) yields every row.
+- `as_of` = 00:00 ET of the row date (P-006). `parser_version` is `2` since T47; VIX rows are
+  the same values as before.
 
 ## Failure modes
 
-HTML/error pages served with status 200, a missing header, a bad date or number raise `ParseError`.
-Only rows inside the requested window are validated, so one bad historical row (bad number, wrong
-column count) is skipped instead of failing every daily run; a bad row inside the window, or an
-unparsable date, still raises (a request without `lookback_days` validates every row). A body that
-does not end in a newline, when its last row is inside the window, is treated as a truncated
-download (a cut such as `16.` would otherwise parse as 16.0) and raises `ParseError`. `csv.Error`
-and an out-of-range `lookback_days` (`OverflowError`) also become `ParseError`. 
-An empty or header-only body, or a window with no rows, is a legitimate empty result. Up to four
-title lines before the header and lines starting with `#` are tolerated.
+- HTML/error pages served with status 200, a header that is not the requested symbol's layout
+  (for example a SKEW request answered with an OHLC file), a bad date or a bad number raise
+  `ParseError`. So do a request with no known symbol, and a range request missing `start` or
+  `end` or with a bad date.
+- Only rows inside the requested window are validated, so one bad historical row (bad number,
+  wrong column count) is skipped instead of failing every daily run. A bad row inside the window,
+  or an unparsable date, still raises (a request without a window validates every row).
+- A body that does not end in a newline, when its last row is inside the window, is treated as a
+  truncated download (a cut such as `16.` would otherwise parse as 16.0) and raises `ParseError`.
+- `csv.Error` and an out-of-range `lookback_days` (`OverflowError`) also become `ParseError`.
+- An empty or header-only body, or a window with no rows, is a legitimate empty result. Up to
+  four title lines before the header and lines starting with `#` are tolerated.
+
+## Publication time and freshness
+
+Each file is updated once a day after the close. At the T47 probe (2026-11-19 20:08 UTC,
+15:08 ET on a trading day) every file ended at 11/18/2026, so the current day's row is not there
+during the session. The existing entry (`expected_by_et: "20:00"`, `lag_bdays: 0`) expects the
+day's row by 20:00 ET; before that freshness is `skip`. The exact posting time was not measured;
+if live runs show it later than 20:00 ET, the freshness entry should move.
+
+In the morning brief a Cboe close dated the previous NYSE day shows its value with "no move yet"
+(`query.overnight_changes`, price family). VIX gets its overnight move from the Yahoo quote; the
+six new indices have no intraday feed, so their brief rows show the value and date only. The
+dashboard bars show the full daily series.
+
+## Live probe (2026-11-19, T47)
+
+Run by the implementer on 2026-11-19 at about 20:10 UTC. The sandboxed shell's `curl` was not
+permitted in that session, so each file was read with the agent's web-fetch tool. That tool
+returns the text (no status code, so HTTP 200 is inferred from the CSV being served) and pages
+through it; it does not compute statistics. Row counts below are estimated from the reported
+text length and the row width; min and max were not computed (owner command below). No bot check,
+CAPTCHA or block page was seen.
+
+| Symbol | Header | First row | Newest row (date, close) | Rows (est.) |
+|---|---|---|---|---|
+| VIX9D | `DATE,OPEN,HIGH,LOW,CLOSE` | 01/04/2011 | 11/18/2026, 23.95 | ≈3,980 (202,835 chars) |
+| VIX3M | `DATE,OPEN,HIGH,LOW,CLOSE` | 09/18/2009 | 11/18/2026, 24.29 | ≈4,320 (220,294 chars) |
+| VIX6M | `DATE,OPEN,HIGH,LOW,CLOSE` | 01/02/2008 | 11/18/2026, 24.75 | ≈4,750 (242,326 chars) |
+| VXN | `DATE,OPEN,HIGH,LOW,CLOSE` | 09/14/2009 | 11/18/2026, 33.12 | ≈4,330 (220,593 chars) |
+| GVZ | `DATE,GVZ` | 09/18/2009 | 11/18/2026, 28.04 | ≈4,300 (by trading days) |
+| SKEW | `DATE,SKEW` | 01/02/1990 | 11/18/2026, 142.84 | ≈9,270 (204,016 chars) |
+
+Values are printed with six decimals (`23.950000`). The fixtures under
+`tests/fixtures/synthetic/cboe/` copy each header and layout with invented values (header line
+"SYNTHETIC FIXTURE"). Cboe's redistribution terms were not checked, so no real capture is
+committed.
+
+Owner check (exact counts, min and max; keyless, prints no body). Run from the repository root:
+
+```bash
+PYTHONPATH=src .venv/bin/python -c 'from datetime import date; from deskbrief.config import load_config; from deskbrief.models import JobKind, RunContext, Trigger; from deskbrief.sources.cboe import CboeSource; from deskbrief.sources.http import DefaultHttpClient; from deskbrief.timeutil import utc_now; c = load_config("config.yaml"); s = CboeSource(c); h = DefaultHttpClient(c.sources); e = date.today(); x = RunContext(run_id="probe", job=JobKind.HISTORY, trigger=Trigger.MANUAL, target_date=e, now_utc=utc_now(), git_sha="-", config_hash="-", config=c, store=None); [print(r.symbols[0], w.http_status, w.error or "", *((len(d), d.sort_values("as_of")["as_of"].iloc[-1].tz_convert("America/New_York").date(), d.sort_values("as_of")["value"].iloc[-1], d["value"].min(), d["value"].max()) if (d := (s.parse(w) if w.ok else None)) is not None else ())) for r in s.plan_range(date(1990, 1, 1), e, x) for w in [s.fetch(r, h)]]'
+```
 
 ## Live probe (2026-11-18, T25)
 
@@ -37,10 +108,7 @@ The first live run (2026-11-17) got HTTP 307 from the original URL. The owner pr
     HTTP/2 307
     location: https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv
 
-The target is the same official Cboe file on a new host, so `URL` in `cboe.py` now points at
-`cdn-api.cboe.com` (pinned by `test_url_is_the_cdn_api_host_the_old_host_redirects_to`). The shared
-HTTP client's redirect policy is unchanged. The new URL's `200` and CSV header were not probed in
-this card; the next live run shows them. The parser rests on the documented format and a synthetic
-fixture (`tests/fixtures/synthetic/cboe/`, header "SYNTHETIC FIXTURE"). Cboe's redistribution terms
-were not checked, so no real capture is committed. If the file format changed, `parse` fails
+The target is the same official Cboe file on a new host, so `URL` in `cboe.py` points at
+`cdn-api.cboe.com` (pinned by `test_url_is_the_cdn_api_host_the_old_host_redirects_to`). The
+shared HTTP client's redirect policy is unchanged. If the file format changes, `parse` fails
 loudly. Disable with `sources.cboe.enabled: false`.

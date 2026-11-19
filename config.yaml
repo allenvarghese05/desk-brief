@@ -19,7 +19,7 @@ sources:
   # browser-verification page, not the CSV. Details: docs/sources/stooq.md.
   stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2, enabled: false}
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
-  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T25: live probe done 2026-11-18 (docs/sources/cboe.md)
+  cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T25/T47: live probes 2026-11-18 and 2026-11-19 (docs/sources/cboe.md)
 
 instruments:
   # ---------------- Equities (ETFs and portfolio stocks) ----------------
@@ -310,6 +310,49 @@ instruments:
       - {source: yahoo, dataset: quote, symbol: ^VIX, tier: 2}
       - {source: yahoo, dataset: history, symbol: ^VIX, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VIX, tier: 3}
+  # T47 (P-021b): Cboe daily closes, one CSV per symbol (sources/cboe.py SYMBOL_SPECS).
+  - id: VIX9D
+    name: Cboe S&P 500 9-Day Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: VIX9D, tier: 3}
+  - id: VIX3M
+    name: Cboe S&P 500 3-Month Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: VIX3M, tier: 3}
+  - id: VIX6M
+    name: Cboe S&P 500 6-Month Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: VIX6M, tier: 3}
+  - id: VXN
+    name: Cboe Nasdaq-100 Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: VXN, tier: 3}
+  - id: GVZ
+    name: Cboe Gold ETF Volatility Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: GVZ, tier: 3}
+  - id: SKEW
+    name: Cboe SKEW Index
+    asset_class: vol
+    kind: index
+    unit: index_pts
+    feeds:
+      - {source: cboe, dataset: vix_history, symbol: SKEW, tier: 3}
 
   # ---------------- Overseas indices (overnight) ----------------
   - id: N225
@@ -415,6 +458,7 @@ datasets:   # expected publish times drive freshness; before expected_by the che
      calendar: SIFMA_US, grace_minutes: 90, release_weekday: 2}
   - {source: ecb, dataset: eurofxref, expected_by_et: "11:00", lag_bdays: 0, calendar: TARGET}
   - {source: stooq, dataset: daily, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
+  # T47: covers all seven Cboe symbols. Probe 2026-11-19 15:08 ET: every file ended at 11/18.
   - {source: cboe, dataset: vix_history, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
 
 intraday:   # polled every 15 min in session; newest tick older than grace_minutes is stale (2 missed polls)

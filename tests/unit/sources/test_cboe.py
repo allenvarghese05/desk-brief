@@ -72,7 +72,7 @@ def raw_for(
 
 def test_plan(src: CboeSource, config: Config) -> None:
     reqs = src.plan(JobKind.EOD, ctx(config))
-    assert len(reqs) == 1
+    assert len(reqs) == 7  # T47: one request per Cboe symbol, VIX first
     r = reqs[0]
     assert (r.source, r.dataset, r.symbols) == ("cboe", "vix_history", ("VIX",))
     assert r.params["lookback_days"] == "10"
