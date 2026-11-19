@@ -620,6 +620,52 @@ Not carried: the two PR #41 nits. The stale PR-body line needs no action, and th
 #### T42 — README, architecture doc, screenshots
 - **Depends:** T31, T35 · **Owns:** `README.md`, `docs/architecture.md`, `docs/terms.md` (from H9). Only measured numbers.
 
+### Phase 4B — Macro-desk data (rulings P-018 to P-021, 2026-11-19)
+
+Order: T43, T44, T46, T47 and T48 can run in parallel (they own different files); T45 runs after T44, T46, T47 and T48 merge, so one backfill covers every new series. Each card follows §8.2; source cards run one live probe and never commit commercial responses.
+
+#### T43 — Cloudflare Worker cron trigger (P-018)
+- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README), the `workflow_dispatch` inputs of `.github/workflows/{morning,intraday,eod,sla}.yml`, `docs/runbook.md` (trigger section), tests.
+- Acceptance:
+  - The Worker's cron table matches every `schedule:` cron in the four workflows one for one, and a test fails if they drift apart (parse both).
+  - Each dispatch passes the intended fire as an input (e.g. `fire: "15 11 * * 1-5"`); the workflow maps it to `GITHUB_EVENT_SCHEDULE` so `evaluate_gate`, `last_cron_fire` and `scheduled_for` behave exactly as for a schedule event. Test: a dispatched run and a schedule run for the same fire produce the same `scheduled_for`.
+  - A duplicate fire for the same slot (Worker and GitHub fallback both arriving) is a no-op: same concurrency group, and the gate or an existing `runs` row for that slot skips the second. Test covers it.
+  - The token is a fine-grained PAT (this repo, Actions: write) set by the owner with `wrangler secret put`; nothing secret is committed; the README says how to rotate it.
+  - The Worker logs each dispatch's HTTP status; a non-2xx is retried once and then left for the GitHub fallback.
+  - Deploying the Worker is an owner step (needs the Cloudflare account); the card ships the code, tests and exact commands.
+
+#### T44 — Yahoo daily history for ETFs and single stocks (P-019)
+- **Depends:** none · **Owns:** Yahoo feeds in `config.yaml` (P-004), `src/deskbrief/sources/yahoo.py` (only if a symbol needs mapping), the Stooq-dependent cross-check definitions in `src/deskbrief/crosschecks/` (switch their daily close to Yahoo history where the check stays meaningful), tests.
+- Acceptance:
+  - Every ETF and single stock in `config.yaml` has a Yahoo `history` feed (daily OHLCV, tier 2). Live probe recorded in the PR.
+  - `close_vs_official` and `proxy_vs_exact` compare using Yahoo history where that is not a source compared with itself; where it would be, the check skips with the reason "no independent daily close" (not "source disabled").
+  - Dashboard: SPY, QQQ, MSFT and NVDA get daily bars (AppTest or `build_bars` test on a synthetic store with the new feed shape).
+  - No change to Alpaca datasets (P-003 stands).
+
+#### T45 — Two-year daily backfill (P-020)
+- **Depends:** T44, T46, T47, T48 · **Owns:** `src/deskbrief/pipeline/backfill.py` (or the existing backfill entry point), `.github/workflows/backfill.yml` inputs, `docs/runbook.md` (backfill section), tests.
+- Acceptance:
+  - A manually dispatched backfill loads 2 years of daily rows for every daily feed (Yahoo history, FRED, Treasury, Cboe, CFTC weekly) within each provider's rate limits and daily budgets, resumable if interrupted (re-running skips dates already present).
+  - Each `observations` date partition is written once per source by the backfill, then the backfilled partitions are compacted (P-017 manual call). Test: a backfill over N dates writes at most one file per date per source before compaction.
+  - Point-in-time is preserved: backfilled rows carry their real `ingested_at`; `obs_pit(t)` before the backfill does not see them.
+  - The scheduled catch-up cap (2 days per run, T25c) is unchanged.
+  - Run report in the PR: rows per source, requests used, duration.
+
+#### T46 — FRED rates, dollar and credit series (P-021a)
+- **Depends:** none · **Owns:** FRED feeds and new instruments in `config.yaml`, instrument metadata (labels, units, sections), tests.
+- Acceptance: instruments for 10Y TIPS real yield, 10Y breakeven, broad dollar index, HY OAS and NFCI, each with the right unit (pct, index, bp) and `field_label`, appear in the report model and on the dashboard in sensible sections (Rates, FX, Macro/Credit). Live probe recorded. P-009 labels hold (a yield is never called a close).
+
+#### T47 — Cboe volatility indices (P-021b)
+- **Depends:** none · **Owns:** Cboe feeds and new instruments in `config.yaml`, `src/deskbrief/sources/cboe.py` (only if a series needs a parser change), tests.
+- Acceptance: VIX9D, VIX3M, VIX6M, GVZ, VXN and SKEW are fetched daily (tier 3), labelled, and shown in the Volatility section; a VIX term-structure view (9D, 30D, 3M, 6M) is possible from the stored rows (dashboard work is a follow-up card). Live probe recorded.
+
+#### T48 — CFTC Commitments of Traders source (P-021c)
+- **Depends:** none · **Owns:** `src/deskbrief/sources/cftc.py`, its registry/catalog entry, feeds in `config.yaml`, tests with a synthetic fixture.
+- Acceptance:
+  - Weekly COT (legacy or disaggregated, chosen and justified in the PR) for gold, S&P 500 e-mini and Treasury futures: net non-commercial (or managed-money) positions and open interest, stored with `as_of` = the report's reference Tuesday (00:00 ET, P-006) and `interval` = `1w` if the schema allows, else a recorded contract change through the planner.
+  - Freshness expects the Friday release; a holiday-delayed release is a skip, not a fail.
+  - User-Agent and rate limit set; live probe recorded; no network in unit tests.
+
 ### Phase 5 — Stretch (only after DoD)
 
 - **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
