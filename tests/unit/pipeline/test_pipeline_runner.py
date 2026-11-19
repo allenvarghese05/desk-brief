@@ -567,8 +567,18 @@ def test_morning_gate_uses_the_scheduled_time_so_a_delayed_cron_still_runs(
     # fire time (06:15 ET), not the wall clock, so the run proceeds
     m = _sched(env, JobKind.MORNING, datetime(2026, 11, 16, 13, 20, tzinfo=UTC))
     assert m.status is RunStatus.OK
-    env.clock = FakeClock(datetime(2026, 11, 16, 11, 50, tzinfo=UTC))  # 35 min late
-    assert run_job(env, JobKind.MORNING, trigger=Trigger.SCHEDULE).status is RunStatus.OK
+    # T43 (P-018): the same fire again on the same store is a duplicate, not a second report
+    env.clock = FakeClock(datetime(2026, 11, 16, 11, 50, tzinfo=UTC))
+    assert (
+        run_job(env, JobKind.MORNING, trigger=Trigger.SCHEDULE).skipped_reason == "duplicate fire"
+    )
+    fresh = make_env(
+        tmp_path / "fresh",
+        [FakeSource("stooq")],
+        env={"GITHUB_EVENT_SCHEDULE": "15 10,11 * * 1-5"},
+        clock=FakeClock(datetime(2026, 11, 16, 11, 50, tzinfo=UTC)),  # 35 min late
+    )
+    assert run_job(fresh, JobKind.MORNING, trigger=Trigger.SCHEDULE).status is RunStatus.OK
 
 
 def test_eod_runs_on_an_xnyse_holiday_when_target_is_open(tmp_path: Path) -> None:

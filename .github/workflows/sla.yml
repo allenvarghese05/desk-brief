@@ -9,7 +9,18 @@ on:
   schedule:
     - cron: "20 12 * * 1-5"
   workflow_dispatch:
+    # P-018: the cron Worker (infra/cron-worker) passes both; a human dispatch leaves them empty.
     inputs:
+      fire:
+        description: "Cron Worker only: the cron string of the fire (leave empty)"
+        required: false
+        default: ""
+        type: string
+      slot:
+        description: "Cron Worker only: the scheduled minute, ISO 8601 UTC (leave empty)"
+        required: false
+        default: ""
+        type: string
       date:
         description: "ET date to check, YYYY-MM-DD (empty: today)"
         required: false
@@ -40,6 +51,9 @@ jobs:
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
       REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
       SLA_DATE: ${{ inputs.date }}
+      # P-018: recorded for the run's environment only; the check needs no slot (no runs row).
+      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule || inputs.fire }}
+      DESKBRIEF_SLOT: ${{ inputs.slot }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

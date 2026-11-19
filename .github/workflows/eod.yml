@@ -7,6 +7,18 @@ on:
   schedule:
     - cron: "30 22 * * 1-5"
   workflow_dispatch:
+    # P-018: the cron Worker (infra/cron-worker) passes both; a human dispatch leaves them empty.
+    inputs:
+      fire:
+        description: "Cron Worker only: the cron string of the fire (leave empty)"
+        required: false
+        default: ""
+        type: string
+      slot:
+        description: "Cron Worker only: the scheduled minute, ISO 8601 UTC (leave empty)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -21,7 +33,9 @@ jobs:
     timeout-minutes: 30
     env:
       PYTHONUNBUFFERED: "1"
-      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
+      # Schedule event: the cron. Worker dispatch (P-018): its fire and slot inputs.
+      GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule || inputs.fire }}
+      DESKBRIEF_SLOT: ${{ inputs.slot }}
       DESKBRIEF_STORAGE_BACKEND: r2
       DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

@@ -57,6 +57,7 @@ from deskbrief.pipeline.clean import (
 from deskbrief.pipeline.jobs import (
     CheckOutputs,
     JobSteps,
+    dispatcher_from_env,
     evaluate_gate,
     schedule_delay_s,
     scheduled_for_from_env,
@@ -514,9 +515,17 @@ def run_job(
     now = env.clock()
     trig = trigger or trigger_from_env(env.env)
     target = target_date or et_date(now)
+    # P-018: a cron-Worker dispatch maps its ``slot`` to scheduled_for, a GitHub schedule event
+    # its cron's last fire; either way the run is gated and de-duplicated on that instant.
     scheduled_for = scheduled_for_from_env(env.env, now) if trig is Trigger.SCHEDULE else None
     ctx = make_context(env, job, trig, target, now, scheduled_for)
     log = get_logger(run_id=ctx.run_id, job=job.value)
+    log.info(
+        "run.trigger",
+        trigger=trig.value,
+        dispatcher=dispatcher_from_env(env.env) if trigger is None else "caller",
+        scheduled_for=scheduled_for.isoformat() if scheduled_for else None,
+    )
 
     gate = evaluate_gate(job, trig, now, scheduled_for)
     if gate.proceed and gate.sources is not None:  # e.g. the ECB-fix run fetches Yahoo only
@@ -559,6 +568,30 @@ def _preflight(env: RunEnv, ctx: RunContext) -> pd.DataFrame | str:
         return f"{type(exc).__name__}: {redact(str(exc))}"
 
 
+#: P-018: skip reason when this job already ran ``ok``/``degraded`` for the same scheduled_for.
+DUPLICATE_FIRE = "duplicate fire"
+_DONE = frozenset({RunStatus.OK.value, RunStatus.DEGRADED.value})
+
+
+def _iso(t: datetime | None) -> str | None:
+    return t.isoformat() if t is not None else None
+
+
+def _is_duplicate_fire(runs: pd.DataFrame, ctx: RunContext) -> bool:
+    """A ``runs`` row with this job, this ``scheduled_for`` and status ``ok`` or ``degraded``.
+
+    The cron Worker and GitHub's ``schedule:`` fallback can both start the same fire (P-018).
+    Whichever runs second finds the first one's row and skips. A ``failed`` row does not count,
+    so a fallback can still repair a failed fire. Runs without ``scheduled_for`` never match.
+    """
+    if ctx.scheduled_for is None or runs.empty:
+        return False
+    when = pd.Timestamp(ctx.scheduled_for)
+    stamps = pd.to_datetime(runs["scheduled_for"], utc=True)
+    same = (runs["job"] == ctx.job.value) & (stamps == when) & runs["status"].isin(_DONE)
+    return bool(same.any())
+
+
 def _run_with_catchup(env: RunEnv, ctx: RunContext) -> RunManifest:
     log = get_logger(run_id=ctx.run_id, job=ctx.job.value)
     runs = _preflight(env, ctx)
@@ -567,6 +600,11 @@ def _run_with_catchup(env: RunEnv, ctx: RunContext) -> RunManifest:
         manifest.status = RunStatus.FAILED
         manifest.finished_at = env.clock()
         manifest.notes.append(f"storage unavailable: {runs}")
+        return manifest
+    if _is_duplicate_fire(runs, ctx):  # before catch-up: the earlier run already did that
+        manifest = _manifest(ctx)
+        manifest.skipped_reason = DUPLICATE_FIRE
+        log.info("run.skipped", reason=DUPLICATE_FIRE, scheduled_for=_iso(ctx.scheduled_for))
         return manifest
     catchups: list[RunManifest] = []
     todo, deferred = split_catchup(missed_dates(runs, ctx.job, ctx.target_date))
