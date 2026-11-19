@@ -636,9 +636,10 @@ Rules for the phase:
 - **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README with the deploy, secret and rotation commands), the `fire` and `slot` `workflow_dispatch` inputs and their mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` in `src/deskbrief/pipeline/jobs.py`, the `slot` → `scheduled_for` mapping and the `duplicate fire` skip in `src/deskbrief/pipeline/runner.py`, tests.
 - Acceptance:
   - **One trigger:** the Worker has a single Cron Trigger (`* * * * *`) and a UTC schedule table in code. A test parses the four workflows' `schedule:` crons and fails if the table differs.
-  - **Inputs:** each dispatch passes `fire` (the exact cron string, so `intraday.yml`'s `15 12 * * 1-5` branch still works) and `slot` (the scheduled minute in UTC, computed from the table, not from when the Worker ran).
+  - **Inputs:** each dispatch passes `fire` (the exact cron string) and `slot` (the scheduled minute in UTC, computed from the table, not from when the Worker ran). The workflows read both through `env:`, never `${{ }}` inside `run:`. `GITHUB_EVENT_SCHEDULE` gets `fire` (so `intraday.yml`'s literal `15 12 * * 1-5` branch still works) and a separate `DESKBRIEF_SLOT` gets `slot`.
+  - **Human dispatch unchanged:** a `workflow_dispatch` without `fire` and `slot` stays `Trigger.MANUAL` and ungated. Test covers it.
   - **Same as a schedule event:** a dispatch with `fire` and `slot` gets `Trigger.SCHEDULE`, `scheduled_for = slot`, and the same gate result as a schedule event for that slot. Tests cover a dispatched ECB-fix run that starts late.
-  - **Duplicates (P-018's guarantee):** a run whose job and `scheduled_for` match an `ok` or `degraded` `runs` row skips with reason `duplicate fire`. Tests:
+  - **Duplicates (P-018's guarantee):** a pipeline run (`run_job`) whose job and `scheduled_for` match an `ok` or `degraded` `runs` row skips with reason `duplicate fire`. `sla.yml` is a read-only check that writes no `runs` row, so a duplicate sla run just checks again, which is harmless. Tests:
     - a GitHub morning event arriving hours after the Worker's run is skipped;
     - a late GitHub `*/15` intraday event resolves to a later slot and runs.
   - **Failures and secrets:** the Worker retries a non-2xx dispatch once, logs the HTTP status and never logs the token.
@@ -648,7 +649,8 @@ Rules for the phase:
 - **Depends:** none · **Owns:**
   - `src/deskbrief/models.py`: `JobKind.HISTORY`, so `ENUMS["job"]` follows.
   - `src/deskbrief/schemas.py`: `ENUMS` gains `interval` `1w`; `unit` `index` and `contracts`; `field` `net_position`, `open_interest` and `level`.
-  - `src/deskbrief/config.py`: `Unit` gains `index` and `contracts`; `KNOWN_SOURCES` gains `cftc`.
+  - `src/deskbrief/config.py`: `Unit` gains `index` and `contracts`; `KNOWN_SOURCES` gains `cftc`; `DatasetSchedule` gains optional `release_weekday` (0 = Monday to 6), used by `1w` datasets and absent for the rest.
+  - `src/deskbrief/cli.py`: `run` rejects `history` with "history is its own subcommand (card T53)" until T53 adds it.
   - `src/deskbrief/sources/base.py`: an optional `plan_range(start: date, end: date, ctx: RunContext) -> list[FetchRequest]` on the adapter protocol, with a helper reporting whether an adapter has it.
   - The `as_of` rule for `1w` in the `store/backend.py` docstring.
   - `config.yaml` `checks.validity`: `index: [-100, 100000]`, `contracts: [-10000000, 100000000]`.
@@ -658,12 +660,14 @@ Rules for the phase:
   - Contract tests pin the new values.
   - A `1w` row validates with `as_of` at 00:00 ET of its reference date.
   - An adapter without `plan_range` is reported as having no range support.
+  - A `DatasetSchedule` with `release_weekday` validates; existing schedules are unchanged.
+  - `deskbrief run history` exits with the message above and runs no pipeline step.
   - No source or check behaviour changes, and existing data still validates.
 
 #### T45 — Weekly cadence wherever code assumes daily or monthly (P-021)
 - **Depends:** T44 · **Owns:** `src/deskbrief/checks/freshness.py`, `src/deskbrief/checks/completeness.py`, `src/deskbrief/checks/feed_completeness.py`, the `("1d", "1mo")` special cases in `src/deskbrief/report/model.py` and `app/components/tearsheet.py`, tests.
 - Acceptance:
-  - A `1w` feed's freshness expects its release weekday (taken from the feed's freshness config); a holiday-delayed release is `skip`, not `fail`.
+  - A `1w` dataset's freshness expects a release on its `DatasetSchedule.release_weekday` (T44); a holiday-delayed release is `skip`, not `fail`.
   - Completeness counts weeks.
   - The report and the dashboard show a weekly value's date without a time and label its change as week-on-week.
   - Tests use synthetic weekly rows.
@@ -680,7 +684,7 @@ Rules for the phase:
   | `BAMLH0A0HYM2` (HY OAS) | `rate` | `pct` | `1d` | macro |
   | `NFCI` | `level` | `index` | `1w` | macro |
 
-  The daily series use the existing FRED freshness (`lag_bdays: 1`). NFCI's weekly freshness entry is added here, using T45.
+  The daily series use dataset `series` and its existing freshness entry (`lag_bdays: 1`). NFCI uses a new dataset, `series_weekly`, which `fred.py` plans for weekly series. Freshness is keyed by source and dataset, so NFCI gets its own entry with `release_weekday` set from FRED's release calendar (confirmed at the probe), using T45.
 - Acceptance:
   - Each series is planned, parsed and labelled (P-009), and appears in the report model and the dashboard.
   - A negative NFCI value passes validity, and so does a TIPS yield down to −2%.
@@ -701,6 +705,7 @@ Rules for the phase:
   - `close_vs_official` compares the Alpaca SIP last 1m bar before the close with the Yahoo daily close.
   - `proxy_vs_exact` uses the proxy ETF's Yahoo daily return, with `details` saying "same provider" when both legs are Yahoo.
   - A synthetic-store test shows SPY and MSFT getting bars through `app/components/data.build_bars`.
+  - The Yahoo `history` freshness entry covers the new feeds (checked, extended if needed). The existing `daily_fallback` behaviour is untouched.
   - Alpaca datasets are unchanged (P-003).
 
 #### T49 — CFTC Commitments of Traders source (P-021c)
@@ -712,7 +717,7 @@ Rules for the phase:
   - Tests with a synthetic fixture.
 - Acceptance:
   - Weekly rows are stored with `interval` `1w` and `as_of` = 00:00 ET of the reference Tuesday. The PR names the report variant (legacy or disaggregated) and gives the reason.
-  - Freshness expects the Friday release, using T45.
+  - Its freshness entry sets `release_weekday: 4` (Friday), using T45.
   - User-Agent and rate limit are set, the live probe is recorded, and unit tests use no network.
 
 #### T53 — Two-year history load, and the phase's spec text (P-020)
