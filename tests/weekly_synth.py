@@ -51,12 +51,30 @@ _INSTRUMENTS = [
 
 
 def weekly_config() -> Config:
-    """``config.yaml`` (all sources on) plus the synthetic weekly schedules and instruments."""
+    """``config.yaml`` (all sources on) plus the synthetic weekly schedules and instruments.
+
+    The synthetic entries replace any real ones with the same key (T46 added the real NFCI
+    schedule and the NFCI and broad-dollar instruments), so these tests keep their own timings.
+    """
     base = enable_all_sources(load_config(REPO_ROOT / "config.yaml"))
     raw = base.model_dump(mode="json")
     raw["sources"]["cftc"] = {"rate_per_min": 10, "timeout_s": 15, "retries": 2}
-    raw["datasets"] = [*raw["datasets"], *_SCHEDULES]
-    raw["instruments"] = [*raw["instruments"], *_INSTRUMENTS]
+    keys = {(s["source"], s["dataset"]) for s in _SCHEDULES}
+    ids = {i["id"] for i in _INSTRUMENTS}
+    symbols = {(f["source"], f["symbol"]) for i in _INSTRUMENTS for f in i["feeds"]}
+    raw["datasets"] = [
+        *(d for d in raw["datasets"] if (d["source"], d["dataset"]) not in keys),
+        *_SCHEDULES,
+    ]
+    raw["instruments"] = [
+        *(
+            i
+            for i in raw["instruments"]
+            if i["id"] not in ids
+            and not any((f["source"], f["symbol"]) in symbols for f in i["feeds"])
+        ),
+        *_INSTRUMENTS,
+    ]
     return Config.model_validate(raw)
 
 

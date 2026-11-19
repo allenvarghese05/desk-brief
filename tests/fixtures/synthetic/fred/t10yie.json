@@ -1,0 +1,35 @@
+{
+  "_synthetic": "SYNTHETIC FIXTURE: schema-faithful to FRED series/observations JSON; values invented, never fetched from FRED (T10YIE). Live probe pending: owner keys.",
+  "realtime_start": "2026-11-19",
+  "realtime_end": "2026-11-19",
+  "observation_start": "1600-01-01",
+  "observation_end": "9999-12-31",
+  "units": "lin",
+  "output_type": 1,
+  "file_type": "json",
+  "order_by": "observation_date",
+  "sort_order": "desc",
+  "count": 3,
+  "offset": 0,
+  "limit": 10,
+  "observations": [
+    {
+      "realtime_start": "2026-11-19",
+      "realtime_end": "2026-11-19",
+      "date": "2026-11-18",
+      "value": "2.31"
+    },
+    {
+      "realtime_start": "2026-11-19",
+      "realtime_end": "2026-11-19",
+      "date": "2026-11-17",
+      "value": "2.29"
+    },
+    {
+      "realtime_start": "2026-11-19",
+      "realtime_end": "2026-11-19",
+      "date": "2026-11-16",
+      "value": "2.30"
+    }
+  ]
+}
