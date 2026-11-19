@@ -18,10 +18,14 @@ Kinds:
 * ``enum:<name>``         string restricted to ``ENUMS[name]``
 
 Observation time semantics (``as_of``): ``tick`` = trade/quote instant; ``1m`` = bar *start*;
-``1d`` = 00:00 America/New_York on the reference date; ``1mo`` = 00:00 America/New_York on
+``1d`` = 00:00 America/New_York on the reference date; ``1w`` = 00:00 America/New_York on the
+reference date (e.g. the COT report's Tuesday, P-021); ``1mo`` = 00:00 America/New_York on
 the first day of the reference month. ``ingested_at`` = ``RawResponse.responded_at`` of the
 fetch that produced the row. Units: ``pct`` = percent (4.25 = 4.25%), ``fx_rate`` = quote
-currency per unit of base, ``index_pts``, ``USD``, ``shares`` (volume).
+currency per unit of base, ``index_pts``, ``USD``, ``shares`` (volume), ``index`` (an index
+value that may be negative, e.g. NFCI), ``contracts`` (futures contracts; a net position may
+be negative). Fields: ``level`` = an index value that is neither a price nor a rate;
+``net_position`` = net speculative position; ``open_interest`` = open interest.
 """
 
 from __future__ import annotations
@@ -49,9 +53,12 @@ ENUMS: dict[str, tuple[str, ...]] = {
         "volume",
         "yield",
         "rate",
+        "net_position",
+        "open_interest",
+        "level",
     ),
-    "interval": ("tick", "1m", "1d", "1mo"),
-    "unit": ("USD", "pct", "fx_rate", "index_pts", "shares"),
+    "interval": ("tick", "1m", "1d", "1w", "1mo"),
+    "unit": ("USD", "pct", "fx_rate", "index_pts", "shares", "index", "contracts"),
     "fetch_status": tuple(s.value for s in FetchStatus),
     "check_type": tuple(c.value for c in CheckType),
     "dq_status": tuple(s.value for s in DQStatus),

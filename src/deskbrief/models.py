@@ -31,6 +31,7 @@ class JobKind(StrEnum):
     EOD = "eod"
     BACKFILL = "backfill"
     REBUILD = "rebuild"
+    HISTORY = "history"  # P-020: one-time range load; its own subcommand (card T53)
 
 
 class Trigger(StrEnum):

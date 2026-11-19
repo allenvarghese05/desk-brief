@@ -22,8 +22,10 @@ scorecard_daily     the ET date being scored
 
 ``as_of`` semantics (also documented in ``deskbrief.schemas``): ``tick`` = the trade/quote
 instant; ``1m`` = bar **start** instant; ``1d`` = 00:00 America/New_York on the reference
-date; ``1mo`` = 00:00 America/New_York on the first day of the reference month. So
-``et_date(as_of)`` is always the reference date.
+date; ``1w`` = 00:00 America/New_York on the reference date (the date the weekly value
+describes, e.g. the COT report's Tuesday, not its release day; P-021); ``1mo`` = 00:00
+America/New_York on the first day of the reference month. So ``et_date(as_of)`` is always the
+reference date.
 """
 
 from __future__ import annotations

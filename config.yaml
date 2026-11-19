@@ -385,6 +385,8 @@ checks:
     fx_rate: [0.0001, 100000]
     USD: [0.01, 1000000]
     index_pts: [0.01, 1000000]
+    index: [-100, 100000]                 # may be negative (NFCI), P-021
+    contracts: [-10000000, 100000000]     # net positions may be negative, P-021
 
 crosschecks:
   iex_vs_sip: {symbols: [SPY, QQQ, IWM, GLD, TLT], warn_bps: 5, fail_bps: 20, max_fail_minutes_pct: 5}
