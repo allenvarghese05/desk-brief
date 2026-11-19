@@ -263,6 +263,38 @@ def load_bars(config: Config, instrument_id: str, hidden: frozenset[int]) -> pd.
     return _cached_bars(config, config.storage.backend, _where(config), instrument_id, hidden)
 
 
+def build_series(
+    conn: duckdb.DuckDBPyConnection,
+    now: datetime,
+    instrument_ids: tuple[str, ...],
+    exclude_tiers: frozenset[int],
+    days: int = BAR_DAYS,
+) -> dict[str, pd.DataFrame]:
+    """:func:`build_bars` for several instruments on one connection (the Macro page, T54).
+
+    Same rules: hidden tiers excluded in SQL, point-in-time at ``now``, today left out. An
+    instrument with no visible bars maps to an empty frame, never to a missing key."""
+    return {iid: build_bars(conn, now, iid, exclude_tiers, days) for iid in instrument_ids}
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_series(
+    _config: Config, backend: str, where: str, ids: tuple[str, ...], hidden: frozenset[int]
+) -> dict[str, pd.DataFrame]:
+    with shared_connection(_config) as conn:
+        return build_series(conn, current_time(), ids, hidden)
+
+
+def load_series(
+    config: Config, instrument_ids: tuple[str, ...], hidden: frozenset[int]
+) -> dict[str, pd.DataFrame]:
+    """Daily (or weekly) bars of several instruments, cached 60 s per mode; one shared
+    connection, never a new one per click."""
+    return _cached_series(
+        config, config.storage.backend, _where(config), tuple(instrument_ids), hidden
+    )
+
+
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
 DASHBOARD_LIMITS = (
     "Dashboard: no stale greying; the as-of text and health badge carry data age.",
