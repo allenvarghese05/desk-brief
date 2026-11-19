@@ -623,62 +623,117 @@ Not carried: the two PR #41 nits. The stale PR-body line needs no action, and th
 ### Phase 4B — Macro-desk data (rulings P-018 to P-021, 2026-11-19)
 
 Order (never two open PRs owning the same file, §3):
-- **Track A, in parallel from the start:** T43.
-- **Track B, one after another (each edits `config.yaml`):** TC1 → T46 → T47 → T44 → T48.
-- **Last:** T45 (after T43 and T48, so one load covers every new series and the runbook has one owner at a time), then T49.
+- **Track A, in parallel from the start:** T43. It owns no file of track B.
+- **Track B, one after another:** T44 (contract) → T45 (weekly cadence) → T46 → T47 → T48 → T49. T46–T49 each edit `config.yaml`.
+- **Last:** T53 (history load, after T43 and T49), then T54 (dashboard views).
 
-Live probes: keyless sources (Yahoo, Cboe, CFTC) are probed by the implementer; FRED needs `FRED_API_KEY`, which only the owner holds, so the PR gives the exact command and the owner runs it. Each card updates the spec sections its ruling changes (listed in its Owns).
-
-#### TC1 — Contract: weekly cadence, positioning fields, index and contracts units (P-021)
-- **Depends:** none · **Owns:** `src/deskbrief/schemas.py` (`ENUMS`: `interval` += `1w`; `unit` += `index`, `contracts`; `field` += `net_position`, `open_interest`), `src/deskbrief/config.py` (`Unit` += `index`, `contracts`; `KNOWN_SOURCES` += `cftc`), `config.yaml` `checks.validity` (`index: [-100, 100000]`, `contracts: [-10000000, 100000000]`), spec §7.2 and the P-006 `as_of` rule for `1w`, `tests/contract/*`. PR title `contract: ...`.
-- Acceptance: contract tests pin the new enum values; a `1w` row validates with `as_of` at 00:00 ET of its reference date; existing data still validates; no source or check behaviour changes.
+Rules for the phase:
+- **Live probes:** keyless sources (Yahoo, Cboe, CFTC) are probed by the implementer. FRED needs `FRED_API_KEY`, which only the owner holds, so the PR gives the exact command and the owner runs it.
+- **Spec:** the spec text for P-018 to P-021 is written by T53 alone. Until then the rulings take precedence (P-020).
+- **Range support:** each source card implements `plan_range` for its own source (P-020), with a test over a multi-month range.
 
 #### T43 — Cloudflare Worker cron trigger (P-018)
-- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README), the `workflow_dispatch` `fire` input and its mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` in `src/deskbrief/pipeline/jobs.py`, the duplicate-slot skip in `src/deskbrief/pipeline/runner.py`, spec §5.4, D3 and the P-012 known-limit text, `docs/runbook.md` (trigger section), tests.
+- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README with the deploy, secret and rotation commands), the `fire` and `slot` `workflow_dispatch` inputs and their mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` in `src/deskbrief/pipeline/jobs.py`, the `slot` → `scheduled_for` mapping and the `duplicate fire` skip in `src/deskbrief/pipeline/runner.py`, tests.
 - Acceptance:
-  - The Worker has one Cron Trigger (`* * * * *`) and a UTC schedule table in code. A test parses the four workflows' `schedule:` crons and fails if the table differs.
-  - The Worker dispatches with input `fire` = the exact cron string (so `intraday.yml`'s branch on `15 12 * * 1-5` still works).
-  - A `workflow_dispatch` run with `fire` gets `Trigger.SCHEDULE`, the same `scheduled_for` as a schedule event for that cron, and the same gate result. Tests cover a dispatched and a schedule run for the same fire, and a delayed ECB-fix dispatch.
-  - A second run for the same job and `scheduled_for` whose slot already has an `ok` or `degraded` `runs` row skips with reason `duplicate fire`. Test covers it.
-  - The Worker retries a non-2xx dispatch once, logs the HTTP status and never logs the token. The README gives the deploy, `wrangler secret put` and rotation commands. Deploying is an owner step.
-  - Latency: the README states the target (dispatch within 30 s of the minute). After deployment, the owner records one ECB-fix run's dispatch and first-fetch times in the PR or a follow-up note.
+  - **One trigger:** the Worker has a single Cron Trigger (`* * * * *`) and a UTC schedule table in code. A test parses the four workflows' `schedule:` crons and fails if the table differs.
+  - **Inputs:** each dispatch passes `fire` (the exact cron string, so `intraday.yml`'s `15 12 * * 1-5` branch still works) and `slot` (the scheduled minute in UTC, computed from the table, not from when the Worker ran).
+  - **Same as a schedule event:** a dispatch with `fire` and `slot` gets `Trigger.SCHEDULE`, `scheduled_for = slot`, and the same gate result as a schedule event for that slot. Tests cover a dispatched ECB-fix run that starts late.
+  - **Duplicates (P-018's guarantee):** a run whose job and `scheduled_for` match an `ok` or `degraded` `runs` row skips with reason `duplicate fire`. Tests:
+    - a GitHub morning event arriving hours after the Worker's run is skipped;
+    - a late GitHub `*/15` intraday event resolves to a later slot and runs.
+  - **Failures and secrets:** the Worker retries a non-2xx dispatch once, logs the HTTP status and never logs the token.
+  - **Owner steps:** deploying the Worker and `wrangler secret put` are owner steps. After deployment the owner records one ECB-fix run's slot, dispatch and first-fetch times; the target is dispatch within 30 s of the slot.
 
-#### T46 — FRED rates, dollar and credit series (P-021a)
-- **Depends:** TC1 · **Owns:** `SERIES_SPECS` in `src/deskbrief/sources/fred.py`, the FRED feeds and new instruments in `config.yaml`, tests.
-- Acceptance: new instruments for the 10Y TIPS real yield (pct), 10Y breakeven (pct), broad dollar (index_pts), HY OAS (pct) and NFCI (index). Each has a `SERIES_SPECS` entry, an existing `asset_class` (`rates`, `fx`, `macro`), the right P-009 label, and appears in the report model and dashboard sections. A negative NFCI value passes validity. Owner-run live probe recorded.
+#### T44 — Contract: history job, range planning, weekly cadence, new units and fields (P-020, P-021)
+- **Depends:** none · **Owns:**
+  - `src/deskbrief/models.py`: `JobKind.HISTORY`, so `ENUMS["job"]` follows.
+  - `src/deskbrief/schemas.py`: `ENUMS` gains `interval` `1w`; `unit` `index` and `contracts`; `field` `net_position`, `open_interest` and `level`.
+  - `src/deskbrief/config.py`: `Unit` gains `index` and `contracts`; `KNOWN_SOURCES` gains `cftc`.
+  - `src/deskbrief/sources/base.py`: an optional `plan_range(start: date, end: date, ctx: RunContext) -> list[FetchRequest]` on the adapter protocol, with a helper reporting whether an adapter has it.
+  - The `as_of` rule for `1w` in the `store/backend.py` docstring.
+  - `config.yaml` `checks.validity`: `index: [-100, 100000]`, `contracts: [-10000000, 100000000]`.
+  - `tests/contract/*`.
+  - PR title `contract: …`; the body names card T44.
+- Acceptance:
+  - Contract tests pin the new values.
+  - A `1w` row validates with `as_of` at 00:00 ET of its reference date.
+  - An adapter without `plan_range` is reported as having no range support.
+  - No source or check behaviour changes, and existing data still validates.
+
+#### T45 — Weekly cadence wherever code assumes daily or monthly (P-021)
+- **Depends:** T44 · **Owns:** `src/deskbrief/checks/freshness.py`, `src/deskbrief/checks/completeness.py`, `src/deskbrief/checks/feed_completeness.py`, the `("1d", "1mo")` special cases in `src/deskbrief/report/model.py` and `app/components/tearsheet.py`, tests.
+- Acceptance:
+  - A `1w` feed's freshness expects its release weekday (taken from the feed's freshness config); a holiday-delayed release is `skip`, not `fail`.
+  - Completeness counts weeks.
+  - The report and the dashboard show a weekly value's date without a time and label its change as week-on-week.
+  - Tests use synthetic weekly rows.
+
+#### T46 — FRED rates, dollar, credit and conditions (P-021a)
+- **Depends:** T44, T45 · **Owns:** `src/deskbrief/sources/fred.py` (`SERIES_SPECS` entries and `plan_range`), the FRED feeds and new instruments in `config.yaml`, `docs/sources/fred.md`, tests.
+- Series:
+
+  | FRED id | Field | Unit | Interval | Asset class |
+  |---|---|---|---|---|
+  | `DFII10` (10Y TIPS real yield) | `yield` | `pct` | `1d` | rates |
+  | `T10YIE` (10Y breakeven) | `yield` | `pct` | `1d` | rates |
+  | `DTWEXBGS` (broad dollar) | `level` | `index_pts` | `1d` | fx |
+  | `BAMLH0A0HYM2` (HY OAS) | `rate` | `pct` | `1d` | macro |
+  | `NFCI` | `level` | `index` | `1w` | macro |
+
+  The daily series use the existing FRED freshness (`lag_bdays: 1`). NFCI's weekly freshness entry is added here, using T45.
+- Acceptance:
+  - Each series is planned, parsed and labelled (P-009), and appears in the report model and the dashboard.
+  - A negative NFCI value passes validity, and so does a TIPS yield down to −2%.
+  - `plan_range` covers 2 years in one request per series.
+  - The owner-run live probe is recorded.
 
 #### T47 — Cboe volatility indices (P-021b)
-- **Depends:** T46 (`config.yaml`) · **Owns:** `src/deskbrief/sources/cboe.py` (generalize from VIX to a per-symbol URL and column mapping), the Cboe feeds and new instruments in `config.yaml`, tests.
-- Acceptance: VIX9D, VIX3M, VIX6M, GVZ, VXN and SKEW are fetched daily (tier 3, `asset_class` `vol`, unit `index_pts`). Each symbol's CSV layout, including SKEW's, is confirmed by a live probe and pinned by a synthetic fixture. VIX behaviour is unchanged (existing tests pass).
+- **Depends:** T46 (`config.yaml`) · **Owns:** `src/deskbrief/sources/cboe.py` (generalize from VIX to a per-symbol URL and column mapping; `plan_range`), the Cboe feeds and new instruments in `config.yaml`, `docs/sources/cboe.md`, tests.
+- Acceptance:
+  - VIX9D, VIX3M, VIX6M, GVZ, VXN and SKEW are fetched daily (tier 3, `asset_class` `vol`, unit `index_pts`, field `close`).
+  - Each symbol's CSV layout, SKEW's included, is confirmed by a live probe and pinned by a synthetic fixture.
+  - VIX behaviour is unchanged.
 
-#### T44 — Yahoo daily history for ETFs and single stocks (P-019)
-- **Depends:** T47 (`config.yaml`) · **Owns:** the Yahoo `history` feeds in `config.yaml`, `src/deskbrief/crosschecks/close_official.py`, `src/deskbrief/crosschecks/proxy_exact.py`, spec §5.2 (Stooq row) and §8.2, tests.
+#### T48 — Yahoo daily history for ETFs and single stocks (P-019)
+- **Depends:** T47 (`config.yaml`) · **Owns:** `src/deskbrief/sources/yahoo.py` (`plan_range` for the `history` dataset; symbol mapping if needed), the Yahoo `history` feeds in `config.yaml`, `src/deskbrief/crosschecks/close_official.py`, `src/deskbrief/crosschecks/proxy_exact.py`, `docs/sources/yahoo.md`, tests.
 - Acceptance:
   - Every ETF and single stock has a Yahoo `history` feed (tier 2, `is_fallback = false`). Live probe recorded.
   - `close_vs_official` compares the Alpaca SIP last 1m bar before the close with the Yahoo daily close.
-  - `proxy_vs_exact` uses the proxy ETF's Yahoo daily return, and its `details` say "same provider" when both legs are Yahoo.
-  - A synthetic-store test shows SPY and MSFT getting daily bars through `app/components/data.build_bars`.
+  - `proxy_vs_exact` uses the proxy ETF's Yahoo daily return, with `details` saying "same provider" when both legs are Yahoo.
+  - A synthetic-store test shows SPY and MSFT getting bars through `app/components/data.build_bars`.
   - Alpaca datasets are unchanged (P-003).
 
-#### T48 — CFTC Commitments of Traders source (P-021c)
-- **Depends:** TC1, T44 (`config.yaml`) · **Owns:** `src/deskbrief/sources/cftc.py`, its entries in `sources/registry.py` and `sources/catalog.py`, the `cftc` source settings, feeds and instruments in `config.yaml` (ids `COT_GC_NET`, `COT_ES_NET`, `COT_ZN_NET` with field `net_position`, and `COT_GC_OI`, `COT_ES_OI`, `COT_ZN_OI` with field `open_interest`; unit `contracts`; `asset_class` `macro`; `kind` `macro`), weekly-cadence handling in `src/deskbrief/checks/freshness.py` and `src/deskbrief/checks/completeness.py`, tests with a synthetic fixture.
+#### T49 — CFTC Commitments of Traders source (P-021c)
+- **Depends:** T44, T45, T48 (`config.yaml`) · **Owns:**
+  - `src/deskbrief/sources/cftc.py`, including `plan_range`.
+  - Its entries in `sources/registry.py` and `sources/catalog.py`.
+  - In `config.yaml`: the `cftc` source settings, freshness entry, feeds and instruments. Ids `COT_GC_NET`, `COT_ES_NET`, `COT_ZN_NET` take field `net_position`; `COT_GC_OI`, `COT_ES_OI`, `COT_ZN_OI` take field `open_interest`. All use unit `contracts`, `asset_class` `macro` and `kind` `macro`.
+  - `docs/sources/cftc.md`.
+  - Tests with a synthetic fixture.
 - Acceptance:
-  - The weekly report is stored with `interval` `1w` and `as_of` = 00:00 ET of the reference Tuesday. The PR names the report variant (legacy or disaggregated) and gives the reason.
-  - Freshness expects the Friday release; a holiday-delayed release is `skip`, not `fail`. Completeness counts weeks, not days.
+  - Weekly rows are stored with `interval` `1w` and `as_of` = 00:00 ET of the reference Tuesday. The PR names the report variant (legacy or disaggregated) and gives the reason.
+  - Freshness expects the Friday release, using T45.
   - User-Agent and rate limit are set, the live probe is recorded, and unit tests use no network.
 
-#### T45 — Two-year history load (P-020)
-- **Depends:** T43 (`docs/runbook.md`), T48 · **Owns:** `src/deskbrief/pipeline/history.py` (new), a `history` subcommand in `src/deskbrief/cli.py`, `.github/workflows/history.yml` (new; own concurrency group), `docs/runbook.md` (history section), tests.
+#### T53 — Two-year history load, and the phase's spec text (P-020)
+- **Depends:** T43, T49 · **Owns:** `src/deskbrief/pipeline/history.py` (new), a `history` subcommand in `src/deskbrief/cli.py`, `.github/workflows/history.yml` (new; own concurrency group), `plan_range` in `src/deskbrief/sources/treasury.py` and `src/deskbrief/sources/ecb.py`, `docs/runbook.md` (trigger and history sections), `docs/specs/2026-11-15-desk-brief-design.md` (D3, §5.2, §5.4, §7.2, §8.2 and the P-012 known limit, following P-018 to P-021), tests.
 - Acceptance:
-  - One run loads 2 years for every daily and weekly feed within each provider's rate limits and budgets, writing one `observations` file per touched date partition. A test over N dates asserts one file per partition for the run.
-  - Keys already stored are skipped, so a re-run after an interruption writes nothing twice. Test covers it.
-  - It does not run checks, scorecard or serving. Its concurrency group is not `deskbrief-pipeline`.
-  - Rows keep their real `ingested_at`; `obs_pit(t)` before the load does not see them.
-  - Dispatch is an owner step (production R2). The PR includes a dry-run plan: requests per source and estimated rows.
+  - **Coverage:** one `history` run loads 2 years through each adapter's `plan_range`, within rate limits and budgets. Feeds without range support (Twelve Data `fx_series_1m`, Alpaca) are listed and skipped.
+  - **Files:** one `observations` file per touched date partition. A test over N dates asserts it.
+  - **Re-runs:** keys already stored are skipped, so a re-run writes nothing twice. Test covers it.
+  - **Isolation:** no checks, scorecard or serving, and the concurrency group is not `deskbrief-pipeline`.
+  - **Point in time:** rows keep their real `ingested_at`, so `obs_pit(t)` before the load does not see them.
+  - **Owner step:** dispatch writes to production R2, so the owner runs it. The PR includes a dry-run plan with requests per source and estimated rows.
 
-#### T49 — Dashboard views for the new data (follow-up)
-- **Depends:** T45, T46, T47 · **Owns:** `app/**`, `tests/unit/app/**`.
-- Acceptance: a VIX term-structure panel (9D, 30D, 3M, 6M); the yield curve's change by tenor against 1W and 1M plus a 2s10s history line; gold against the 10Y real yield; a 90-day correlation heatmap across the universe. Every figure goes through `value_cell`, and hosted mode is unchanged.
+#### T54 — Dashboard views for the new data (follow-up)
+- **Depends:** T53 · **Owns:** `app/**`, `tests/unit/app/**`.
+- Acceptance:
+  - A VIX term-structure panel (9D, 30D, 3M, 6M).
+  - The yield curve's change by tenor against 1W and 1M, plus a 2s10s history line.
+  - Gold against the 10Y real yield.
+  - A 90-day correlation heatmap.
+  - CFTC net positioning with its weekly date.
+  - Every figure goes through `value_cell`, and hosted mode is unchanged.
 
 ### Phase 5 — Stretch (only after DoD)
 
