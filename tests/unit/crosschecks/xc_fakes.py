@@ -122,6 +122,15 @@ def stooq_close(inst: str, value: float, **over: Any) -> dict[str, Any]:
     )  # fmt: skip
 
 
+def yahoo_close(inst: str, value: float, **over: Any) -> dict[str, Any]:
+    """A Yahoo ``history`` daily close (P-019: the ETF/stock daily close, tier 2)."""
+    unit = over.pop("unit", "USD")
+    return obs(
+        instrument_id=inst, source="yahoo", dataset="history", symbol=over.pop("symbol", inst),
+        tier=2, value=value, unit=unit, **over,
+    )  # fmt: skip
+
+
 def sip_bar(inst: str, start: datetime, value: float, **over: Any) -> dict[str, Any]:
     return obs(
         instrument_id=inst, source="alpaca", dataset="sip_bars_1m", symbol=inst, tier=2,

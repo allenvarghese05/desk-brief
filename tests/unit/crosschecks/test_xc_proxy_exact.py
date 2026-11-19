@@ -463,3 +463,69 @@ def test_registered_and_dq_rows_mirror(store: LocalBackend, config: Config) -> N
     xdf, ddf = run_crosschecks(ctx, duck_for(store, config), only=["proxy_vs_exact"])
     assert len(xdf) == len(ddf) == 7
     assert set(ddf["check_type"]) == {"consistency"}
+
+
+# --- T48 (P-019): the proxy ETF leg from Yahoo history; provider label ------------------------
+
+
+def yahoo_closes(inst: str, prev: float, cur: float) -> list[dict[str, Any]]:
+    return history(inst, inst, prev, cur, "USD")
+
+
+def test_proxy_leg_from_yahoo_history_compares(store: LocalBackend, config: Config) -> None:
+    put(
+        store,
+        config,
+        yahoo_closes("SPY", 100.0, 101.0) + history("ES_F", "ES=F", 5000.0, 5050.0, "index_pts"),
+    )
+    r = run(store, config)["sp500"]
+    assert r.status is DQStatus.PASS
+    assert r.diff_bps == pytest.approx(0.0, abs=1e-6)
+    assert (r.left_source, r.right_source) == ("yahoo", "yahoo")
+    assert (r.details["left"]["dataset"], r.details["right"]["dataset"]) == ("history", "history")
+    assert r.details["provider"] == "same provider"
+
+
+def test_return_group_with_stooq_proxy_says_different_providers(
+    store: LocalBackend, config: Config
+) -> None:
+    assert sp500(store, config, 101.0, 5050.0).details["provider"] == "different providers"
+
+
+def test_inverse_duration_with_yahoo_proxy_and_fred_yield(
+    store: LocalBackend, config: Config
+) -> None:
+    put(store, config, yahoo_closes("TLT", 100.0, 98.35) + yields("UST_20Y", "DGS20", 4.0, 4.1))
+    r = run(store, config)["ust_long"]
+    assert r.status is DQStatus.PASS
+    assert (r.left_source, r.right_source) == ("yahoo", "fred")
+    assert r.details["provider"] == "different providers"
+
+
+def test_provider_label_is_absent_when_a_leg_is_missing(
+    store: LocalBackend, config: Config
+) -> None:
+    put(store, config, yahoo_closes("SPY", 100.0, 101.0))
+    r = run(store, config)["sp500"]
+    assert r.status is DQStatus.SKIP
+    assert "provider" not in r.details
+
+
+def test_same_provider_never_changes_the_status(store: LocalBackend, config: Config) -> None:
+    # opposite directions above 25 bp still fail with both legs on Yahoo
+    put(
+        store,
+        config,
+        yahoo_closes("GLD", 100.0, 101.0) + history("GOLD_F", "GC=F", 2000.0, 1980.0, "USD"),
+    )
+    r = run(store, config)["gold"]
+    assert r.status is DQStatus.FAIL
+    assert r.details["direction_disagreement"] is True
+    assert r.details["provider"] == "same provider"
+
+
+def test_every_proxy_etf_has_a_yahoo_history_feed(config: Config) -> None:
+    hist = {i.id for i, _ in config.feeds_for("yahoo", "history")}
+    paired = ("return", "inverse_duration")
+    proxies = {g.proxy for g in config.groups if g.proxy and g.relation in paired}
+    assert proxies <= hist

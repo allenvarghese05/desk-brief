@@ -1,9 +1,13 @@
-"""Yahoo Finance source via ``yfinance`` (spec §5.2; card T16). Tier 2 second opinion.
+"""Yahoo Finance source via ``yfinance`` (spec §5.2; cards T16, T48). Tier 2.
 
 Datasets
 --------
 * ``quote``          last price + quote instant per symbol -> ``field=last``, ``interval=tick``.
 * ``history``        daily OHLC bars -> ``field in (open, high, low, close)``, ``interval=1d``.
+  For ETFs and single stocks this is the primary daily close (P-019, ``is_fallback=false``);
+  for futures and indices it is the only daily series. ``Close`` is Yahoo's unadjusted close
+  (``auto_adjust=False``: split-adjusted, not dividend-adjusted), so it matches the traded price
+  that ``close_vs_official`` compares with the Alpaca SIP last 1m bar.
 * ``daily_fallback`` daily close for symbols that Stooq normally serves (T3 fallback) ->
   ``field=close``, ``interval=1d``, ``is_fallback=true``. Only planned when config has
   ``dataset: daily_fallback`` yahoo feeds (see ``docs/sources/yahoo.md``).
@@ -26,6 +30,9 @@ when that session has already ended; it is emitted from the next day's run.
 stocks: an XNYS business day; other kinds: any weekday); see ``YahooSource._expects_data``.
 ``fetch`` turns off yfinance's ``hide_exceptions`` so blocks/rate limits raise instead of
 looking like empty data.
+``plan_range`` (P-020) covers the ``history`` dataset only: one request with every ``history``
+symbol over ``[start, end]``, which ``fetch`` turns into one yfinance call per symbol (a 2-year
+daily range is one call). ``daily_fallback`` and ``quote`` have no range support.
 The module registers ``YahooSource`` with the registry on import.
 """
 
@@ -66,6 +73,7 @@ _JOB_DATASETS: dict[JobKind, tuple[str, ...]] = {
     JobKind.REBUILD: ("history", "daily_fallback"),
 }
 _BAR_DATASETS = ("history", "daily_fallback")
+RANGE_DATASET = "history"  # the only dataset with range support (plan_range, P-020)
 
 
 def _finite_float(value: object) -> float | None:
@@ -130,6 +138,30 @@ class YahooSource:
                 )
             )
         return reqs
+
+    def plan_range(self, start: date, end: date, ctx: RunContext) -> list[FetchRequest]:
+        """The ``history`` request for the ET dates ``[start, end]`` (P-020; used by T53).
+
+        One request carries every configured ``history`` symbol; ``fetch`` makes one yfinance
+        call per symbol for the whole range. No feeds -> no request.
+        """
+        if end < start:
+            raise ValueError("end must not be before start")
+        symbols = tuple(self._config.feed_index(SOURCE, RANGE_DATASET))
+        if not symbols:
+            return []
+        return [
+            FetchRequest(
+                source=SOURCE,
+                dataset=RANGE_DATASET,
+                params={
+                    "start": start.isoformat(),
+                    "end": (end + timedelta(days=1)).isoformat(),  # yfinance end is exclusive
+                },
+                symbols=symbols,
+                target_date=end,
+            )
+        ]
 
     # -- fetch -----------------------------------------------------------------------------
 
