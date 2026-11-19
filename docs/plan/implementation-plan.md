@@ -749,6 +749,55 @@ Changelog: T45's Owns widened to the value readers, and T43 names `scheduled_for
   - CFTC net positioning with its weekly date.
   - Every figure goes through `value_cell`, and hosted mode is unchanged.
 
+### Review follow-ups, Phase 4B (from PRs #74–#82)
+
+Non-blocking findings deferred from the Phase 4B reviews, in one card (T55). Each bullet links its source.
+
+Not carried:
+- **CFTC holiday over-count.** T45's holiday rule over-counts Monday holidays and Good Friday, so CFTC freshness warns a day late in those weeks. It never gives a false fail, and `docs/sources/cftc.md` documents it. Source: [PR #80 review, finding 3](https://github.com/allenvarghese05/desk-brief/pull/80#pullrequestreview-5984358141).
+- **Unflushed DQ row in the history job.** `_unexpected_empty_day` buffers a DQ row with today's date that is never flushed. It is harmless. Source: [PR #81 review, nit 4](https://github.com/allenvarghese05/desk-brief/pull/81#pullrequestreview-5984647185).
+- **Per-source flush in the history job.** A killed load (timeout or SIGTERM) loses its unflushed rows. Flushing per source would write a partition twice in one run, which P-008 forbids without a `contract:` change adding a `part` to `table_key`. The load takes about 5–10 minutes against a 60-minute timeout, and a re-run refetches only what is missing, so the risk does not justify a contract change. Source: [PR #81 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/81#pullrequestreview-5984647185).
+- **Size and model-name nits** in the agent logs.
+
+#### T55 — Phase 4B report, test and doc follow-ups
+- **Depends:** T54 merged · **Owns:**
+  - `src/deskbrief/report/excel.py` and `tests/unit/report/*`;
+  - `tests/unit/crosschecks/test_xc_t48_yahoo_history.py`;
+  - `tests/unit/sources/{test_cftc_t49.py,test_yahoo_t48.py}`;
+  - a new `tests/unit/test_parser_version_dedup.py`;
+  - `docs/sources/{cboe.md,fred.md}`;
+  - `config.yaml`, for the Yahoo quote feeds below only;
+  - `.github/workflows/history.yml`, `tests/unit/pipeline/test_history_workflow_t53.py`, and `docs/runbook.md` §5 History load only.
+- Deliverables:
+  - **Excel contracts change.** The Excel workbook shows a weekly position change as whole contracts with thousands separators ("−10,000"), not "−10000.0" in a `pts` format. Choose the number format from the row's value unit. If a new `change_unit` value turns out to be needed, that is a contract change (P-015): stop and ask the planner. Source: [PR #76 round 2, nit 1](https://github.com/allenvarghese05/desk-brief/pull/76#pullrequestreview-5981261285).
+  - **Excel About sheet.** It explains:
+    - the new fields `level`, `net_position` and `open_interest`;
+    - the units `index` and `contracts`;
+    - that a weekly (`1w`) value is dated to its reference day, for example a CFTC Tuesday.
+
+    Source: [PR #76 round 1](https://github.com/allenvarghese05/desk-brief/pull/76#pullrequestreview-5981070101).
+  - **Hosted-mode test.** `close_vs_official` stays withheld in hosted mode now that it has real results: a test over `exposed_sources` plus `keep_rows`. Source: [PR #79 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/79#pullrequestreview-5983287678).
+  - **In-progress bar test.** A Yahoo history test fetched during the session drops the in-progress ETF bar over a multi-day range. Source: [PR #79 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/79#pullrequestreview-5983287678).
+  - **Re-parsed VIX row.** A test writes a VIX row at `parser_version` 1 and a re-parsed row at version 2 for the same key. It asserts one value in `obs_latest`, the query snapshot, `BriefModel` and `build_bars`. Source: [PR #78 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/78#pullrequestreview-5982833275).
+  - **CFTC change text.** The CFTC report-model test asserts `change_text`, for example "+150 contracts", plus a negative grouped case such as "−1,234 contracts". Source: [PR #80 review, finding 2](https://github.com/allenvarghese05/desk-brief/pull/80#pullrequestreview-5984358141).
+  - **Probe tables.**
+    - The Cboe probe table in `docs/sources/cboe.md` takes the owner's exact run from [the PR #78 comment](https://github.com/allenvarghese05/desk-brief/pull/78#issuecomment-7021366889): status, rows, newest, min and max.
+    - The FRED table in `docs/sources/fred.md` takes the owner's FRED probe output if the planner has it by then. Otherwise it stays marked pending.
+
+    Sources: [PR #78 review, finding 1](https://github.com/allenvarghese05/desk-brief/pull/78#pullrequestreview-5982833275) and [PR #77 round 2, note 1](https://github.com/allenvarghese05/desk-brief/pull/77#pullrequestreview-5981984243).
+  - **History workflow secrets.** `history.yml` moves the R2 and FRED secrets from job-level `env` to the "Run history" step only, so the validate and `uv sync` steps don't see them. Source: [PR #81 review, nit 3](https://github.com/allenvarghese05/desk-brief/pull/81#pullrequestreview-5984647185).
+  - **Runbook §5 wording.** It says a re-run completes a degraded run or a handled crash. A killed process (timeout or SIGTERM) loses its unflushed rows, and the next run refetches them. Source: [PR #81 review, nit 2](https://github.com/allenvarghese05/desk-brief/pull/81#pullrequestreview-5984647185).
+  - **Overnight moves for the new vol indices.** Yahoo `quote` feeds (tier 2) for VIX9D, VIX3M, VIX6M, VXN, GVZ and SKEW, like VIX's `^VIX`, so they get an overnight move. Add only the symbols the implementer's live probe confirms Yahoo serves. List the rest in the PR. Source: [PR #78 review, nit 3](https://github.com/allenvarghese05/desk-brief/pull/78#pullrequestreview-5982833275).
+- Acceptance:
+  - An Excel test pins a contracts change cell's number format and value.
+  - The About sheet test names each new field and unit.
+  - Each new test fails if the behaviour it guards is removed.
+  - The probe tables hold exact values, not estimates.
+  - Config validates.
+  - The PR lists which vol symbols were added and which were not, with the probe evidence.
+  - The history workflow has no `secrets.` reference outside its run step, tested in `test_history_workflow_t53.py`.
+- Changelog: card created from the PR #76–#81 reviews linked above.
+
 ### Phase 5 — Stretch (only after DoD)
 
 - **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
