@@ -9,6 +9,8 @@ reader sees (labels, signed changes, tier glyphs, "data unavailable") is decided
 Labelling rules (P-009): a value is labelled by its ``field``/``unit``. "since previous NYSE
 close" is used only for price-family ``close`` instruments; yields, ECB reference rates and macro
 series say "since previous official value". Nothing outside ``field = close`` is called a close.
+Weekly (``1w``) values show their date without a time and say "week-on-week, since previous
+weekly value (date)"; they get no anomaly scoring, which a known limit states.
 
 Per-row qualifiers (fallback source, IEX single exchange, delayed quote, derived) sit on each
 ``Row``, so a value never loses its caveat when a renderer drops the known-limits block.
@@ -39,6 +41,7 @@ from deskbrief.config import Config, Instrument, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
     CHANGE_DECIMALS,
+    OFFICIAL_INTERVALS,
     ChangeRow,
     CheckItem,
     HealthSummary,
@@ -268,10 +271,11 @@ class BriefModel:
 # ---------------------------------------------------------------------------
 
 
-def signed(x: float, decimals: int) -> str:
-    """``+0.4`` / ``−0.4`` (true minus sign); values that round to zero print unsigned."""
-    text = f"{x:+.{decimals}f}"
-    if float(text) == 0:
+def signed(x: float, decimals: int, *, grouped: bool = False) -> str:
+    """``+0.4`` / ``−0.4`` (true minus sign); values that round to zero print unsigned.
+    ``grouped`` adds thousands separators (``−10,000``)."""
+    text = f"{x:+,.{decimals}f}" if grouped else f"{x:+.{decimals}f}"
+    if float(text.replace(",", "")) == 0:
         return f"{0:.{decimals}f}"
     return text.replace("-", _MINUS)
 
@@ -279,9 +283,14 @@ def signed(x: float, decimals: int) -> str:
 def change_text(change: ChangeRow) -> str:
     if change.change is None:
         return "n/a"
-    return (
-        signed(change.change, _UNIT_DECIMALS[change.change_unit]) + _UNIT_SUFFIX[change.change_unit]
-    )
+    if change.last.unit == "contracts":
+        # whole contracts, like the value ("240,000"); ``change_unit`` stays "pts" because the
+        # Excel writer has no contracts format (follow-up in the T45 PR)
+        return signed(change.change, 0, grouped=True) + " contracts"
+    decimals = _UNIT_DECIMALS[change.change_unit]
+    if change.last.unit == "index" and change.change_unit == "pts":
+        decimals = 2  # an index such as NFCI moves by hundredths: "+0.04 pts", not "0.0 pts"
+    return signed(change.change, decimals) + _UNIT_SUFFIX[change.change_unit]
 
 
 def value_text(row: ValueRow) -> str:
@@ -292,13 +301,16 @@ def value_text(row: ValueRow) -> str:
         return f"${v:,.2f}"
     if row.unit == "fx_rate":
         return f"{v:.2f}" if abs(v) >= 20 else f"{v:.4f}"
+    if row.unit == "contracts":
+        return f"{v:,.0f}"
     return f"{v:,.2f}"
 
 
 def _as_of_text(row: ValueRow, report_date: date) -> str:
-    """Daily values show their date; intraday ones show the time, plus the date unless today."""
+    """Daily, weekly and monthly values show their date; intraday ones show the time, plus the
+    date unless today."""
     et = to_et(row.as_of)
-    if row.interval in ("1d", "1mo"):
+    if row.interval in OFFICIAL_INTERVALS:
         return f"{et.day} {et:%b}"
     if et.date() == report_date:
         return f"{et:%H:%M}"
@@ -351,7 +363,8 @@ def _qualifiers(last: ValueRow, report_time: datetime) -> tuple[str, ...]:
 
 def _tail(change: ChangeRow) -> str:
     if change.status == "ok":
-        return f"{change_text(change)} since {_basis_text(change)}"
+        wow = " week-on-week," if change.last.interval == "1w" else ""
+        return f"{change_text(change)}{wow} since {_basis_text(change)}"
     if change.status == "no_move_yet":
         return f"no move to report since {change.basis}"
     if change.previous is not None:  # found, but a percentage of zero is undefined
@@ -635,6 +648,15 @@ def _known_limits(
     if derived:
         out.append(
             KnownLimit("derived", "Derived values, not published directly: " + ", ".join(derived))
+        )
+    weekly = sorted({r.instrument_id for r in snapshot if r.interval == "1w"})
+    if weekly:
+        out.append(
+            KnownLimit(
+                "weekly",
+                "Weekly series get no anomaly check (it reads daily values only): "
+                + ", ".join(weekly),
+            )
         )
     missing = [r.instrument_id for r in rows.values() if not r.available]
     if missing:

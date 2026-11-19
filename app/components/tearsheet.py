@@ -1,6 +1,8 @@
 """Instrument tearsheet (T36 phase 1): what an analyst needs about one instrument on one screen.
 
 * performance over horizons (1D from the report; 1W, 1M, 3M, YTD, 1Y from daily closes),
+  a weekly series (``1w``) shows its week-on-week change first and says that daily-move
+  statistics need daily values; index levels and positions change in points, never in %,
 * risk and range (realised volatility, today's move in standard deviations, drawdown, 52-week
   range), each saying how many days it needs when the store holds fewer,
 * every value we hold for the instrument: one line per source, dataset, field and interval,
@@ -28,6 +30,7 @@ from app.components.instrument import exposed_sources
 from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell
 
 from deskbrief.config import Config
+from deskbrief.query import LEVEL_FIELDS
 from deskbrief.report.model import Row
 from deskbrief.timeutil import et_date, to_et
 
@@ -52,11 +55,27 @@ REVISION_DAYS = 30
 
 def _signed(x: float, unit: str) -> str:
     sign = "+" if x > 0 else _MINUS if x < 0 else ""
-    return f"{sign}{abs(x):,.{1 if unit == '%' else 0}f}{unit}"
+    decimals = 1 if unit == "%" else 2 if unit == " pts" and abs(x) < 10 else 0
+    return f"{sign}{abs(x):,.{decimals}f}{unit}"
 
 
 def _is_yield(bars: pd.DataFrame) -> bool:
     return not bars.empty and str(bars["unit"].iloc[-1]) == "pct"
+
+
+def _is_weekly(bars: pd.DataFrame) -> bool:
+    """Bars from :func:`data.build_bars` say their interval; a frame without one is daily."""
+    return not bars.empty and "interval" in bars and str(bars["interval"].iloc[-1]) == "1w"
+
+
+def _mode(bars: pd.DataFrame) -> str:
+    """Unit of a move: bp for yields, points (or contracts) for levels and positions, which
+    may be zero or negative (NFCI), else %."""
+    if _is_yield(bars):
+        return "bp"
+    if not bars.empty and str(bars["field"].iloc[-1]) in LEVEL_FIELDS:
+        return " contracts" if str(bars["unit"].iloc[-1]) == "contracts" else " pts"
+    return "%"
 
 
 def _latest(row: Row, bars: pd.DataFrame) -> tuple[float, date] | None:
@@ -89,10 +108,13 @@ def _bar_prov(
     return Provenance(", ".join(sorted(sources)), min(tiers), span, what)
 
 
-def _move(now: float, then: float, yields: bool) -> tuple[float, str]:
-    """A change in basis points for yields, in percent otherwise."""
-    if yields:
+def _move(now: float, then: float, mode: str) -> tuple[float, str]:
+    """A change in basis points for yields, in points for levels (see :func:`_mode`), in
+    percent otherwise."""
+    if mode == "bp":
         return (now - then) * 100, "bp"
+    if mode != "%":
+        return now - then, mode
     return ((now / then) - 1) * 100 if then else 0.0, "%"
 
 
@@ -133,14 +155,16 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
         )
         text = row.change_text
         cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
-        out.append(Horizon("1D", f'<span class="{cls}">{value_cell(text, p, compact=True)}</span>'))
+        first = "WoW" if last.interval == "1w" else "1D"  # a weekly change is week-on-week
+        cell = value_cell(text, p, compact=True)
+        out.append(Horizon(first, f'<span class="{cls}">{cell}</span>'))
     else:
         out.append(Horizon("1D", '<span class="db-unavailable">no change yet</span>'))
     if latest is None or bars.empty:
         return out + [Horizon(lab, '<span class="db-unavailable">no history</span>')
                       for lab, _ in HORIZONS]  # fmt: skip
     value, day = latest
-    yields = _is_yield(bars)
+    mode = _mode(bars)
     first = bars["d"].iloc[0].date()
     for label, days in HORIZONS:
         start = date(day.year - 1, 12, 31) if days is None else day - timedelta(days=days)
@@ -150,7 +174,7 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
             out.append(Horizon(label, _need(need, (day - first).days)))
             continue
         base = before.iloc[-1]
-        chg, unit = _move(value, float(base["close"]), yields)
+        chg, unit = _move(value, float(base["close"]), mode)
         base_tier, base_src = int(base["tier"]), str(base["source"])
         if row.change is not None:  # the latest value can be another feed than the base close
             last = row.change.last
@@ -189,6 +213,8 @@ def _moves(bars: pd.DataFrame) -> pd.Series:
     closes = bars["close"].astype(float)
     if _is_yield(bars):
         return closes.diff().dropna() * 100  # bp
+    if _mode(bars) != "%":
+        return closes.diff().dropna()  # points: a level may be zero or negative
     return (closes.apply(math.log).diff().dropna()) * 100  # log return in %
 
 
@@ -203,11 +229,22 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
     if bars.empty:
         return '<div class="db-empty">No daily history yet.</div>'
     yields = _is_yield(bars)
+    mode = _mode(bars)
     unit = str(bars["unit"].iloc[-1])
     moves = _moves(bars)
     n = len(moves)
     facts: list[tuple[str, str]] = []
-    if n >= VOL_DAYS:
+    weekly = _is_weekly(bars)
+    # 20 weekly moves are not "20-day" volatility, and a % volatility of a level that may cross
+    # zero means nothing: both say so instead of printing a mislabelled number
+    skip = (
+        "weekly series: needs daily values" if weekly
+        else None if mode in ("%", "bp") else "not computed for a level series"
+    )  # fmt: skip
+    if skip:
+        note = f'<span class="db-unavailable">{skip}</span>'
+        facts += [("Realised vol 20d", note), ("Latest move", note)]
+    elif n >= VOL_DAYS:
         vol = float(moves.tail(VOL_DAYS).std()) * math.sqrt(252)
         text = f"{vol:,.0f} bp" if yields else f"{vol:.1f}%"
         p = _bar_prov(bars.tail(VOL_DAYS + 1), f"{VOL_DAYS}-day realised volatility, annualised")
@@ -215,11 +252,11 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
     else:
         facts.append(("Realised vol 20d", _need(VOL_DAYS + 1, n + 1)))
     latest = _latest(row, bars)
-    if latest is not None and n >= SIGMA_MIN_DAYS:
+    if skip is None and latest is not None and n >= SIGMA_MIN_DAYS:
         value, day = latest
         last_close = float(bars["close"].iloc[-1])
         intraday = day > bars["d"].iloc[-1].date()
-        today = _move(value, last_close, yields)[0] if intraday else float(moves.iloc[-1])
+        today = _move(value, last_close, mode)[0] if intraday else float(moves.iloc[-1])
         hist = moves if intraday else moves.iloc[:-1]
         sd = float(hist.tail(60).std())
         if sd > 0:
@@ -229,9 +266,9 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
                 latest=row if intraday else None,
             )
             facts.append(("Latest move", value_cell(f"{today / sd:+.1f}σ".replace("-", _MINUS), p)))
-    else:
+    elif skip is None:
         facts.append(("Latest move", _need(SIGMA_MIN_DAYS + 1, n + 1)))
-    if not yields and len(bars) >= 2:
+    if mode == "%" and len(bars) >= 2:
         closes = bars["close"].astype(float)
         dd = float((closes / closes.cummax() - 1).min()) * 100
         p = _bar_prov(bars, "largest fall from a high, daily closes")
@@ -239,8 +276,9 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
     year = bars[bars["d"] >= bars["d"].iloc[-1] - pd.Timedelta(days=365)]
     hi, lo = float(year["close"].max()), float(year["close"].min())
     days = (year["d"].iloc[-1] - year["d"].iloc[0]).days
-    label = "52-week range" if days >= 360 else f"Range, {len(year)} days"
-    p = _bar_prov(year, f"lowest and highest daily {year['field'].iloc[-1]}")
+    span, step = ("weekly", "weeks") if weekly else ("daily", "days")
+    label = "52-week range" if days >= 360 else f"Range, {len(year)} {step}"
+    p = _bar_prov(year, f"lowest and highest {span} {year['field'].iloc[-1]}")
     facts.append((label, value_cell(f"{_num(lo, unit)} – {_num(hi, unit)}", p)))
     body = "".join(f"<tr><th>{escape(k)}</th><td>{v}</td></tr>" for k, v in facts)
     bar = ""
@@ -284,8 +322,13 @@ def _all_values(
 
 
 _FIELD_TEXT = {"last": "last trade", "close": "close", "open": "open", "high": "high",
-               "low": "low", "volume": "volume", "yield": "yield", "rate": "rate"}  # fmt: skip
-_INTERVAL_TEXT = {"tick": "quote", "1m": "1-minute bar", "1d": "daily", "1mo": "monthly"}
+               "low": "low", "volume": "volume", "yield": "yield", "rate": "rate",
+               "level": "level", "net_position": "net speculative position",
+               "open_interest": "open interest"}  # fmt: skip
+_INTERVAL_TEXT = {"tick": "quote", "1m": "1-minute bar", "1d": "daily", "1w": "weekly",
+                  "1mo": "monthly"}  # fmt: skip
+#: intervals whose value is a date's (00:00 ET stamp), shown without a time
+_DATED = ("1d", "1w", "1mo")
 
 
 def _age(seconds: float) -> str:
@@ -298,7 +341,7 @@ def _age(seconds: float) -> str:
 
 
 def _value_text(v: float, unit: str, field: str) -> str:
-    if field == "volume" or unit == "shares":
+    if field == "volume" or unit in ("shares", "contracts"):
         return f"{v:,.0f}"
     if unit == "pct":
         return f"{v:.3f}%"
@@ -317,7 +360,7 @@ def all_values_html(
         as_of = to_et(_utc(r.as_of))
         fetched = _utc(r.ingested_at)
         field = _FIELD_TEXT.get(str(r.field), str(r.field))
-        daily = str(r.interval) in ("1d", "1mo")  # a day's value has a date, not a time
+        daily = str(r.interval) in _DATED  # a day's value has a date, not a time
         when = f"{as_of:%d %b %Y}" if daily else f"{as_of:%d %b %H:%M}"
         p = Provenance(
             str(r.source), int(r.tier), when, field,

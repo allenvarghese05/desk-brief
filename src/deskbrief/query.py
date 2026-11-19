@@ -39,6 +39,12 @@ Overnight change (P-009)
   A tick compared with an official baseline carries a note saying so (different sources).
 * reference rates (``field = rate``, e.g. the ECB fix) and macro series: change versus the
   **previous official value** (% for FX rates, percentage points / points otherwise).
+* index levels, positions and open interest (``field`` level / net_position / open_interest,
+  P-021) are macro-family: points against the previous official value, never a % of a level
+  that may be zero or negative (NFCI).
+* weekly series (``interval = 1w``): change versus the **previous weekly value** of the same
+  source, dataset and field (week-on-week). Like ``1d`` rows, a ``1w`` row dated on the current
+  ET date is excluded.
 """
 
 from __future__ import annotations
@@ -56,9 +62,15 @@ from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import ensure_utc, et_date
 
 #: fields that can be "the value" of an instrument (never open/high/low/bid/ask/volume)
-VALUE_FIELDS: tuple[str, ...] = ("close", "last", "yield", "rate")
-VALUE_INTERVALS: tuple[str, ...] = ("tick", "1m", "1d", "1mo")
-OFFICIAL_INTERVALS: tuple[str, ...] = ("1d", "1mo")
+VALUE_FIELDS: tuple[str, ...] = (
+    "close", "last", "yield", "rate", "level", "net_position", "open_interest",
+)  # fmt: skip
+#: value fields that are neither a price nor a rate: changes are in points (P-021)
+LEVEL_FIELDS: tuple[str, ...] = ("level", "net_position", "open_interest")
+VALUE_INTERVALS: tuple[str, ...] = ("tick", "1m", "1d", "1w", "1mo")
+OFFICIAL_INTERVALS: tuple[str, ...] = ("1d", "1w", "1mo")
+#: intervals whose rows are dated (``as_of`` = 00:00 ET of the date): today's is unfinished
+DATED_INTERVALS: tuple[str, ...] = ("1d", "1w")
 #: how far back a baseline is searched (monthly macro needs two releases)
 BASELINE_LOOKBACK_DAYS = 100
 
@@ -67,9 +79,13 @@ CHANGE_DECIMALS = 9
 
 BASIS_NYSE_CLOSE = "previous NYSE close"
 BASIS_OFFICIAL = "previous official value"
+BASIS_WEEKLY = "previous weekly value"
 
 _ET_DATE = "CAST(timezone('America/New_York', o.as_of) AS DATE)"
-_FIELD_RANK = "CASE o.field WHEN 'close' THEN 0 WHEN 'yield' THEN 1 WHEN 'rate' THEN 2 ELSE 3 END"
+_FIELD_RANK = (
+    "CASE o.field WHEN 'close' THEN 0 WHEN 'yield' THEN 1 WHEN 'rate' THEN 2 WHEN 'level' THEN 3 "
+    "WHEN 'net_position' THEN 4 WHEN 'open_interest' THEN 5 ELSE 6 END"
+)
 _VALUE_FIELDS_SQL = ", ".join(f"'{f}'" for f in VALUE_FIELDS)
 _VALUE_INTERVALS_SQL = ", ".join(f"'{i}'" for i in VALUE_INTERVALS)
 _OFFICIAL_INTERVALS_SQL = ", ".join(f"'{i}'" for i in OFFICIAL_INTERVALS)
@@ -203,7 +219,8 @@ def _rows(duck: duckdb.DuckDBPyConnection, sql: str, params: list[Any]) -> list[
 
 
 def _current_day_filter() -> str:
-    return f"NOT (o.interval = '1d' AND {_ET_DATE} >= ?)"
+    dated = ", ".join(f"'{i}'" for i in DATED_INTERVALS)
+    return f"NOT (o.interval IN ({dated}) AND {_ET_DATE} >= ?)"
 
 
 def _tier_filter(exclude_tiers: Collection[int]) -> tuple[str, list[Any]]:
@@ -277,7 +294,7 @@ def _official(
 
 def family_of(row: ValueRow) -> str:
     """``macro`` | ``yield`` | ``rate`` | ``price``; decides the unit and basis of a change."""
-    if row.kind == "macro":
+    if row.kind == "macro" or row.field in LEVEL_FIELDS:
         return "macro"
     if row.field == "yield" or row.kind == "yield":
         return "yield"
@@ -348,7 +365,7 @@ def overnight_changes(
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
-        if family_of(last) == "price":
+        if family_of(last) == "price" and last.interval != "1w":
             out.append(_price_change(last, history, nyse_prev))
         else:
             out.append(_official_change(last, history))
@@ -374,14 +391,16 @@ def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
             for r in earlier
             if (r.source, r.dataset, r.field) == (last.source, last.dataset, last.field)
         ]
-        earlier = same or earlier
+        # a weekly value is only ever compared with the previous week of the same series
+        earlier = same if last.interval == "1w" else same or earlier
     previous = earlier[0] if earlier else None  # history is newest first, best tier first
     note = None
     if previous is not None and last.interval not in OFFICIAL_INTERVALS:
         note = f"{last.source} {last.interval} value against an official {previous.source} baseline"
     elif previous is not None and previous.source != last.source:
         note = f"baseline from {previous.source}, not {last.source}"
-    return _change(last, previous, BASIS_OFFICIAL, "ok" if previous else "no_baseline", note)
+    basis = BASIS_WEEKLY if last.interval == "1w" else BASIS_OFFICIAL
+    return _change(last, previous, basis, "ok" if previous else "no_baseline", note)
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +683,10 @@ def field_label(row: ValueRow) -> str:
         return "ECB derived cross rate" if row.is_derived else "ECB reference rate"
     if row.field == "yield" or row.kind == "yield":
         return "yield"
-    return row.field  # close | last
+    return _FIELD_LABELS.get(row.field, row.field)  # close | last | level
+
+
+_FIELD_LABELS = {"net_position": "net speculative position", "open_interest": "open interest"}
 
 
 def value_label(row: ValueRow) -> str:
