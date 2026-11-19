@@ -374,8 +374,9 @@ def test_rebased_comparison_starts_both_series_at_100() -> None:
     from app.components import chart
 
     days = pd.to_datetime(["2026-11-10", "2026-11-11", "2026-11-12"])
-    a = pd.DataFrame({"d": days, "close": [50.0, 55.0, 60.0]})
-    b = pd.DataFrame({"d": days[1:], "close": [200.0, 180.0]})
+    meta = {"tier": 3, "source": "stooq", "field": "close"}  # bar columns (provenance)
+    a = pd.DataFrame({"d": days, "close": [50.0, 55.0, 60.0], **meta})
+    b = pd.DataFrame({"d": days[1:], "close": [200.0, 180.0], **meta})
     long = chart.rebased(a, b, "A", "B")
     first = long[long["d"] == days[1]].set_index("series")["index"]
     assert first["A"] == 100.0

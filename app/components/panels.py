@@ -114,6 +114,7 @@ def brand(ov: Overview) -> str:
 #: (label, url path) of every page, in menu order; Streamlit derives the path from the file name
 PAGES = (
     ("Markets", "./"),
+    ("Macro", "Macro"),
     ("Cross checks", "Cross_checks"),
     ("Data health", "Data_health"),
     ("Sources", "Sources"),

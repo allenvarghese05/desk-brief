@@ -237,6 +237,26 @@ div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
 .db-tenor {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
 .db-tenor .db-fig {{ display: block; text-align: left; }}
 .db-curve-legend {{ display: flex; gap: 1rem; color: {MUTED}; font-size: .76rem; }}
+/* ---- Macro page (T54) ---- */
+.st-key-db-mx-vix, .st-key-db-mx-curve, .st-key-db-mx-2s10s, .st-key-db-mx-gold,
+.st-key-db-mx-corr, .st-key-db-mx-cot {{
+  background: {PANEL}; border: 1px solid {RULE}; border-radius: 10px; padding: .8rem .9rem; }}
+.db-curve .db-curve-old {{ stroke: {MUTED}; stroke-width: 1.2; fill: none;
+  stroke-dasharray: 1.5 3; opacity: .8; }}
+.db-mx-words {{ color: {INK}; font-size: .88rem; margin: .2rem 0 .5rem 0; }}
+.db-mx-strip {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: .5rem; margin: .4rem 0 .5rem 0; }}
+.db-mx-cell {{ font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.db-mx-cell .db-fig {{ display: block; text-align: left; }}
+.db-mx-table td, .db-mx-heat td, .db-mx-heat th {{ white-space: nowrap; }}
+.db-mx-scroll {{ overflow-x: auto; }}
+.db-mx-heat {{ font-size: .82rem; }}
+.db-mx-heat td {{ text-align: center; }}
+.db-mx-heat .db-fig {{ text-align: center; }}
+.db-mx-diag {{ color: {MUTED}; }}
+.db-mx-cot-name {{ color: {INK}; font-weight: 600; font-size: .95rem; }}
+.db-short {{ border: 1px dashed {RULE}; border-radius: 8px; padding: .6rem .8rem;
+  margin: .3rem 0; }}
 </style>
 """
 
