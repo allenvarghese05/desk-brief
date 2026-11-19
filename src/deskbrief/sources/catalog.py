@@ -23,6 +23,7 @@ KNOWN_SOURCE_MODULES: tuple[str, ...] = (
     "deskbrief.sources.alpaca",
     "deskbrief.sources.twelvedata",
     "deskbrief.sources.yahoo",
+    "deskbrief.sources.cftc",
 )
 
 

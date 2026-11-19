@@ -20,6 +20,9 @@ sources:
   stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2, enabled: false}
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
   cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}   # T25/T47: live probes 2026-11-18 and 2026-11-19 (docs/sources/cboe.md)
+  # T49: CFTC public reporting (Socrata, keyless); one request per run. docs/sources/cftc.md
+  cftc:       {rate_per_min: 10, timeout_s: 30, retries: 3,
+               user_agent: "desk-brief/0.1 (+https://github.com/allenvarghese05/desk-brief)"}
 
 instruments:
   # ---------------- Equities (ETFs and portfolio stocks) ----------------
@@ -429,6 +432,50 @@ instruments:
     unit: index         # negative = looser than average; validity index is [-100, 100000]
     feeds:
       - {source: fred, dataset: series_weekly, symbol: NFCI, tier: 3}
+  # T49 (P-021c): CFTC Commitments of Traders, legacy futures-only report, weekly (1w, as of
+  # the position Tuesday). Symbol = <CFTC contract market code>:<field>. docs/sources/cftc.md
+  - id: COT_GC_NET
+    name: Gold (COMEX) futures, net non-commercial position (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "088691:net_position", tier: 3}
+  - id: COT_ES_NET
+    name: E-mini S&P 500 (CME) futures, net non-commercial position (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "13874A:net_position", tier: 3}
+  - id: COT_ZN_NET
+    name: 10-year Treasury note (CBOT) futures, net non-commercial position (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "043602:net_position", tier: 3}
+  - id: COT_GC_OI
+    name: Gold (COMEX) futures, open interest (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "088691:open_interest", tier: 3}
+  - id: COT_ES_OI
+    name: E-mini S&P 500 (CME) futures, open interest (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "13874A:open_interest", tier: 3}
+  - id: COT_ZN_OI
+    name: 10-year Treasury note (CBOT) futures, open interest (CFTC COT)
+    asset_class: macro
+    kind: macro
+    unit: contracts
+    feeds:
+      - {source: cftc, dataset: cot, symbol: "043602:open_interest", tier: 3}
 
 groups:
   - {id: sp500, label: S&P 500, proxy: SPY, exact: ES_F, official: SPY, relation: return,
@@ -472,6 +519,12 @@ datasets:   # expected publish times drive freshness; before expected_by the che
   - {source: stooq, dataset: daily, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
   # T47: covers all seven Cboe symbols. Probe 2026-11-19 15:08 ET: every file ended at 11/18.
   - {source: cboe, dataset: vix_history, expected_by_et: "20:00", lag_bdays: 0, calendar: XNYS}
+  # T49: CFTC COT. Released Fridays 15:30 ET with positions as of the Tuesday (3 weekdays back);
+  # a federal holiday in the week moves the release to the next business day (Monday in the 2026
+  # schedule). SIFMA_US holds the federal holidays. Grace 180 min: the Socrata copy may lag the
+  # 15:30 web release. Source: cftc.gov release schedule, probe 2026-11-19, docs/sources/cftc.md.
+  - {source: cftc, dataset: cot, expected_by_et: "15:30", lag_bdays: 3, calendar: SIFMA_US,
+     grace_minutes: 180, release_weekday: 4}
 
 intraday:   # polled every 15 min in session; newest tick older than grace_minutes is stale (2 missed polls)
   - {source: alpaca, dataset: iex_latest, calendar: XNYS, grace_minutes: 30}

@@ -24,7 +24,7 @@ def _write(tmp_path: Path, data: dict[str, Any]) -> Path:
 
 def test_real_config_loads() -> None:
     cfg = load_config(REAL)
-    assert len(cfg.instruments) == 42  # T46 added five FRED series, T47 six Cboe indices
+    assert len(cfg.instruments) == 48  # T46: five FRED series, T47: six Cboe, T49: six CFTC
     assert {g.id for g in cfg.groups} >= {"sp500", "oil_wti", "ust_10y", "eurusd", "vix"}
     # every group references real instruments (validated) and pairs are what the spec says
     ust10 = next(g for g in cfg.groups if g.id == "ust_10y")
@@ -125,7 +125,7 @@ def test_top_level_must_be_mapping(tmp_path: Path) -> None:
 
 def test_default_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DESKBRIEF_CONFIG", str(REAL))
-    assert len(load_config().instruments) == 42
+    assert len(load_config().instruments) == 48
 
 
 def test_cli_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

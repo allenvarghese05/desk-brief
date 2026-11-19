@@ -54,7 +54,8 @@ def weekly_config() -> Config:
     """``config.yaml`` (all sources on) plus the synthetic weekly schedules and instruments.
 
     The synthetic entries replace any real ones with the same key (T46 added the real NFCI
-    schedule and the NFCI and broad-dollar instruments), so these tests keep their own timings.
+    schedule and the NFCI and broad-dollar instruments; T49 the real CFTC schedule and the six
+    ``COT_*`` instruments on ``cftc/cot``), so these tests keep their own timings.
     """
     base = enable_all_sources(load_config(REPO_ROOT / "config.yaml"))
     raw = base.model_dump(mode="json")
@@ -72,6 +73,10 @@ def weekly_config() -> Config:
             for i in raw["instruments"]
             if i["id"] not in ids
             and not any((f["source"], f["symbol"]) in symbols for f in i["feeds"])
+            # T49's real COT instruments share the synthetic cftc/cot dataset
+            and not any(
+                (f["source"], f["dataset"]) == (COT["source"], COT["dataset"]) for f in i["feeds"]
+            )
         ),
         *_INSTRUMENTS,
     ]
