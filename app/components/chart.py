@@ -57,11 +57,32 @@ def _fmt(unit: str) -> str:
     return ".2f" if unit in _PCT_UNITS else ",.4~f"
 
 
+def prov_tips(*values: alt.Tooltip) -> list[alt.Tooltip]:
+    """A tooltip that shows figures carries the full provenance set of ``value_cell``
+    (spec 10.2, P-009): as-of date, what the value is (field), tier and source.
+
+    The frame needs ``d``, ``field_text``, ``tier_text`` and ``source`` columns."""
+    return [
+        alt.Tooltip("d:T", title="As of", format="%a %d %b %Y"),
+        *values,
+        alt.Tooltip("field_text:N", title="Field"),
+        alt.Tooltip("tier_text:N", title="Tier"),
+        alt.Tooltip("source:N", title="Source"),
+    ]
+
+
+def tier_text(tier: object) -> str:
+    t = int(tier)  # type: ignore[call-overload]
+    return f"{TIER_GLYPH[t]} {TIER_NAME[t]}"
+
+
 def _label(bars: pd.DataFrame) -> pd.DataFrame:
     df = bars.copy()
     df["up"] = (df["close"] >= df["open"].fillna(df["close"])).map({True: "up", False: "down"})
     df["ok"] = candle_ok(df)
-    df["tier_text"] = df["tier"].map(lambda t: f"{TIER_GLYPH[int(t)]} {TIER_NAME[int(t)]}")
+    df["tier_text"] = df["tier"].map(tier_text)
+    df["field_text"] = df["field"].astype(str)
+    df["volume_text"] = "volume (" + df["field_text"] + " bar)"
     return df
 
 
@@ -118,8 +139,7 @@ def price_chart(
     hover = alt.selection_point(
         fields=["d"], nearest=True, on="pointerover", clear="pointerout", empty=False
     )
-    tips = [
-        alt.Tooltip("d:T", title="Date", format="%a %d %b %Y"),
+    tips = prov_tips(
         *(
             [
                 alt.Tooltip("open:Q", title="Open", format=fmt),
@@ -130,9 +150,7 @@ def price_chart(
             else []
         ),
         alt.Tooltip("close:Q", title=str(df["field"].iloc[-1]).capitalize(), format=fmt),
-        alt.Tooltip("tier_text:N", title="Tier"),
-        alt.Tooltip("source:N", title="Source"),
-    ]
+    )
     catcher = base.mark_rule(strokeWidth=12, opacity=0).encode(tooltip=tips).add_params(hover)
     cross = base.mark_rule(color=theme.MUTED, strokeDash=[3, 3]).encode(
         opacity=alt.condition(hover, alt.value(0.9), alt.value(0.0))
@@ -156,7 +174,13 @@ def price_chart(
                     axis=alt.Axis(orient="right", format="~s", tickCount=2, title=None),
                 ),
                 color=colour,
-                tooltip=[alt.Tooltip("d:T", format="%d %b"), alt.Tooltip("volume:Q", format=",")],
+                tooltip=[
+                    alt.Tooltip("d:T", title="As of", format="%a %d %b %Y"),
+                    alt.Tooltip("volume:Q", title="Volume", format=","),
+                    alt.Tooltip("volume_text:N", title="Field"),
+                    alt.Tooltip("tier_text:N", title="Tier"),
+                    alt.Tooltip("source:N", title="Source"),
+                ],
             )
             .properties(height=70)
         )
@@ -178,20 +202,28 @@ def price_chart(
 
 def rebased(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -> pd.DataFrame:
     """Both series on their common dates, each set to 100 on the first of them (long format)."""
-    m = a[["d", "close"]].merge(b[["d", "close"]], on="d", suffixes=("_a", "_b"))
+    cols = ["d", "close", "tier", "source", "field"]
+    m = a[cols].merge(b[cols], on="d", suffixes=("_a", "_b"))
     if len(m) < 2:
-        return pd.DataFrame(columns=["d", "series", "index"])
+        return pd.DataFrame(columns=["d", "series", "index", "field_text", "tier_text", "source"])
     m = m.assign(
         a=m["close_a"] / m["close_a"].iloc[0] * 100, b=m["close_b"] / m["close_b"].iloc[0] * 100
     )
-    long = pd.concat(
-        [
-            pd.DataFrame({"d": m["d"], "series": name_a, "index": m["a"]}),
-            pd.DataFrame({"d": m["d"], "series": name_b, "index": m["b"]}),
-        ],
-        ignore_index=True,
-    )
-    return long
+    first = f"{m['d'].iloc[0]:%d %b %Y}"
+
+    def leg(name: str, key: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "d": m["d"],
+                "series": name,
+                "index": m[key],
+                "field_text": m[f"field_{key}"].astype(str) + f" rebased to 100 on {first}",
+                "tier_text": m[f"tier_{key}"].map(tier_text),
+                "source": m[f"source_{key}"],
+            }
+        )
+
+    return pd.concat([leg(name_a, "a"), leg(name_b, "b")], ignore_index=True)
 
 
 def compare_chart(
@@ -229,11 +261,10 @@ def compare_chart(
     catcher = (
         base.mark_rule(strokeWidth=12, opacity=0)
         .encode(
-            tooltip=[
-                alt.Tooltip("d:T", format="%a %d %b %Y"),
-                "series:N",
+            tooltip=prov_tips(
+                alt.Tooltip("series:N", title="Series"),
                 alt.Tooltip("index:Q", title="Rebased (start = 100)", format=".2f"),
-            ]
+            )
         )
         .add_params(hover)
     )

@@ -37,7 +37,7 @@ def _kicker(title: str) -> None:
 ctx = _kit.context("Macro")
 try:
     snap = data.load_snapshot(ctx.config, ctx.hidden)
-    bars = data.load_series(ctx.config, macro.ALL_IDS, ctx.hidden)
+    bars = data.load_series(ctx.config, macro.ALL_IDS, ctx.hidden, macro.HISTORY_DAYS)
 except StorageError as exc:  # names missing variables, never their values
     st.error(f"Cannot read the data store: {exc}")
     st.stop()

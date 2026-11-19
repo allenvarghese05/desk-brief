@@ -7,9 +7,11 @@
 * CFTC net speculative positioning with its weekly date and week-on-week change.
 
 Provenance (spec 10.2, P-009, H9): every figure is printed through ``values.value_cell`` or
-``change_cell`` with its source, tier, date and what it is. Charts carry no figures: inline
-SVG curves are gridlines, lines and points only (T36's yield-curve rule), Altair charts hide
-their value axis, and each chart has a caption naming the series' sources, tiers and date span.
+``change_cell`` with its source, tier, date and what it is. Charts print no figures on the
+page: inline SVG curves are gridlines, lines and points only (T36's yield-curve rule) and
+Altair charts hide their value axis. An Altair hover tooltip does show a point's value, and
+always with the same provenance set as ``value_cell`` (as-of date, field, tier and source;
+``chart.prov_tips``). Each chart has a caption naming the series' sources, tiers and date span.
 Bars come from :func:`app.components.data.load_series`, which never reads a hidden tier, so
 hosted mode stays tier-1 free.
 
@@ -32,6 +34,7 @@ from itertools import pairwise
 import altair as alt
 import pandas as pd
 from app import theme
+from app.components.chart import prov_tips, tier_text
 from app.components.data import CURVE_TENORS
 from app.components.panels import SHORT, provenance_of
 from app.components.values import (
@@ -54,6 +57,8 @@ MIN_CORR = 20
 CORR_DAYS = 90
 #: a comparison point may sit this many days before its target (weekends, holidays)
 MAX_GAP_DAYS = 7
+#: calendar days of bars the page reads: the two-year history load (T53) plus a margin
+HISTORY_DAYS = 800
 
 #: VIX term structure: (instrument, tenor label, calendar days)
 VIX_TERM = (("VIX9D", "9D", 9), ("VIX", "30D", 30), ("VIX3M", "3M", 91), ("VIX6M", "6M", 182))
@@ -91,6 +96,7 @@ ALL_IDS: tuple[str, ...] = tuple(
     )
 )
 _WHAT = {"close": "close", "yield": "yield", "level": "level", "rate": "rate",
+         "spread": "10Y minus 2Y yield spread, bp",
          "net_position": "net speculative position", "open_interest": "open interest"}  # fmt: skip
 Bars = Mapping[str, pd.DataFrame]
 
@@ -126,7 +132,7 @@ def point(bars: pd.DataFrame, on_or_before: date | None = None) -> Point | None:
     sel = bars
     if on_or_before is not None:
         sel = bars[bars["d"].dt.date <= on_or_before]
-        if sel.empty or bars["d"].iloc[0].date() > on_or_before:
+        if sel.empty:  # the store starts after that date
             return None
     r = sel.iloc[-1]
     p = Point(r["d"].date(), float(r["close"]), int(r["tier"]), str(r["source"]), str(r["field"]))
@@ -320,19 +326,19 @@ _Y_AXIS = alt.Axis(labels=False, ticks=False, title=None, domain=False)
 
 
 def _tips(fmt: str) -> list[alt.Tooltip]:
-    return [
-        alt.Tooltip("d:T", title="Date", format="%a %d %b %Y"),
-        alt.Tooltip("series:N", title="Series"),
-        alt.Tooltip("value:Q", title="Value", format=fmt),
-        alt.Tooltip("tier_text:N", title="Tier"),
-        alt.Tooltip("source:N", title="Source"),
-    ]
+    """Hover text: the value with as-of date, field, tier and source (P-009)."""
+    return prov_tips(
+        alt.Tooltip("series:N", title="Series"), alt.Tooltip("value:Q", title="Value", format=fmt)
+    )
 
 
-def _long(df: pd.DataFrame, name: str) -> pd.DataFrame:
-    out = df[["d", "close", "tier", "source"]].rename(columns={"close": "value"}).copy()
+def _long(df: pd.DataFrame, name: str, field: str | None = None) -> pd.DataFrame:
+    """Chart rows with the provenance columns :func:`chart.prov_tips` needs; ``field`` names
+    a derived series (the 2s10s spread), else each row's stored field is used."""
+    out = df[["d", "close", "tier", "source", "field"]].rename(columns={"close": "value"}).copy()
     out["series"] = name
-    out["tier_text"] = out["tier"].map(lambda t: f"{TIER_GLYPH[int(t)]} {TIER_NAME[int(t)]}")
+    out["tier_text"] = out["tier"].map(tier_text)
+    out["field_text"] = field or out["field"].map(lambda f: _WHAT.get(str(f), str(f)))
     return out
 
 
@@ -674,26 +680,44 @@ def gold_series(bars: Bars) -> tuple[str, pd.DataFrame]:
     return GOLD_IDS[0], pd.DataFrame()
 
 
-def changes(bars: pd.DataFrame) -> pd.Series:
-    """Daily changes indexed by date: bp for yields and spreads (unit pct), log returns in %
-    for positive prices and levels, plain differences for anything that can be zero or below."""
-    if len(bars) < 2:
-        return pd.Series(dtype=float)
-    s = bars.set_index("d")["close"].astype(float)
-    if "unit" in bars and str(bars["unit"].iloc[-1]) == "pct":
+def _diff(levels: pd.Series, pct_unit: bool) -> pd.Series:
+    """Changes between consecutive levels: bp for yields and spreads (unit pct), log returns
+    in % for positive prices and levels, plain differences for anything that can be zero or
+    below."""
+    s = levels.astype(float)
+    if pct_unit:
         return s.diff().dropna() * 100
     if (s > 0).all():
         return s.apply(math.log).diff().dropna() * 100
     return s.diff().dropna()
 
 
+def _pct_unit(bars: pd.DataFrame) -> bool:
+    return "unit" in bars and not bars.empty and str(bars["unit"].iloc[-1]) == "pct"
+
+
+def changes(bars: pd.DataFrame) -> pd.Series:
+    """Daily changes of one series, indexed by date (see :func:`_diff`)."""
+    if len(bars) < 2:
+        return pd.Series(dtype=float)
+    return _diff(bars.set_index("d")["close"], _pct_unit(bars))
+
+
 def correlation(a: pd.DataFrame, b: pd.DataFrame, since: date) -> tuple[float, int] | None:
     """Correlation of daily changes on common dates on or after ``since``; ``None`` below
-    :data:`MIN_CORR` common changes or when either side does not move."""
-    ca, cb = changes(a), changes(b)
-    if ca.empty or cb.empty:  # a single stored day has no change to correlate
+    :data:`MIN_CORR` common changes or when either side does not move.
+
+    Levels are joined on their common dates first and only then differenced, so a day one
+    series lacks never pairs its two-day change with the other's one-day change."""
+    if len(a) < 2 or len(b) < 2:  # a single stored day has no change to correlate
         return None
-    m = pd.concat([ca, cb], axis=1, join="inner").dropna()
+    lv = a[["d", "close"]].merge(b[["d", "close"]], on="d", suffixes=("_a", "_b"))
+    lv = lv.sort_values("d").set_index("d")
+    if len(lv) < 2:
+        return None
+    m = pd.concat(
+        [_diff(lv["close_a"], _pct_unit(a)), _diff(lv["close_b"], _pct_unit(b))], axis=1
+    ).dropna()
     m = m[m.index >= pd.Timestamp(since)]
     if len(m) < MIN_CORR or m.iloc[:, 0].std() == 0 or m.iloc[:, 1].std() == 0:
         return None

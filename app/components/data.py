@@ -279,19 +279,27 @@ def build_series(
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_series(
-    _config: Config, backend: str, where: str, ids: tuple[str, ...], hidden: frozenset[int]
+    _config: Config,
+    backend: str,
+    where: str,
+    ids: tuple[str, ...],
+    hidden: frozenset[int],
+    days: int,
 ) -> dict[str, pd.DataFrame]:
     with shared_connection(_config) as conn:
-        return build_series(conn, current_time(), ids, hidden)
+        return build_series(conn, current_time(), ids, hidden, days)
 
 
 def load_series(
-    config: Config, instrument_ids: tuple[str, ...], hidden: frozenset[int]
+    config: Config,
+    instrument_ids: tuple[str, ...],
+    hidden: frozenset[int],
+    days: int = BAR_DAYS,
 ) -> dict[str, pd.DataFrame]:
-    """Daily (or weekly) bars of several instruments, cached 60 s per mode; one shared
-    connection, never a new one per click."""
+    """Daily (or weekly) bars of several instruments over ``days`` calendar days, cached 60 s
+    per mode; one shared connection, never a new one per click."""
     return _cached_series(
-        config, config.storage.backend, _where(config), tuple(instrument_ids), hidden
+        config, config.storage.backend, _where(config), tuple(instrument_ids), hidden, days
     )
 
 

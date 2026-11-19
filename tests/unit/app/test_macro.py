@@ -8,6 +8,7 @@ random walks ending Friday 13 Nov, weekly CFTC rows as of Tuesdays). No R2, no n
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from streamlit.testing.v1 import AppTest
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # macro_synth sits next to this file
 from macro_synth import business_days, macro_rows, tier1_spy
 
-from brief_synth import MON, MON_0700, World, monday_rows
+from brief_synth import FRI, MON, MON_0700, World, daily, monday_rows
 
 REPO = Path(__file__).resolve().parents[3]
 PAGE = REPO / "app" / "pages" / "2_Macro.py"
@@ -49,9 +50,17 @@ def run_macro(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunMacro:
     st.cache_data.clear()
     n = iter(range(100))
 
-    def run(mode: str | None = "hosted", rows: list[dict[str, Any]] | None = None) -> AppTest:
+    def run(
+        mode: str | None = "hosted",
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        base: bool = True,
+    ) -> AppTest:
+        """``base=False`` leaves out ``brief_synth.monday_rows`` (fixed-value tests)."""
         w = World(tmp_path / f"w{next(n)}")
-        w.observations(monday_rows() + (macro_rows(120, 12) if rows is None else rows))
+        w.observations(
+            (monday_rows() if base else []) + (macro_rows(120, 12) if rows is None else rows)
+        )
         w.dq(MON, [("fresh_a", "pass", None, None)])
         w.run(MON)
         text = (REPO / "config.yaml").read_text(encoding="utf-8")
@@ -323,3 +332,151 @@ def test_macro_rows_cover_the_page() -> None:
     stored = {r["instrument_id"] for r in macro_rows(3, 1)}
     assert set(ALL_IDS) - stored == {"GLD"}  # gold comes from futures in the fixture
     assert len(business_days(3)) == 3
+
+
+# ---------------------------------------------------------------------------
+# review round 1: tooltip provenance, aligned changes, two-year window, fixed values
+# ---------------------------------------------------------------------------
+
+_PROV_TITLES = {"As of", "Field", "Tier", "Source"}
+
+
+def _tooltips(node: Any) -> list[list[dict[str, Any]]]:
+    """Every tooltip list anywhere in a Vega-Lite spec."""
+    found: list[list[dict[str, Any]]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "tooltip" and isinstance(value, list):
+                found.append(value)
+            else:
+                found += _tooltips(value)
+    elif isinstance(node, list):
+        for item in node:
+            found += _tooltips(item)
+    return found
+
+
+def _assert_tooltips_carry_provenance(spec: dict[str, Any]) -> int:
+    """Each tooltip that shows a number also names its as-of date, field, tier and source."""
+    shown = 0
+    for tips in _tooltips(spec):
+        if not any(t.get("type") == "quantitative" for t in tips):
+            continue
+        shown += 1
+        titles = {t.get("title") for t in tips}
+        assert titles >= _PROV_TITLES, titles
+    return shown
+
+
+def test_every_page_tooltip_with_a_value_carries_provenance(run_macro: RunMacro) -> None:
+    at = run_macro("local")
+    specs = [json.loads(el.proto.spec) for el in at.get("vega_lite_chart")]
+    assert len(specs) == 5
+    assert sum(_assert_tooltips_carry_provenance(s) for s in specs) >= 6
+
+
+def test_home_chart_tooltips_carry_provenance() -> None:
+    """T36's price, volume and compare charts follow the same rule."""
+    from app.components import chart
+
+    days = pd.to_datetime([date(2026, 11, 2) + timedelta(days=i) for i in range(5)])
+    bars = pd.DataFrame(
+        {
+            "d": days,
+            "open": [10.0, 11, 12, 13, 14],
+            "high": [11.0, 12, 13, 14, 15],
+            "low": [9.0, 10, 11, 12, 13],
+            "close": [10.5, 11.5, 12.5, 13.5, 14.5],
+            "volume": [100.0, 200, 300, 400, 500],
+            "tier": 2,
+            "source": "yahoo",
+            "field": "close",
+            "unit": "USD",
+            "interval": "1d",
+        }
+    )
+    for style in (chart.CANDLES, chart.LINE):
+        spec = chart.price_chart(bars, style=style, last=14.6).to_dict()
+        assert _assert_tooltips_carry_provenance(spec) == 2  # price and volume
+    long = chart.rebased(bars, bars.assign(source="stooq", tier=3), "A", "B")
+    assert {"field_text", "tier_text", "source"} <= set(long.columns)
+    assert _assert_tooltips_carry_provenance(chart.compare_chart(long, "A", "B").to_dict()) == 1
+    assert "rebased to 100 on 02 Nov 2026" in long["field_text"].iloc[0]
+
+
+def test_correlation_joins_levels_before_differencing() -> None:
+    """A day missing from one series must not pair a two-day change with a one-day one."""
+    from app.components.macro import correlation
+
+    n = 45
+    a_vals = [100.0 + (5 if i % 2 else 0) + i * 0.01 for i in range(n)]
+    a = _bars(a_vals)
+    # b tracks a exactly, but every third day is missing from b
+    b = _bars(a_vals).iloc[[i for i in range(n) if i % 3 != 1]].reset_index(drop=True)
+    corr = correlation(a, b, date(2026, 9, 1))
+    assert corr is not None
+    assert corr[0] == pytest.approx(1.0)  # differencing first gives about 0.70 here
+    assert corr[1] == len(b) - 1
+
+
+def test_page_reads_the_two_year_history(run_macro: RunMacro) -> None:
+    from datetime import datetime
+
+    at = run_macro("hosted", rows=macro_rows(520, 100))
+    cap = next(c.value for c in at.caption if c.value.startswith("Daily 2s10s spread"))
+    start = re.search(r"(\d{1,2} \w{3} \d{4}) to \d{1,2} \w{3} \d{4}\.$", cap)
+    assert start is not None, cap
+    first = datetime.strptime(start.group(1), "%d %b %Y").date()
+    assert (FRI - first).days > 700  # beyond BAR_DAYS (400): the T53 load shows
+
+
+def _fixed_rows() -> list[dict[str, Any]]:
+    """Known values: 10Y rises 1bp a business day, 2Y is flat, gold steps from 2,000 to 2,100
+    after 14 Oct, QQQ is SPY doubled and HY OAS moves against SPY."""
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    rows: list[dict[str, Any]] = []
+    for i, d in enumerate(business_days(60)):
+        zig = 5.0 if i % 2 else 0.0
+        spy = 500.0 + zig + i * 0.5
+        rows += [
+            daily("UST_10Y", d, round(4.00 + 0.01 * i, 4), **tsy),
+            daily("UST_2Y", d, 4.00, **tsy),
+            daily(
+                "GOLD_F",
+                d,
+                2000.0 if d <= date(2026, 10, 14) else 2100.0,
+                tier=2,
+                source="yahoo",
+                dataset="history",
+            ),
+            daily("SPY", d, spy),
+            daily("QQQ", d, spy * 2),
+            daily(
+                "HY_OAS",
+                d,
+                round(3.00 - zig / 100, 4),
+                source="fred",
+                dataset="series",
+                field="rate",
+                unit="pct",
+            ),
+        ]
+    return rows
+
+
+def test_fixed_values_on_the_page(run_macro: RunMacro) -> None:
+    text = page(run_macro("hosted", rows=_fixed_rows(), base=False))
+    row10 = re.search(r'<tr><td><a href="./\?id=UST_10Y".*?</tr>', text, flags=re.S)
+    row2 = re.search(r'<tr><td><a href="./\?id=UST_2Y".*?</tr>', text, flags=re.S)
+    assert row10 is not None
+    assert row2 is not None
+    assert '<span class="db-val db-up">+5bp</span>' in row10.group(0)  # vs 1W: 5 days x 1bp
+    assert '<span class="db-val db-up">+22bp</span>' in row10.group(0)  # vs 1M: 22 days
+    assert '<span class="db-val db-flat">0bp</span>' in row2.group(0)
+    gold = next(c for c in FIG.findall(text) if "since the close of 14 Oct 2026" in c)
+    assert '<span class="db-val db-up">+5.0%</span>' in gold
+    cells = FIG.findall(text)
+    spy_qqq = next(c for c in cells if "SPY vs QQQ" in c)
+    assert '<span class="db-val">+1.00</span>' in spy_qqq
+    spy_hy = next(c for c in cells if "SPY vs HY OAS" in c)
+    assert re.search(r'<span class="db-val">−0\.9\d|<span class="db-val">−1\.00', spy_hy)
