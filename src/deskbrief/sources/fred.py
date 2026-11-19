@@ -118,6 +118,11 @@ class FredSource:
     # -- plan -----------------------------------------------------------------------------
 
     def plan(self, job: JobKind, ctx: RunContext) -> list[FetchRequest]:
+        """The per-run requests: the last ``OBSERVATION_LIMIT`` observations of each series.
+
+        Not for the one-time ``history`` job (P-020, card T53): 10 observations per series
+        cannot cover a multi-year range. That job must call :meth:`plan_range`.
+        """
         if job in (JobKind.INTRADAY, JobKind.REBUILD):
             return []
         extra = {"observation_end": ctx.target_date.isoformat()} if job is JobKind.BACKFILL else {}
