@@ -632,8 +632,10 @@ Rules for the phase:
 - **Spec:** the spec text for P-018 to P-021 is written by T53 alone. Until then the rulings take precedence (P-020).
 - **Range support:** each source card implements `plan_range` for its own source (P-020), with a test over a multi-month range.
 
+Changelog: T45's Owns widened to the value readers, and T43 names `scheduled_for_from_env`, after the [PR #73 confirmation review, findings 1–3](https://github.com/allenvarghese05/desk-brief/pull/73).
+
 #### T43 — Cloudflare Worker cron trigger (P-018)
-- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README with the deploy, secret and rotation commands), the `fire` and `slot` `workflow_dispatch` inputs and their mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` in `src/deskbrief/pipeline/jobs.py`, the `slot` → `scheduled_for` mapping and the `duplicate fire` skip in `src/deskbrief/pipeline/runner.py`, tests.
+- **Depends:** none · **Owns:** `infra/cron-worker/` (Worker script, `wrangler.toml` without secrets, README with the deploy, secret and rotation commands), the `fire` and `slot` `workflow_dispatch` inputs and their mapping in `.github/workflows/{morning,intraday,eod,sla}.yml`, `trigger_from_env` and `scheduled_for_from_env` (which prefers `DESKBRIEF_SLOT`) in `src/deskbrief/pipeline/jobs.py`, the `slot` → `scheduled_for` mapping and the `duplicate fire` skip in `src/deskbrief/pipeline/runner.py`, tests.
 - Acceptance:
   - **One trigger:** the Worker has a single Cron Trigger (`* * * * *`) and a UTC schedule table in code. A test parses the four workflows' `schedule:` crons and fails if the table differs.
   - **Inputs:** each dispatch passes `fire` (the exact cron string) and `slot` (the scheduled minute in UTC, computed from the table, not from when the Worker ran). The workflows read both through `env:`, never `${{ }}` inside `run:`. `GITHUB_EVENT_SCHEDULE` gets `fire` (so `intraday.yml`'s literal `15 12 * * 1-5` branch still works) and a separate `DESKBRIEF_SLOT` gets `slot`.
@@ -664,13 +666,20 @@ Rules for the phase:
   - `deskbrief run history` exits with the message above and runs no pipeline step.
   - No source or check behaviour changes, and existing data still validates.
 
-#### T45 — Weekly cadence wherever code assumes daily or monthly (P-021)
-- **Depends:** T44 · **Owns:** `src/deskbrief/checks/freshness.py`, `src/deskbrief/checks/completeness.py`, `src/deskbrief/checks/feed_completeness.py`, the `("1d", "1mo")` special cases in `src/deskbrief/report/model.py` and `app/components/tearsheet.py`, tests.
+#### T45 — Weekly cadence and the new fields, wherever code reads values (P-021)
+- **Depends:** T44 · **Owns:**
+  - Checks: `src/deskbrief/checks/freshness.py`, `src/deskbrief/checks/completeness.py`, `src/deskbrief/checks/feed_completeness.py`.
+  - The value readers: `VALUE_FIELDS`, `VALUE_INTERVALS`, `OFFICIAL_INTERVALS` and `field_label` in `src/deskbrief/query.py`; `DAILY_CLOSE_FIELDS` in `src/deskbrief/store/duck.py`.
+  - The `("1d", "1mo")` special cases in `src/deskbrief/report/model.py`.
+  - In the dashboard: `_MAIN_RANK` and the `build_bars` field list in `app/components/data.py`, and the interval cases and `_FIELD_TEXT` in `app/components/tearsheet.py`.
+  - Tests.
 - Acceptance:
   - A `1w` dataset's freshness expects a release on its `DatasetSchedule.release_weekday` (T44); a holiday-delayed release is `skip`, not `fail`.
   - Completeness counts weeks.
   - The report and the dashboard show a weekly value's date without a time and label its change as week-on-week.
-  - Tests use synthetic weekly rows.
+  - End to end: a synthetic store with a `level` row (daily) and a `1w` row each yields a value, a baseline change and a P-009 label in `BriefModel`, and bars in `build_bars`. `net_position` and `open_interest` read as values with labels "net speculative position" and "open interest".
+  - Weekly series get no anomaly check (`checks/anomaly.py` reads `1d` only); this is stated in the known limits.
+  - Tests use synthetic rows only.
 
 #### T46 — FRED rates, dollar, credit and conditions (P-021a)
 - **Depends:** T44, T45 · **Owns:** `src/deskbrief/sources/fred.py` (`SERIES_SPECS` entries and `plan_range`), the FRED feeds and new instruments in `config.yaml`, `docs/sources/fred.md`, tests.
