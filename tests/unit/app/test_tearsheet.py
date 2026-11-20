@@ -13,6 +13,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -207,7 +208,14 @@ def test_shared_connection_is_reused_then_replaced_and_closed(
         assert first.execute("SELECT 1").fetchone() == (1,)
     with data.shared_connection(config) as again:
         assert again is first  # within the minute: same connection
+    # T56: rebuilt only when the listing changed, by a background check (old one serves)
+    World(Path(config.storage.local_root).parent).observations(
+        [daily("SPY", date(2026, 11, 2), 1.0, **YH)]
+    )
     clock[0] += data.CACHE_TTL_SECONDS + 1
+    with data.shared_connection(config) as during:
+        assert during is first  # the check that starts here never blocks this query
+    assert data.wait_for_refresh(config)
     with data.shared_connection(config) as fresh:
         assert fresh is not first
         assert fresh.execute("SELECT 1").fetchone() == (1,)

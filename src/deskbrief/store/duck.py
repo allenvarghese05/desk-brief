@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import duckdb
@@ -227,32 +227,52 @@ def connect(
     config: Config,
     *,
     env: Mapping[str, str] | None = None,
+    skip_views: Collection[str] = (),
+    listing: Mapping[str, tuple[str, ...]] | None = None,
+    clean_version: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Open an in-memory DuckDB with all §7.3 views over ``store_or_root``.
 
     ``store_or_root`` is a ``LocalBackend`` / ``R2Backend``, or a directory (a local root).
     ``env`` supplies the ``R2_*`` variables for R2 (default: ``os.environ``).
+
+    Dashboard connection options (T56; the defaults keep the pipeline's behaviour):
+
+    * ``skip_views``: views created empty and typed without listing or reading their files.
+      When every ``DAILY_TABLES`` view is skipped, R2 needs no ``httpfs`` or secret at all.
+    * ``listing``: the keys of each append-only table (as :func:`table_keys` returns them),
+      already listed by the caller, so the connection lists nothing again and is built from
+      exactly the listing the caller fingerprinted. A table missing from it is listed here.
+    * ``clean_version``: the ``clean/_CURRENT`` version the listing was taken under.
     """
     store = LocalBackend(store_or_root) if isinstance(store_or_root, str | Path) else store_or_root
+    reads_files = any(t in DAILY_TABLES and v not in skip_views for v, t in TABLE_VIEWS.items())
 
     conn = duckdb.connect(":memory:")
     conn.execute("SET TimeZone = 'UTC'")
     if isinstance(store, LocalBackend):
         base = store.root.as_posix()
     elif isinstance(store, R2Backend):
-        _configure_r2(conn, os.environ if env is None else env)
+        if reads_files:
+            _configure_r2(conn, os.environ if env is None else env)
         base = f"r2://{store.bucket}"
     else:
         raise TypeError(f"duck.connect supports LocalBackend and R2Backend, not {type(store)!r}")
 
-    version = current_clean_version(store)
+    version = clean_version or current_clean_version(store)
+    listed = listing or {}
     for view, table in TABLE_VIEWS.items():
-        if table in DAILY_TABLES:  # overwritten in place: always read the files themselves
+        if view in skip_views:
+            source = table_source_sql(table, base, version, has_files=False)
+        elif table in DAILY_TABLES:  # overwritten in place: always read the files themselves
             source = table_source_sql(
                 table, base, version, has_files=_has_files(store, table, version)
             )
         else:  # append-only: read once per process, then copied in (store.table_cache)
-            data = load_table(store, table, version, table_keys(store, table, version))
+            keys = listed.get(table)
+            if keys is None:
+                keys = table_keys(store, table, version)
+            data = load_table(store, table, version, keys)
             name = _q(f"_cache_{view}")
             conn.register("_cache_in", data)
             conn.execute(f"CREATE TEMP TABLE {name} AS SELECT * FROM _cache_in")  # noqa: S608
@@ -265,4 +285,11 @@ def connect(
     return conn
 
 
-__all__ = ["DAILY_CLOSE_FIELDS", "TABLE_VIEWS", "connect", "r2_secret_sql", "table_source_sql"]
+__all__ = [
+    "DAILY_CLOSE_FIELDS",
+    "TABLE_VIEWS",
+    "connect",
+    "r2_secret_sql",
+    "table_keys",
+    "table_source_sql",
+]

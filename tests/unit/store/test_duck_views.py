@@ -476,3 +476,54 @@ def test_table_source_sql_uses_r2_glob_when_files_exist() -> None:
     assert "hive_partitioning = false" in sql
     card = duck.table_source_sql("scorecard_daily", "r2://bkt", "v1", has_files=True)
     assert "r2://bkt/derived/scorecard_daily/date=*.parquet" in card
+
+
+# ---------------------------------------------------------------------------
+# T56: dashboard connection options
+# ---------------------------------------------------------------------------
+
+
+class ListingSpy(LocalBackend):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.listed: list[str] = []
+
+    def list(self, prefix: str) -> list[str]:
+        self.listed.append(prefix)
+        return super().list(prefix)
+
+
+def test_skipped_view_is_empty_typed_and_never_listed(tmp_path: Path, config: Config) -> None:
+    store = ListingSpy(tmp_path / "data")
+    Datasets(store).append(
+        "scorecard_daily", empty_frame("scorecard_daily"), make_ctx(config, store), D
+    )
+    conn = connect(store, config, skip_views={"scorecard"})
+    names = [d[0] for d in conn.execute("SELECT * FROM scorecard").description]
+    assert names == list(columns("scorecard_daily"))
+    assert rows_of(conn, "SELECT count(*) FROM scorecard") == [(0,)]
+    assert not any("scorecard_daily" in p for p in store.listed)
+
+
+def test_listing_option_lists_nothing_again(tmp_path: Path, config: Config) -> None:
+    store = ListingSpy(tmp_path / "data")
+    write_obs(store, config, "R1", [obs_row(value=1.0)])
+    listing = {t: duck.table_keys(store, t, "v1") for v, t in duck.TABLE_VIEWS.items()
+               if v != "scorecard"}  # fmt: skip
+    write_obs(store, config, "R2", [obs_row(value=2.0, fetch_id="F2")])  # not in the listing
+    store.listed.clear()
+    conn = connect(store, config, skip_views={"scorecard"}, listing=listing, clean_version="v1")
+    assert store.listed == []
+    assert rows_of(conn, "SELECT value FROM obs_all") == [(1.0,)]  # exactly the given listing
+
+
+def test_r2_dashboard_connection_needs_no_httpfs(
+    fake_s3: FakeS3, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: object) -> None:
+        raise AssertionError("httpfs configured")
+
+    monkeypatch.setattr(duck, "_configure_r2", boom)
+    conn = connect(R2Backend("bkt", fake_s3), config, env={}, skip_views={"scorecard"})
+    assert rows_of(conn, "SELECT count(*) FROM obs_all") == [(0,)]
+    assert rows_of(conn, "SELECT count(*) FROM scorecard") == [(0,)]
