@@ -326,12 +326,14 @@ instruments:
       - {source: yahoo, dataset: history, symbol: ^VIX, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VIX, tier: 3}
   # T47 (P-021b): Cboe daily closes, one CSV per symbol (sources/cboe.py SYMBOL_SPECS).
+  # T55: a Yahoo quote (tier 2, like ^VIX) gives each an overnight move; live probe in the T55 PR.
   - id: VIX9D
     name: Cboe S&P 500 9-Day Volatility Index
     asset_class: vol
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VIX9D, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VIX9D, tier: 3}
   - id: VIX3M
     name: Cboe S&P 500 3-Month Volatility Index
@@ -339,6 +341,7 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VIX3M, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VIX3M, tier: 3}
   - id: VIX6M
     name: Cboe S&P 500 6-Month Volatility Index
@@ -346,6 +349,7 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VIX6M, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VIX6M, tier: 3}
   - id: VXN
     name: Cboe Nasdaq-100 Volatility Index
@@ -353,6 +357,7 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^VXN, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: VXN, tier: 3}
   - id: GVZ
     name: Cboe Gold ETF Volatility Index
@@ -360,6 +365,7 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^GVZ, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: GVZ, tier: 3}
   - id: SKEW
     name: Cboe SKEW Index
@@ -367,6 +373,7 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
+      - {source: yahoo, dataset: quote, symbol: ^SKEW, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: SKEW, tier: 3}
 
   # ---------------- Overseas indices (overnight) ----------------

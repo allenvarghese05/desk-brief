@@ -66,9 +66,11 @@ day's row by 20:00 ET; before that freshness is `skip`. The exact posting time w
 if live runs show it later than 20:00 ET, the freshness entry should move.
 
 In the morning brief a Cboe close dated the previous NYSE day shows its value with "no move yet"
-(`query.overnight_changes`, price family). VIX gets its overnight move from the Yahoo quote; the
-six new indices have no intraday feed, so their brief rows show the value and date only. The
-dashboard bars show the full daily series.
+(`query.overnight_changes`, price family). VIX gets its overnight move from the Yahoo quote
+(`^VIX`). Since T55 the six other indices have one too: a tier-2 Yahoo `quote` feed each (`^VIX9D`,
+`^VIX3M`, `^VIX6M`, `^VXN`, `^GVZ`, `^SKEW`). The implementer's live probe on 2026-11-20 at
+00:28 UTC, through `YahooSource._quote`, got a USD price for all six (19 Nov regular-market times
+21:02 to 22:00 UTC). The dashboard bars show the full daily series.
 
 ## Live probe (2026-11-19, T47)
 
@@ -98,6 +100,25 @@ Owner check (exact counts, min and max; keyless, prints no body). Run from the r
 ```bash
 PYTHONPATH=src .venv/bin/python -c 'from datetime import date; from deskbrief.config import load_config; from deskbrief.models import JobKind, RunContext, Trigger; from deskbrief.sources.cboe import CboeSource; from deskbrief.sources.http import DefaultHttpClient; from deskbrief.timeutil import utc_now; c = load_config("config.yaml"); s = CboeSource(c); h = DefaultHttpClient(c.sources); e = date.today(); x = RunContext(run_id="probe", job=JobKind.HISTORY, trigger=Trigger.MANUAL, target_date=e, now_utc=utc_now(), git_sha="-", config_hash="-", config=c, store=None); [print(r.symbols[0], w.http_status, w.error or "", *((len(d), d.sort_values("as_of")["as_of"].iloc[-1].tz_convert("America/New_York").date(), d.sort_values("as_of")["value"].iloc[-1], d["value"].min(), d["value"].max()) if (d := (s.parse(w) if w.ok else None)) is not None else ())) for r in s.plan_range(date(1990, 1, 1), e, x) for w in [s.fetch(r, h)]]'
 ```
+
+### Owner run of that check (2026-11-19 15:29 ET, exact)
+
+Run by the owner at the T47 head and posted in
+[the PR #78 comment](https://github.com/allenvarghese05/desk-brief/pull/78#issuecomment-7021366889).
+These values replace the estimates above. Every file came from `cdn-api.cboe.com` with no bot
+check. At 15:29 ET each file still ended at the prior trading day, which fits an after-close
+update; the 20:00 ET freshness time is still to be confirmed by the first scheduled runs. Every
+value is within the `index_pts` validity bounds.
+
+| Symbol | HTTP | Rows | Newest (ET date, close) | Min | Max |
+|---|---|---|---|---|---|
+| VIX | 200 | 9,319 | 2026-11-18, 24.56 | 9.14 | 82.69 |
+| VIX9D | 200 | 3,993 | 2026-11-18, 23.95 | 7.10 | 106.66 |
+| VIX3M | 200 | 4,319 | 2026-11-18, 24.29 | 11.85 | 72.98 |
+| VIX6M | 200 | 4,751 | 2026-11-18, 24.75 | 13.75 | 61.47 |
+| VXN | 200 | 4,325 | 2026-11-18, 33.12 | 10.31 | 80.08 |
+| GVZ | 200 | 4,317 | 2026-11-18, 28.04 | 8.88 | 48.98 |
+| SKEW | 200 | 9,273 | 2026-11-18, 142.84 | 101.23 | 183.12 |
 
 ## Live probe (2026-11-18, T25)
 

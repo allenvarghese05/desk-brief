@@ -113,7 +113,9 @@ def _weekly_row(**over: Any) -> dict[str, Any]:
     return row
 
 
-def test_weekly_row_validates_at_midnight_et_of_reference_date() -> None:
+def test_schema_accepts_a_weekly_row_dated_midnight_et() -> None:
+    """Schema acceptance only: the fixture is built at 00:00 ET, so this does not check that
+    any source dates a weekly row to its reference day."""
     frame = pd.DataFrame([_weekly_row()])
     OBS_SCHEMA.validate(frame)
     assert et_date(AS_OF.to_pydatetime()) == REF

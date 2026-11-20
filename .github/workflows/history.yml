@@ -40,14 +40,10 @@ jobs:
   history:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Secrets are set on the "Run history" step only (T55), so checkout, uv sync and input
+    # validation never see them. The validated inputs stay job-wide.
     env:
       PYTHONUNBUFFERED: "1"
-      DESKBRIEF_STORAGE_BACKEND: r2
-      DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       IN_START: ${{ inputs.start }}
       IN_END: ${{ inputs.end }}
       IN_SOURCES: ${{ inputs.sources }}
@@ -78,6 +74,13 @@ jobs:
             echo "::error::dry_run must be true or false"; exit 2
           fi
       - name: Run history
+        env:
+          DESKBRIEF_STORAGE_BACKEND: r2
+          DESKBRIEF_STORAGE_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           args=()
           if [ -n "$IN_START" ]; then args+=(--start "$IN_START"); fi

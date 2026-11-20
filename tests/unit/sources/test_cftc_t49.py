@@ -389,6 +389,25 @@ def test_report_model_shows_positions_with_week_on_week_change(
     gc = where["COT_GC_NET"][1]
     assert gc.change is not None and gc.change.status == "ok"
     assert gc.change.change == pytest.approx(150.0)  # week on week: +100 long, -50 short
+    assert gc.change_text == "+150 contracts"  # whole contracts, signed
+
+
+def test_report_model_change_text_groups_a_negative_change(
+    tmp_path: Path, src: CftcSource, config: Config
+) -> None:
+    """The newest gold report with 1,384 fewer longs: +150 becomes -1,234, with a true minus."""
+    items = rows()
+    newest = max(
+        (r for r in items if r["cftc_contract_market_code"] == "088691"),
+        key=lambda r: r["report_date_as_yyyy_mm_dd"],
+    )
+    newest["noncomm_positions_long_all"] = str(int(newest["noncomm_positions_long_all"]) - 1384)
+    s = LocalBackend(tmp_path / "data")
+    write(s, config, _obs(src.parse(raw_for(body(items)))))
+    model = BriefModel.from_store(connect(s, config), config, TARGET, NOW)
+    gc = next(r for sec in model.sections for r in sec.rows if r.instrument_id == "COT_GC_NET")
+    assert gc.change is not None and gc.change.change == pytest.approx(-1234.0)
+    assert gc.change_text == "\u22121,234 contracts"
 
 
 @pytest.mark.parametrize("iid", CARD)
