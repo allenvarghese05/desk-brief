@@ -1,13 +1,18 @@
 """T25c: the append-only tables behind the DuckDB views are read once per process.
 
+T56: loads are incremental (one new file = one read), a compacted partition is evicted and read
+again, and loads are single-flight per table.
+
 SYNTHETIC FIXTURE: every observation is made up (``store_fakes.obs_row``).
 """
 
 from __future__ import annotations
 
 import io
-from datetime import date
+import threading
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 import pyarrow as pa  # type: ignore[import-untyped]
@@ -19,7 +24,7 @@ from deskbrief.config import Config
 from deskbrief.schemas import to_frame
 from deskbrief.store import table_cache
 from deskbrief.store.backend import table_key
-from deskbrief.store.compaction import compact_partition
+from deskbrief.store.compaction import compact_day, compact_partition
 from deskbrief.store.datasets import Datasets
 from deskbrief.store.duck import connect, table_keys
 from deskbrief.store.local import LocalBackend
@@ -140,3 +145,217 @@ def test_scorecard_daily_is_not_cached(store: CountingBackend, config: Config) -
     cached = {ident[2] for ident in table_cache._cache}
     assert "observations" in cached
     assert "scorecard_daily" not in cached
+
+
+# ---------------------------------------------------------------------------
+# T56: incremental, compaction-safe, single-flight
+# ---------------------------------------------------------------------------
+
+D2 = date(2026, 11, 12)
+
+
+def load(store: LocalBackend) -> pa.Table:
+    return table_cache.load_table(
+        store, "observations", "v1", table_keys(store, "observations", "v1")
+    )
+
+
+def fresh_load(store: LocalBackend) -> pa.Table:
+    """What a process with an empty cache reads (the reference for every incremental load)."""
+    return table_cache.read_files(store, "observations", table_keys(store, "observations", "v1"))
+
+
+def write_on(store: LocalBackend, config: Config, run_id: str, part: date, value: float) -> None:
+    as_of = datetime.combine(part, time(5), tzinfo=UTC)  # 00:00 ET, so the row fits `part`
+    rows = [obs_row(run_id=run_id, fetch_id=f"F-{run_id}", value=value, as_of=as_of,
+                    ingested_at=as_of + timedelta(hours=15))]  # fmt: skip
+    ctx = make_ctx(config, store, run_id=run_id)
+    Datasets(store).append("observations", to_frame("observations", rows), ctx, part)
+
+
+def sorted_rows(t: pa.Table) -> list[tuple[Any, ...]]:
+    return sorted(tuple(r.values()) for r in t.to_pylist())
+
+
+def test_one_new_file_downloads_exactly_that_file(store: CountingBackend, config: Config) -> None:
+    for i in range(4):
+        write(store, config, f"R{i}", value=float(i))
+    load(store)
+    store.reads.clear()
+    write(store, config, "R9", value=9.0)
+    new_key = table_key(table="observations", part_date=D, run_id="R9")
+    got = load(store)
+    assert obs_reads(store) == [new_key]
+    assert got.equals(fresh_load(store))  # same rows, same order as a fresh read
+
+
+def test_unchanged_listing_downloads_nothing_and_returns_the_same_table(
+    store: CountingBackend, config: Config
+) -> None:
+    write(store, config, "R1", value=1.0)
+    first = load(store)
+    store.reads.clear()
+    assert load(store) is first
+    assert obs_reads(store) == []
+
+
+def test_a_compacted_partition_is_evicted_and_read_again(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard is another process: compaction's own ``invalidate()`` never reaches it.
+    Only the partition whose keys disappeared is read again; other partitions stay cached."""
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)  # as seen from another process
+    write_on(store, config, "R1", D, 1.0)
+    write_on(store, config, "R2", D, 2.0)
+    write_on(store, config, "R1", D2, 10.0)
+    write_on(store, config, "R2", D2, 20.0)
+    load(store)
+    compact_partition(store, "observations", D)  # D: R1 + R2 -> run=compacted-2026-11-13
+    store.reads.clear()
+    got = load(store)
+    compacted = table_key(table="observations", part_date=D, run_id=f"compacted-{D}")
+    assert obs_reads(store) == [compacted]  # D2's files are not read again
+    assert got.num_rows == fresh_load(store).num_rows == 4
+    assert sorted_rows(got) == sorted_rows(fresh_load(store))  # no duplicate, no stale row
+
+
+def test_a_late_file_merged_into_an_existing_compacted_file_is_reread(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``compacted-D`` is rewritten in place; the merged late file disappearing evicts D."""
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)
+    write_on(store, config, "R1", D, 1.0)
+    write_on(store, config, "R2", D, 2.0)
+    compact_day(store, D, tables=("observations",))
+    write_on(store, config, "R3", D, 3.0)
+    assert sorted(r["value"] for r in load(store).to_pylist()) == [1.0, 2.0, 3.0]
+    compact_day(store, D, tables=("observations",))  # R3 merged into compacted-D, R3 deleted
+    got = load(store)
+    assert sorted(r["value"] for r in got.to_pylist()) == [1.0, 2.0, 3.0]
+    assert sorted_rows(got) == sorted_rows(fresh_load(store))
+
+
+def test_compaction_in_this_process_still_invalidates_everything(
+    store: CountingBackend, config: Config
+) -> None:
+    write_on(store, config, "R1", D, 1.0)
+    write_on(store, config, "R2", D, 2.0)
+    write_on(store, config, "R1", D2, 10.0)
+    load(store)
+    compact_partition(store, "observations", D)
+    assert table_cache._cache == {}
+
+
+class SlowBackend(CountingBackend):
+    """Reads take a while, so two loads started together overlap."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self._reads_lock = threading.Lock()
+
+    def get_bytes(self, key: str) -> bytes:
+        with self._reads_lock:
+            self.reads.append(key)
+        sleep(0.02)
+        return LocalBackend.get_bytes(self, key)
+
+
+def test_two_concurrent_loads_download_each_key_once(tmp_path: Path, config: Config) -> None:
+    store = SlowBackend(tmp_path / "data")
+    for i in range(6):
+        write(store, config, f"R{i}", value=float(i))
+    store.reads.clear()
+    start = threading.Barrier(2)
+    results: list[pa.Table] = []
+
+    def worker() -> None:
+        start.wait()
+        results.append(load(store))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    reads = obs_reads(store)
+    assert len(reads) == 6
+    assert len(set(reads)) == 6  # every key once, not once per caller
+    assert results[0] is results[1]
+
+
+def test_existing_signatures_are_kept() -> None:
+    """``store.compaction`` and ``duck.connect`` (outside T56's Owns) call these."""
+    import inspect
+
+    assert list(inspect.signature(table_cache.invalidate).parameters) == []
+    assert list(inspect.signature(table_cache.load_table).parameters) == [
+        "store", "table", "clean_version", "keys",
+    ]  # fmt: skip
+    assert list(inspect.signature(table_cache.read_files).parameters) == ["store", "table", "keys"]
+
+
+def test_a_partition_compacted_twice_with_an_unseen_file_is_reread(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daily schedule (PR #86 review round 1, finding 1): eod D-1 writes ``compacted-D``;
+    the morning job writes M into D; nobody loads the dashboard; eod D merges M into
+    ``compacted-D`` in place (same key) and compacts D2. The key set of D never changes, yet M's
+    rows must show up as soon as the listing changes anywhere."""
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)  # the dashboard is another process
+    write_on(store, config, "R1", D2, 1.0)
+    write_on(store, config, "R2", D2, 2.0)
+    compact_day(store, D2, tables=("observations",))  # eod D-1
+    load(store)
+    write_on(store, config, "M", D2, 3.0)  # morning D, never listed by the dashboard
+    write_on(store, config, "R1", D, 10.0)
+    write_on(store, config, "R2", D, 11.0)
+    compact_day(store, D2, tables=("observations",))  # eod D: M merged into compacted-D2
+    compact_day(store, D, tables=("observations",))
+    got = load(store)
+    assert sorted(r["value"] for r in got.to_pylist()) == [1.0, 2.0, 3.0, 10.0, 11.0]
+    assert sorted_rows(got) == sorted_rows(fresh_load(store))
+
+
+def test_compacted_files_outside_the_recent_window_are_not_read_again(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)
+    old = D - timedelta(days=table_cache.COMPACTED_WINDOW_DAYS)
+    recent = D - timedelta(days=table_cache.COMPACTED_WINDOW_DAYS - 1)
+    for part in (old, recent):
+        write_on(store, config, "R1", part, 1.0)
+        write_on(store, config, "R2", part, 2.0)
+        compact_day(store, part, tables=("observations",))
+    write_on(store, config, "R1", D, 10.0)
+    load(store)
+    store.reads.clear()
+    write_on(store, config, "R2", D, 11.0)
+    load(store)
+    assert sorted(obs_reads(store)) == sorted(
+        [
+            table_key(table="observations", part_date=D, run_id="R2"),
+            table_key(table="observations", part_date=recent, run_id=f"compacted-{recent}"),
+        ]
+    )
+
+
+def test_the_recent_window_matches_compaction() -> None:
+    import deskbrief.store.compaction as compaction
+
+    assert table_cache.COMPACTED_WINDOW_DAYS == compaction.RECENT_DAYS
+
+
+def test_an_older_clean_version_entry_is_dropped(store: CountingBackend, config: Config) -> None:
+    write(store, config, "R1", value=1.0)
+    table_cache.load_table(store, "observations", "v0", ())
+    load(store)
+    versions = {ident[3] for ident in table_cache._cache if ident[2] == "observations"}
+    assert versions == {"v1"}

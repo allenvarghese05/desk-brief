@@ -19,6 +19,8 @@ way out as a second guard.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import threading
 import time
@@ -37,9 +39,12 @@ from deskbrief.query import Lineage, series_all
 from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Notable, Row, Section
 from deskbrief.store import duck
 from deskbrief.store.backend import StorageError
+from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
 from deskbrief.timeutil import et_date, utc_now
+
+_log = logging.getLogger(__name__)
 
 HOSTED, LOCAL = "hosted", "local"
 #: tiers never shown when hosted, whatever config says, until H9 records the provider terms
@@ -48,7 +53,18 @@ READER_ENV = ("R2_ACCOUNT_ID", "R2_READER_ACCESS_KEY_ID", "R2_READER_SECRET_ACCE
 SPARK_DAYS = 30
 #: Treasury tenors drawn on the yield curve, shortest first (official values only)
 CURVE_TENORS = ("UST_3M", "UST_2Y", "UST_10Y", "UST_20Y", "UST_30Y")
+#: TTL of the serving-file caches in ``kit`` (those files are not part of the data version)
 CACHE_TTL_SECONDS = 60
+#: TTL of this module's caches; they are also keyed on :func:`data_version` (T56)
+DATA_CACHE_TTL_SECONDS = 15 * 60
+#: the store's listing is checked at most this often; the connection is rebuilt only on change
+LISTING_CHECK_SECONDS = 60
+#: a background check running longer than this (a LIST or GET that never returns) is
+#: abandoned and the next call starts a new one
+REFRESH_TIMEOUT_SECONDS = 5 * 60
+#: views the dashboard connection never builds (no LIST, no httpfs): the dashboard reads the
+#: scorecard from its serving file
+DASHBOARD_SKIP_VIEWS = frozenset({"scorecard"})
 #: how far back the price chart reads daily bars (calendar days; the store may hold less)
 BAR_DAYS = 400
 BAR_COLUMNS = (
@@ -86,12 +102,54 @@ def reader_env(env: Mapping[str, str]) -> dict[str, str]:
     return picked
 
 
-def open_connection(config: Config, env: Mapping[str, str]) -> duckdb.DuckDBPyConnection:
-    """DuckDB views over the configured store: read-only R2, or the local backend for dev."""
+def _store(config: Config, env: Mapping[str, str]) -> LocalBackend | R2Backend:
     if config.storage.backend == "r2":
-        renv = reader_env(env)
-        return duck.connect(R2Backend.from_env(config.storage.bucket, renv), config, env=renv)
-    return duck.connect(LocalBackend(config.storage.local_root), config)
+        return R2Backend.from_env(config.storage.bucket, reader_env(env))
+    return LocalBackend(config.storage.local_root)
+
+
+@dataclass(frozen=True)
+class Listing:
+    """What a dashboard connection is built from: one LIST per cached table (T56)."""
+
+    clean_version: str
+    keys: tuple[tuple[str, tuple[str, ...]], ...]  # (table, sorted keys), in TABLE_VIEWS order
+
+    def fingerprint(self) -> str:
+        h = hashlib.sha256(self.clean_version.encode())
+        for table, keys in self.keys:
+            h.update(b"\0" + table.encode())
+            for k in keys:
+                h.update(b"\n" + k.encode())
+        return h.hexdigest()[:16]
+
+
+def store_listing(store: LocalBackend | R2Backend) -> Listing:
+    """The listing of every table the dashboard connection caches (scorecard is skipped)."""
+    version = current_clean_version(store)
+    tables = [t for v, t in duck.TABLE_VIEWS.items() if v not in DASHBOARD_SKIP_VIEWS]
+    return Listing(version, tuple((t, duck.table_keys(store, t, version)) for t in tables))
+
+
+def _connect(
+    store: LocalBackend | R2Backend, config: Config, env: Mapping[str, str], listing: Listing
+) -> duckdb.DuckDBPyConnection:
+    return duck.connect(
+        store,
+        config,
+        env=reader_env(env) if isinstance(store, R2Backend) else None,
+        skip_views=DASHBOARD_SKIP_VIEWS,
+        listing=dict(listing.keys),
+        clean_version=listing.clean_version,
+    )
+
+
+def open_connection(config: Config, env: Mapping[str, str]) -> duckdb.DuckDBPyConnection:
+    """DuckDB views over the configured store: read-only R2, or the local backend for dev.
+
+    A new connection the caller closes. Pages use :func:`shared_connection` instead."""
+    store = _store(config, env)
+    return _connect(store, config, env, store_listing(store))
 
 
 @dataclass
@@ -100,32 +158,121 @@ class _Shared:
     lock: threading.Lock
     built: float
     closed: bool = False
+    listing: Listing | None = None
+    version: str = ""
 
 
-_SHARED: dict[tuple[str, str], _Shared] = {}
-_SHARED_GUARD = threading.Lock()  # guards _SHARED itself, never held during a query
+@dataclass
+class _Slot:
+    """The process's connection for one store and the state of its listing check."""
+
+    current: _Shared | None = None
+    checked: float = float("-inf")  # time.monotonic() of the last finished listing check
+    busy: bool = False  # the first build or a listing check is running
+    error: str = ""  # type of the last failed background check (never its message)
+    started: float = float("-inf")  # time.monotonic() when the running check started
+    gen: int = 0  # id of the newest background check; an abandoned one changes nothing
 
 
-def _shared(config: Config, backend: str, where: str) -> _Shared:
-    """The process's connection for (backend, where), rebuilt once it is a minute old.
+_SLOTS: dict[tuple[str, str], _Slot] = {}
+#: guards _SLOTS and every slot's fields; never held during a query, a LIST or a build
+_SHARED_GUARD = threading.Condition()
 
-    The old connection is closed after taking its lock, so a query still running on it
-    finishes first and only one in-memory copy is kept."""
-    key = (backend, where)
-    # Single flight on purpose: a stale connection is rebuilt while the guard is held, so
-    # sessions arriving meanwhile wait for that one build instead of each starting their own
-    # (a build copies every cached table: seconds on R2, and memory per copy).
+
+def _build(
+    store: LocalBackend | R2Backend, config: Config, env: Mapping[str, str], listing: Listing
+) -> _Shared:
+    conn = _connect(store, config, env, listing)
+    return _Shared(conn, threading.Lock(), time.monotonic(), listing=listing,
+                   version=listing.fingerprint())  # fmt: skip
+
+
+def _retire(old: _Shared) -> None:
+    """Close a replaced connection once the query running on it (if any) has finished."""
+    with old.lock:
+        old.closed = True
+        old.conn.close()
+
+
+def _refresh(config: Config, env: Mapping[str, str], slot: _Slot, gen: int) -> None:
+    """One listing check; a rebuild only if the listing changed (runs in a background thread).
+
+    The old connection keeps serving every query until the new one is built, then is swapped
+    in and the old one closed. A check that ran longer than ``REFRESH_TIMEOUT_SECONDS`` has
+    been superseded (``slot.gen`` moved on): it then swaps nothing and leaves the slot alone."""
+    error = ""
+    try:
+        cur = slot.current
+        store = _store(config, env)
+        listing = store_listing(store)
+        if cur is None or listing != cur.listing:
+            fresh = _build(store, config, env, listing)
+            with _SHARED_GUARD:
+                current = slot.gen == gen
+                if current:
+                    slot.current = fresh
+            if not current:
+                _retire(fresh)
+            elif cur is not None:
+                _retire(cur)
+    except Exception as exc:  # the old connection keeps serving; the next check tries again
+        error = type(exc).__name__
+        _log.warning("dashboard listing check failed: %s", error)
+    finally:
+        with _SHARED_GUARD:
+            if slot.gen == gen:
+                slot.busy, slot.error, slot.checked = False, error, time.monotonic()
+            _SHARED_GUARD.notify_all()
+
+
+def _start_check(config: Config, env: Mapping[str, str], slot: _Slot) -> None:
+    """Start a background check (``_SHARED_GUARD`` held). If the thread cannot start, the slot
+    is released at once and the next due call tries again."""
+    slot.gen += 1
+    slot.busy, slot.started = True, time.monotonic()
+    try:
+        threading.Thread(
+            target=_refresh, args=(config, env, slot, slot.gen), name="deskbrief-listing",
+            daemon=True,
+        ).start()  # fmt: skip
+    except Exception as exc:  # e.g. RuntimeError: can't start new thread
+        slot.busy, slot.error, slot.checked = False, type(exc).__name__, time.monotonic()
+        _log.warning("dashboard listing check not started: %s", slot.error)
+
+
+def _shared(
+    config: Config, backend: str, where: str, env: Mapping[str, str] | None = None
+) -> _Shared:
+    """The process's connection for (backend, where).
+
+    Built once, synchronously, on first use (callers arriving meanwhile wait for that one
+    build). After that the store's listing is checked at most once every
+    ``LISTING_CHECK_SECONDS``, in a background thread, and the connection is rebuilt only when
+    the listing changed. No caller ever waits for a check or a rebuild."""
+    env = os.environ if env is None else env
     with _SHARED_GUARD:
-        cur = _SHARED.get(key)
-        if cur is not None and time.monotonic() - cur.built < CACHE_TTL_SECONDS:
+        slot = _SLOTS.setdefault((backend, where), _Slot())
+        while slot.current is None and slot.busy:
+            _SHARED_GUARD.wait()
+        cur = slot.current
+        if cur is not None:
+            now = time.monotonic()
+            due = not slot.busy and now - slot.checked >= LISTING_CHECK_SECONDS
+            hung = slot.busy and now - slot.started >= REFRESH_TIMEOUT_SECONDS
+            if due or hung:
+                _start_check(config, env, slot)
             return cur
-        fresh = _Shared(open_connection(config, os.environ), threading.Lock(), time.monotonic())
-        _SHARED[key] = fresh
-    if cur is not None:
-        with cur.lock:
-            cur.closed = True
-            cur.conn.close()
-    return fresh
+        slot.busy = True
+    try:
+        store = _store(config, env)
+        fresh = _build(store, config, env, store_listing(store))
+        with _SHARED_GUARD:
+            slot.current, slot.checked = fresh, time.monotonic()
+        return fresh
+    finally:
+        with _SHARED_GUARD:
+            slot.busy = False
+            _SHARED_GUARD.notify_all()
 
 
 def _where(config: Config) -> str:
@@ -133,17 +280,39 @@ def _where(config: Config) -> str:
     return s.bucket if s.backend == "r2" else s.local_root
 
 
-@contextmanager
-def shared_connection(config: Config) -> Iterator[duckdb.DuckDBPyConnection]:
-    """One read-only connection per process for the workspace's small per-click queries.
+def wait_for_refresh(config: Config, timeout: float = 60.0) -> bool:
+    """Block until no listing check or build is running for ``config``'s store (tests, tools).
 
-    Building a connection copies every cached table into a fresh DuckDB (seconds on R2), so the
-    chart, ladder, lineage and checks share one, rebuilt at most once a minute. The lock keeps
-    two browser sessions from using it at the same time (DuckDB connections are not
+    Returns False on timeout."""
+    with _SHARED_GUARD:
+        slot = _SLOTS.get((config.storage.backend, _where(config)))
+        if slot is None:
+            return True
+        return _SHARED_GUARD.wait_for(lambda: not slot.busy, timeout)
+
+
+def data_version(config: Config) -> str:
+    """Fingerprint of the listing the shared connection was built from (T56).
+
+    It changes when, and only when, the shared connection is rebuilt over a changed listing,
+    so caches keyed on it never mix two versions of the store. Calling it also lets the
+    background listing check run when it is due."""
+    return _shared(config, config.storage.backend, _where(config)).version
+
+
+@contextmanager
+def shared_connection(
+    config: Config, env: Mapping[str, str] | None = None
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """One read-only connection per process for every dashboard query (T56: one connection).
+
+    Building a connection copies every cached table into a fresh DuckDB, so every page and
+    :func:`build_snapshot` share one, rebuilt only when the store's listing changed. The lock
+    keeps two browser sessions from using it at the same time (DuckDB connections are not
     thread-safe; cursors would not see its temporary tables).
     """
     while True:  # a connection replaced between lookup and lock is skipped, never used closed
-        shared = _shared(config, config.storage.backend, _where(config))
+        shared = _shared(config, config.storage.backend, _where(config), env)
         with shared.lock:
             if shared.closed:
                 continue
@@ -172,12 +341,9 @@ def build_snapshot(
     latest value falls back to the best remaining tier. ``series_all`` stays unfiltered here;
     :func:`overview` applies the per-mode filter to the history.
     """
-    conn = open_connection(config, env)
-    try:
+    with shared_connection(config, env) as conn:
         model = BriefModel.from_store(conn, config, et_date(now), now, exclude_tiers=exclude_tiers)
         history = series_all(conn, SPARK_DAYS, now)
-    finally:
-        conn.close()
     return Snapshot(
         model,
         {
@@ -187,15 +353,24 @@ def build_snapshot(
     )
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _cached(_config: Config, backend: str, where: str, hidden: frozenset[int]) -> Snapshot:
-    # backend, where and hidden are the cache key; the config itself is not hashed
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached(
+    _config: Config,
+    backend: str,
+    where: str,
+    hidden: frozenset[int],
+    version: str,
+    minute: datetime,
+) -> Snapshot:
+    # backend, where, hidden, the data version and the minute are the key; the config is not
+    # hashed. The minute keeps the as-of, health and data-age text at most a minute old.
     return build_snapshot(_config, os.environ, current_time(), hidden)
 
 
 def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snapshot:
     s = config.storage
-    return _cached(config, s.backend, s.bucket if s.backend == "r2" else s.local_root, hidden)
+    minute = current_time().replace(second=0, microsecond=0)
+    return _cached(config, s.backend, _where(config), hidden, data_version(config), minute)
 
 
 def build_bars(
@@ -251,16 +426,24 @@ def build_bars(
     return out[list(BAR_COLUMNS)].sort_values("d").reset_index(drop=True)
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_bars(
-    _config: Config, backend: str, where: str, instrument_id: str, hidden: frozenset[int]
+    _config: Config,
+    backend: str,
+    where: str,
+    instrument_id: str,
+    hidden: frozenset[int],
+    version: str,
 ) -> pd.DataFrame:
     with shared_connection(_config) as conn:
         return build_bars(conn, current_time(), instrument_id, hidden)
 
 
 def load_bars(config: Config, instrument_id: str, hidden: frozenset[int]) -> pd.DataFrame:
-    return _cached_bars(config, config.storage.backend, _where(config), instrument_id, hidden)
+    return _cached_bars(
+        config, config.storage.backend, _where(config), instrument_id, hidden,
+        data_version(config),
+    )  # fmt: skip
 
 
 def build_series(
@@ -277,7 +460,7 @@ def build_series(
     return {iid: build_bars(conn, now, iid, exclude_tiers, days) for iid in instrument_ids}
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_series(
     _config: Config,
     backend: str,
@@ -285,6 +468,7 @@ def _cached_series(
     ids: tuple[str, ...],
     hidden: frozenset[int],
     days: int,
+    version: str,
 ) -> dict[str, pd.DataFrame]:
     with shared_connection(_config) as conn:
         return build_series(conn, current_time(), ids, hidden, days)
@@ -296,11 +480,12 @@ def load_series(
     hidden: frozenset[int],
     days: int = BAR_DAYS,
 ) -> dict[str, pd.DataFrame]:
-    """Daily (or weekly) bars of several instruments over ``days`` calendar days, cached 60 s
-    per mode; one shared connection, never a new one per click."""
+    """Daily (or weekly) bars of several instruments over ``days`` calendar days, cached per
+    mode and data version; one shared connection, never a new one per click."""
     return _cached_series(
-        config, config.storage.backend, _where(config), tuple(instrument_ids), hidden, days
-    )
+        config, config.storage.backend, _where(config), tuple(instrument_ids), hidden, days,
+        data_version(config),
+    )  # fmt: skip
 
 
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
@@ -308,7 +493,7 @@ DASHBOARD_LIMITS = (
     "Dashboard: no stale greying; the as-of text and health badge carry data age.",
     "Dashboard: no 30-day z-score column; unusual moves are listed under Biggest moves.",
     "Dashboard: the yield curve uses official Treasury values only (no intraday curve).",
-    "Dashboard: no live polling; refresh the page (data cached for 60 s).",
+    "Dashboard: no live polling; new data shows on a page load about a minute after it is written.",
     f"Dashboard: sparklines cover {SPARK_DAYS} days, not the spec's 1-day sparkline.",
 )
 
