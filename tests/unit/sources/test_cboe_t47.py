@@ -94,12 +94,13 @@ def test_config_matches_the_card(config: Config, symbol: str) -> None:
     inst, feed = config.feed_index("cboe", DATASET)[symbol]
     assert inst.id == symbol
     assert (inst.asset_class, inst.unit, feed.tier) == ("vol", "index_pts", 3)
-    # T55 (planner-approved): a tier-2 Yahoo quote gives each its overnight move
-    assert {(f.source, f.dataset, f.symbol, f.tier) for f in inst.feeds} == {
-        ("cboe", DATASET, symbol, 3),
-        ("yahoo", "quote", f"^{symbol}", 2),
-    }
-    assert len(inst.feeds) == 2
+    # T55 (planner-approved): a tier-2 Yahoo quote gives each its overnight move, except SKEW,
+    # which Yahoo prints once after the close (no intraday tick for feed_completeness)
+    expected = {("cboe", DATASET, symbol, 3)}
+    if symbol != "SKEW":
+        expected.add(("yahoo", "quote", f"^{symbol}", 2))
+    assert {(f.source, f.dataset, f.symbol, f.tier) for f in inst.feeds} == expected
+    assert len(inst.feeds) == len(expected)
 
 
 @pytest.mark.parametrize("symbol", NEW)

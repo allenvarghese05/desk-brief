@@ -327,6 +327,7 @@ instruments:
       - {source: cboe, dataset: vix_history, symbol: VIX, tier: 3}
   # T47 (P-021b): Cboe daily closes, one CSV per symbol (sources/cboe.py SYMBOL_SPECS).
   # T55: a Yahoo quote (tier 2, like ^VIX) gives each an overnight move; live probe in the T55 PR.
+  # Not SKEW: Yahoo prints ^SKEW once after the close, so feed_completeness would fail daily.
   - id: VIX9D
     name: Cboe S&P 500 9-Day Volatility Index
     asset_class: vol
@@ -373,7 +374,6 @@ instruments:
     kind: index
     unit: index_pts
     feeds:
-      - {source: yahoo, dataset: quote, symbol: ^SKEW, tier: 2}
       - {source: cboe, dataset: vix_history, symbol: SKEW, tier: 3}
 
   # ---------------- Overseas indices (overnight) ----------------
