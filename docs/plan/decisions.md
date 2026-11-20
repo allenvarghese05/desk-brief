@@ -153,3 +153,21 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 - Contract changes, approved by the planner and made first in their own `contract:` card (T44): `interval` gains `1w` (`as_of` = 00:00 America/New_York on the reference date, extending P-006, recorded in the `store/backend.py` docstring); `unit` gains `index` and `contracts` (`schemas.ENUMS` and `config.Unit`); `field` gains `net_position`, `open_interest` and `level` (an index value that is neither a price nor a rate); `KNOWN_SOURCES` gains `cftc`; `checks.validity` gets bounds for `index` and `contracts`. Code that special-cases `1d`/`1mo` learns `1w` in card T45. Adding instruments to `config.yaml` beyond P-004 is approved by this ruling for cards T46–T49.
 - Why: a macro desk reads gold against real yields and the dollar, prices index options off implied volatility, and watches positioning for crowded trades. FRED and Cboe are existing sources; CFTC data is free and public.
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-19. Asked which macro-desk data to add, he chose all three groups. Contract scope set by the planner after the [PR #73 round-1 review, findings 2 and 6](https://github.com/allenvarghese05/desk-brief/pull/73), and round 2, findings 3, 4 and 7. Cards T44, T45, T46, T47, T49.
+
+## P-022 · 2026-11-20 · Dashboard v2: refined dark, chart-first Home, TradingView charts, compact provenance
+- Decision:
+  - **Look.** A refined dark theme. Near-black page, panels one shade lighter, no borders (cards separate by shade), one blue accent for the selected state only, muted green and red for direction only. Four type sizes, tabular figures. Card padding is larger than the gaps between cards. Spec §10.2 already asks for most of this; this ruling makes it binding for every page.
+  - **Home layout** (replaces the §10.3 Overview sketch):
+    - a slim top bar: brand and date, page tabs, a compact search and one status dot;
+    - a headline strip of five instruments, each with its value, a change pill, a sparkline and a tier glyph;
+    - a watchlist rail grouped by asset class, with full names;
+    - a large chart of the selected instrument, with range and style controls in its header;
+    - a right rail with the "Do the sources agree?" verdict and risk and range facts;
+    - tabs under the chart: All values, Lineage, Checks, Corrections.
+
+    The page no longer stacks these vertically. The notable moves become a σ tag on watchlist rows, not a strip.
+  - **Charts.** Time-series and candle charts use TradingView Lightweight Charts (Apache-2.0). The standalone JavaScript build is vendored into the repo at a pinned version, with its licence and NOTICE, and rendered through a Streamlit component. There is no CDN at runtime. The attribution the licence asks for is shown on the page. Altair stays for small charts where it is enough.
+  - **Provenance.** Every figure still carries source, tier, as-of and field (P-009 labels, spec §10.2). On screen, that means a tier glyph beside the figure, with source and time on hover and keyboard focus. Clicking the source opens a details panel with the full lineage. The full "last · delayed · time · source" text no longer has to be printed under each figure. Hosted mode still never shows tier 1.
+  - **Navigation.** Selecting an instrument or page happens inside the Streamlit session, without a full browser reload. Deep links by URL (`?id=`) keep working.
+- Why: on 2026-11-20 the owner judged the T36 dashboard cluttered and slow. He shared reference designs and chose this direction from four options. A study of the code found the main causes of the slowness: every click was a full page reload, connections were rebuilt every 60 s, and the table cache re-downloaded whole tables. It also found the candle chart's problems: a data gap, a calendar axis with weekend gaps, and fixed-width candles.
+- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-20 (ET). Asked four questions, he chose "Refined dark", "Big chart hero", "TradingView Lightweight" and "Compact icon + hover/panel". He then approved a clickable mockup with "Looks good, build it". The spec text for §10.2 and §10.3 is updated by card T58. Cards T56–T59.
