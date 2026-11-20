@@ -154,9 +154,17 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 - Why: a macro desk reads gold against real yields and the dollar, prices index options off implied volatility, and watches positioning for crowded trades. FRED and Cboe are existing sources; CFTC data is free and public.
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-19. Asked which macro-desk data to add, he chose all three groups. Contract scope set by the planner after the [PR #73 round-1 review, findings 2 and 6](https://github.com/allenvarghese05/desk-brief/pull/73), and round 2, findings 3, 4 and 7. Cards T44, T45, T46, T47, T49.
 
-## P-022 · 2026-11-20 · Dashboard v2: refined dark, chart-first Home, TradingView charts, compact provenance
+## P-022 · 2026-11-19 · Dashboard v2: refined dark, chart-first Home, TradingView charts, compact provenance
 - Decision:
-  - **Look.** A refined dark theme. Near-black page, panels one shade lighter, no borders (cards separate by shade), one blue accent for the selected state only, muted green and red for direction only. Four type sizes, tabular figures. Card padding is larger than the gaps between cards. Spec §10.2 already asks for most of this; this ruling makes it binding for every page.
+  - **Look.** A refined dark theme:
+    - near-black page, with panels one shade lighter;
+    - no borders, so cards separate by shade;
+    - one blue accent, for the selected state only;
+    - four type sizes and tabular figures;
+    - card padding larger than the gaps between cards.
+
+    It applies to every page.
+  - **Colour.** Muted green and red mean up and down. **This supersedes spec §10.2's "red reserved for check failures".** A failed check is shown by a distinct marker that does not rely on colour alone: a ✕ icon and the word "failed" on an amber tint. A warning uses "warn" with the same amber family. Stale data still turns grey with a "stale" tag.
   - **Home layout** (replaces the §10.3 Overview sketch):
     - a slim top bar: brand and date, page tabs, a compact search and one status dot;
     - a headline strip of five instruments, each with its value, a change pill, a sparkline and a tier glyph;
@@ -165,9 +173,17 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
     - a right rail with the "Do the sources agree?" verdict and risk and range facts;
     - tabs under the chart: All values, Lineage, Checks, Corrections.
 
-    The page no longer stacks these vertically. The notable moves become a σ tag on watchlist rows, not a strip.
-  - **Charts.** Time-series and candle charts use TradingView Lightweight Charts (Apache-2.0). The standalone JavaScript build is vendored into the repo at a pinned version, with its licence and NOTICE, and rendered through a Streamlit component. There is no CDN at runtime. The attribution the licence asks for is shown on the page. Altair stays for small charts where it is enough.
-  - **Provenance.** Every figure still carries source, tier, as-of and field (P-009 labels, spec §10.2). On screen, that means a tier glyph beside the figure, with source and time on hover and keyboard focus. Clicking the source opens a details panel with the full lineage. The full "last · delayed · time · source" text no longer has to be printed under each figure. Hosted mode still never shows tier 1.
-  - **Navigation.** Selecting an instrument or page happens inside the Streamlit session, without a full browser reload. Deep links by URL (`?id=`) keep working.
-- Why: on 2026-11-20 the owner judged the T36 dashboard cluttered and slow. He shared reference designs and chose this direction from four options. A study of the code found the main causes of the slowness: every click was a full page reload, connections were rebuilt every 60 s, and the table cache re-downloaded whole tables. It also found the candle chart's problems: a data gap, a calendar axis with weekend gaps, and fixed-width candles.
-- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-20 (ET). Asked four questions, he chose "Refined dark", "Big chart hero", "TradingView Lightweight" and "Compact icon + hover/panel". He then approved a clickable mockup with "Looks good, build it". The spec text for §10.2 and §10.3 is updated by card T58. Cards T56–T59.
+    Notable moves become a σ tag on watchlist rows, not a strip. The approved mockup is kept as a labelled synthetic fixture at `tests/fixtures/design/home-mockup-2026-11-19.html`.
+  - **Charts.** Time-series and candle charts use TradingView Lightweight Charts (Apache-2.0). The standalone build is vendored at a pinned version, with a SHA-256 checksum, its `LICENSE` and `NOTICE`. It is served by a Streamlit custom component from a hand-written static folder: no npm build step, no CDN at runtime, and no change to `pyproject.toml`. Every chart shows the "Charts by TradingView" attribution link. Altair stays for small charts where it is enough.
+  - **Provenance.** Every figure still carries source, tier, as-of and field in its markup and accessible label (P-009, spec §10.2).
+    - On screen: a tier glyph beside the figure, with field, source and as-of in a CSS tooltip on hover, keyboard focus and tap.
+    - Clicking the source opens a details panel with the full lineage.
+    - A visible glyph legend on each page labels "delayed" (◐).
+    - The words "proxy", "IEX", "fallback" and "HYPOTHETICAL" always stay visible as text next to the figure, never only in a tooltip.
+    - The full "last · delayed · time · source" line no longer has to be printed under each figure.
+    - Hosted mode still never shows or reads tier 1.
+    - Generated markup uses no `title` attributes; tooltips are CSS.
+  - **Navigation.** Selecting an instrument or a page happens inside the Streamlit session, through `st.navigation` and `st.switch_page` / `st.page_link` with `query_params`. It never does a full browser reload. Deep links by URL (`?id=`) keep working.
+  - **Scope.** No contract files change.
+- Why: on 2026-11-19 (ET) the owner judged the T36 dashboard cluttered and slow. He shared reference designs and chose this direction from four options. A study of the code found the main causes of the slowness: every click was a full page reload, connections were rebuilt every 60 s, and the table cache re-downloaded whole tables. It also found the candle chart's problems: a data gap, a calendar axis with weekend gaps, and fixed-width candles.
+- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-19 (ET). Asked four questions, he chose "Refined dark", "Big chart hero", "TradingView Lightweight" and "Compact icon + hover/panel". He then approved the clickable mockup with "Looks good, build it". The colour, label and markup rules were settled by the planner after the [PR #85 round-1 review, findings 1, 2 and 14](https://github.com/allenvarghese05/desk-brief/pull/85). Spec §10.2 and §10.3 are updated by card T58. Cards T56–T59.

@@ -804,120 +804,181 @@ Not carried:
   - The history workflow has no `secrets.` reference outside its run step, tested in `test_history_workflow_t53.py`.
 - Changelog: card created from the PR #74–#82 reviews linked above. Citations, the `change_unit` note, the secrets-test note and the test rename were added after the [PR #83 round-1 review](https://github.com/allenvarghese05/desk-brief/pull/83).
 
-### Phase 4C — Dashboard v2 (ruling P-022, 2026-11-20)
+### Phase 4C — Dashboard v2 (ruling P-022, 2026-11-19)
 
-The owner approved a clickable mockup of the new Home page. It is not in git and lives on the owner's machine at `/Users/allen/Desktop/desk_brief/.claude/mockups/home.html`; it uses sample data. Implementers and reviewers open it in a browser as the visual reference. The cards below describe the same design in words, and the cards win where the two differ.
+The owner approved a clickable mockup of the new Home page. It is the visual reference, kept as a labelled synthetic fixture at `tests/fixtures/design/home-mockup-2026-11-19.html` (open it in a browser). The cards describe the same design in words, and the cards win where the two differ.
 
-Order: T56 → T57 → T58 → T59, one after another. T56 provides the cache key that T57 and T58 use. T57 builds the parts that T58 lays out, and T59 applies them to the other pages. Rules for the phase:
-- **Provenance:** every figure keeps source, tier, as-of and field in its markup (P-009, spec §10.2). Hosted mode never shows or reads tier 1. Every new reader is tested hosted against local on the same store.
-- **Visual check:** each card's PR includes screenshots at desktop width (about 1500 px) and phone width (about 390 px), taken with the synthetic preview store, never real provider data.
-- **No regressions:** every piece of information the T36/T54 pages show stays reachable. A card that moves something lists where it went.
+Order: T56 → T57 → T57B → T58 → T59, one after another, so no two of these cards are open at once.
+- T56 provides the cache key and the synthetic store.
+- T57 builds the theme, provenance and navigation.
+- T57B builds the chart component.
+- T58 lays out Home.
+- T59 applies the design to the other pages.
+
+Rules for the phase:
+- **Provenance:**
+  - Every figure keeps source, tier, as-of and field in its markup (P-009, spec §10.2, P-022).
+  - Hosted mode never shows or reads tier 1, and every new reader is tested hosted against local on the same store.
+  - Generated markup has no `title` attributes.
+- **Synthetic store and screenshots:**
+  - T56 adds `tests/bench/synth_store.py`. It builds a synthetic store with about 2,000 observations files under a given directory, with one documented command.
+  - Each later card's PR includes screenshots at about 1500 px and about 390 px wide, taken against that store (never real provider data), alongside the mockup fixture for comparison.
+- **Timings:**
+  - Timings are measured with the T56 benchmark on the implementer's machine, and the PR states the machine.
+  - Targets are relative to the pre-T56 baseline measured the same way.
+- **Tests across cards:** a card may update tests outside its Owns only where its own change breaks them mechanically: markup, signatures, fakes. It lists each such file under "Files outside Owns".
+- **No regressions:** every piece of information the T36/T54 pages show stays reachable. T58's inventory table names where each item goes.
 
 #### T56 — Dashboard data layer: one connection, rebuild only on change, incremental cache
-- **Depends:** T55 merged · **Owns:** `app/components/data.py`, `src/deskbrief/store/table_cache.py`, `src/deskbrief/store/duck.py` (dashboard connection options only), `tests/unit/app/test_data_layer.py` (new), `tests/unit/store/test_table_cache.py`.
+- **Depends:** T55 merged · **Owns:**
+  - `app/components/data.py`;
+  - `src/deskbrief/store/table_cache.py`;
+  - `src/deskbrief/store/duck.py` (dashboard connection options only);
+  - `tests/unit/store/{test_table_cache.py,test_duck_views.py}`;
+  - `tests/unit/app/test_data_layer.py` (new);
+  - `tests/bench/` (new).
 - Deliverables:
-  - **One connection.** `build_snapshot` uses the shared connection. There is no private second connection.
-  - **Rebuild only on change.** The shared connection is rebuilt only when the store's file listing has changed. The listing is checked at most once every 60 s with one cheap LIST per table. A rebuild never blocks queries on the current connection: the old connection serves until the new one is ready, then is swapped in and closed.
-  - **Incremental table cache.** `table_cache` downloads only keys it has not cached, and appends them. It is single-flight per table, so two concurrent loads of the same table download once.
-  - **No unused views.** The dashboard connection skips the scorecard `read_parquet` view and its LIST and httpfs setup, because no dashboard page queries it (it reads `serving/` through `kit`).
-  - **A data version.** `data.data_version()` returns a fingerprint of the listing. `data.py`'s own caches are keyed on it with a 15-minute TTL instead of 60 s. T57 and T58 key the other modules' caches on it.
-  - **A benchmark.** A script under `tests/` measures, on a synthetic store of about 2,000 small observations files, the cold build time, a warm query, and the rebuild after one new file. Results go in the PR.
+  - **One connection.** `build_snapshot` uses the shared connection. There is no private second connection. The public signatures of `build_snapshot` and `open_connection` stay compatible.
+  - **Rebuild only on change.** The shared connection is rebuilt only when the store's listing has changed. The listing is checked at most once every 60 s, with one LIST per table. A rebuild never blocks queries on the current connection: the old connection serves until the new one is ready, then is swapped in and closed.
+  - **Incremental, compaction-safe table cache.**
+    - New keys are downloaded and appended.
+    - When any key of an ET-date partition disappears (eod compaction deletes the partition's files and writes a compacted file, P-017), that whole partition is evicted and re-read.
+    - Loads are single-flight per table.
+  - **No unused views.** The dashboard connection skips the scorecard `read_parquet` view and its LIST and httpfs setup.
+  - **A data version.** `data.data_version()` returns a fingerprint of the listing. `data.py`'s caches are keyed on it with a 15-minute TTL.
+  - **A synthetic store and a benchmark.**
+    - `tests/bench/synth_store.py` builds the synthetic store (see the phase rules).
+    - `tests/bench/bench_dashboard.py` measures cold build, warm query, and rebuild after one new file, on that store.
+    - The PR gives the before and after numbers.
 - Acceptance:
-  - After one new file appears, a rebuild downloads exactly one file (test).
-  - Two concurrent loads of a table download each key once (test).
-  - With no listing change, no rebuild happens (test).
-  - A warm per-click query takes under 300 ms server-side on the benchmark store.
-  - Queries during a rebuild are served by the old connection (test).
-  - Hosted mode still excludes tier 1 (existing tests pass).
-- Changelog: card created from P-022 and the 2026-11-20 performance study.
+  - One new file means exactly one file downloaded (test).
+  - A compacted partition is evicted and re-read, with no duplicate or stale rows, and row counts equal a fresh load (test).
+  - Two concurrent loads download each key once (test).
+  - No listing change means no rebuild (test).
+  - Queries during a rebuild use the old connection (test).
+  - The warm query and the rebuild-after-one-file are each at least 5× faster than the pre-T56 baseline on the benchmark.
+  - The existing hosted-mode tests pass.
+- Changelog: card created from P-022 and the 2026-11-19 performance study. Compaction handling, test Owns and the benchmark were added after the [PR #85 round-1 review, findings 3, 4 and 9](https://github.com/allenvarghese05/desk-brief/pull/85).
 
-#### T57 — Dashboard v2 foundation: theme, compact provenance, in-session navigation, TradingView chart
+#### T57 — Dashboard v2 foundation: theme, compact provenance, in-session navigation
 - **Depends:** T56 merged · **Owns:**
+  - `app/Home.py`, which becomes the `st.navigation` router;
+  - `app/views/markets.py` (new; today's Home content moved here unchanged except for links);
   - `app/theme.py` and `.streamlit/config.toml`;
-  - `app/components/{values.py,kit.py,chart.py}` and a new `app/components/tvchart.py`;
-  - the vendored `app/static/vendor/lightweight-charts/` (pinned standalone build, `LICENSE`, `NOTICE`);
-  - the navigation code in `app/Home.py` and `app/components/panels.py` (`nav`, `href`, `tiles`, the link helpers);
-  - `tests/unit/app/{test_components.py,test_tvchart.py}`.
+  - `app/components/{values.py,kit.py,panels.py}`;
+  - the `_link` helper in `app/components/macro.py`;
+  - `tests/unit/app/{test_components.py,test_navigation.py}` (the second is new).
 - Deliverables:
   - **Theme.** Design tokens in `theme.py` and `config.toml`:
     - page `#0B0D10`, panel `#13161B`, raised panel `#181C22`, divider `#22262E`;
     - text `#E8EAED`, secondary `#9AA0A6`, meta `#6B7078`;
     - up `#2EBD85`, down `#F6465D` (tints at about 13%), accent `#5B9DFF`;
+    - failure and warning markers in amber with ✕ / "failed" and "warn" (P-022);
     - Inter with tabular figures;
     - type sizes of about 40, 26, 14 and 12 px;
     - card radius 12 px, card padding 24 px, gaps 20 px.
 
-    No card borders and no boxes inside boxes. The old CSS is removed, not layered over.
+    No card borders, no boxes inside boxes, and the old CSS is removed.
   - **Compact provenance.**
-    - `value_cell` and `change_cell` gain a compact mode: a tier glyph beside the figure, with a CSS tooltip (not a `title` attribute) showing field, tier, source and as-of on hover and keyboard focus.
-    - A details panel (`st.dialog` or an equivalent drawer) shows the full lineage when a source is clicked.
-    - Screen readers get the provenance through an accessible label.
-    - Tests assert the glyph, tooltip text and accessible label for every tier.
-  - **In-session navigation.**
-    - Page tabs use `st.navigation` / `st.page_link` (top position).
-    - Selecting an instrument (tiles, link helpers) sets `st.query_params` inside the session, through `on_click`/buttons or an equivalent. It never reloads the browser page.
-    - `?id=` deep links keep working.
-    - The default Streamlit sidebar page list and the duplicate toggle are hidden.
-  - **TradingView chart.** A `tvchart` component renders candles, a line or area, and an optional compare series with Lightweight Charts, read from the vendored file:
-    - a time scale with no weekend gaps;
-    - crosshair, last-price line, and zoom and pan;
-    - green up and red down candles;
-    - widths that fit the container.
-
-    The "Charts by TradingView" attribution link is shown on the page. Chart controls run inside `st.fragment`, so changing range or style reruns only the chart.
+    - `value_cell` and `change_cell` gain `compact=True`, opt-in until T59 converts the remaining pages. It renders a tier glyph with a CSS tooltip giving field, tier, source and as-of. The tooltip shows on hover, focus and tap, and the element is focusable.
+    - The words proxy, IEX, fallback and HYPOTHETICAL stay visible.
+    - The accessible label carries the full provenance.
+    - A details panel (`st.dialog`) shows the full lineage when a source is clicked.
+    - `kit` provides a glyph-legend helper.
+  - **Navigation.**
+    - `app/Home.py` becomes the router: `st.navigation([...], position="top")` registers `app/views/markets.py` and each `app/pages/*.py` as `st.Page`.
+    - In-app selection (tiles, watchlist, moves, overview cards, nav, health badge, and Macro's `_link`) uses buttons or callbacks that set `st.query_params`, or `st.switch_page` / `st.page_link` with `query_params`. There is no `<a target="_self">`.
+    - `?id=` deep links work on every page.
+    - The default sidebar page list and its toggle are hidden.
   - **Caches.** The caches in `kit.py` are keyed on `data.data_version()`.
 - Acceptance:
-  - Clicking a tile or nav item does not reload the page: a test asserts no `<a href … target="_self">` remains for in-app selection.
-  - The tvchart component's data, options and attribution are unit-tested.
-  - Every tier has its glyph, tooltip and accessible label.
-  - Hosted versus local tests pass.
-  - Screenshots of the components are in the PR.
-  - The licence files are present and pinned.
-- Changelog: card created from P-022.
+  - An AppTest navigation test: clicking an instrument sets `query_params["id"]` without a new session, so session state persists, and a deep link `?id=X` opens X.
+  - No `<a target="_self">` and no `title` attribute appear in the generated markup (test).
+  - Every tier has its glyph, its tooltip text, a focusable element and its accessible label (test).
+  - Hosted-versus-local tests pass.
+  - Component screenshots are in the PR.
+- Changelog: card created from P-022. The router split, the link emitters, deep links, opt-in compact mode and the AppTest test were added after the [PR #85 round-1 review, findings 5, 11 and 13](https://github.com/allenvarghese05/desk-brief/pull/85).
+
+#### T57B — TradingView chart component
+- **Depends:** T57 merged · **Owns:**
+  - `app/components/tvchart.py` (new);
+  - `app/components/tvchart_frontend/`: a hand-written `index.html` and a glue JS file using the Streamlit component message protocol (ready, render, frame height), plus the vendored `lightweight-charts.standalone.production.js` at a pinned version with its `LICENSE`, `NOTICE` and a `SHA256SUMS` file;
+  - `app/components/chart.py`;
+  - `tests/unit/app/test_tvchart.py` (new).
+- Deliverables:
+  - **The component.** `components.declare_component(path=…)` serves the static folder. There is no npm build, no CDN and no `pyproject.toml` change. The JS is fetched once per browser, not inlined per rerun.
+  - **The chart.** `tvchart.chart(...)` renders:
+    - candles, a line or area, and an optional compare series;
+    - a time scale with no weekend gaps;
+    - crosshair, last-price line, and zoom and pan;
+    - green up and red down;
+    - a container-fit width.
+
+    Its tooltip shows field, tier, source and as-of. The chart sits inside `st.fragment`, so range and style changes rerun only the chart.
+  - **Attribution.** `tvchart.attribution()` renders the "Charts by TradingView" link, and every page that draws a tvchart calls it.
+  - **Gitleaks.** If gitleaks flags the minified bundle, an allowlist entry is added for that path only, with a reason.
+- Acceptance:
+  - The checksum of the vendored file matches `SHA256SUMS`, and `LICENSE` and `NOTICE` are present (test).
+  - The series and options payload is unit-tested for candles, line and compare.
+  - Attribution is present wherever `tvchart.chart` is used (test).
+  - Screenshots are in the PR.
+  - The PR states that Dependabot does not track the vendored file, and how to upgrade it.
+- Changelog: card split out of T57 after the [PR #85 round-1 review, findings 7 and 8](https://github.com/allenvarghese05/desk-brief/pull/85).
 
 #### T58 — Home page v2 (the approved mockup), stats that respect data gaps
-- **Depends:** T57 merged · **Owns:**
-  - `app/Home.py`;
+- **Depends:** T57B merged · **Owns:**
+  - `app/views/markets.py`;
   - `app/components/{panels.py,tearsheet.py,instrument.py}`;
-  - `tests/unit/app/{test_home.py,test_tearsheet.py}` and `tests/unit/app/conftest.py`;
+  - `tests/unit/app/{test_home.py,test_tearsheet.py,conftest.py}`;
   - `docs/specs/2026-11-15-desk-brief-design.md` §10.2 and §10.3 only.
 - Deliverables:
-  - **Layout,** as in P-022 and the mockup:
-    - the top bar, then the headline strip of five instruments (value, change pill, sparkline, glyph; the selected one outlined);
-    - a watchlist rail grouped by asset class, with full instrument names (no raw ids) and no truncation at desktop width. A σ tag replaces the "Biggest moves" strip. The anomaly explanation is on the tag's tooltip, not a `title` on a whole row.
-    - the TradingView chart, about two-thirds of the centre, with name, price, change pill and provenance in its header, range pills (1M 3M 6M 1Y All), and a Candles/Line toggle. Compare and CSV download go in a small menu. One row of 1D to 1Y changes sits under the chart.
-    - a right rail with "Do the sources agree?" as a single verdict, with the sources underneath, and risk and range as label-value rows with a 52-week range bar labelled at both ends;
-    - tabs under the chart for All values, Lineage, Checks and Corrections.
-
-    The yield curve and 30-day small multiples move to Macro or a tab. Their destination is listed in the PR.
+  - **Layout,** as in P-022 and the mockup fixture:
+    - the top bar, then the headline strip (value, change pill, sparkline, glyph; the selected one outlined);
+    - a watchlist rail grouped by asset class, with full names, no raw ids, no truncation at about 1500 px, and σ tags for notable moves;
+    - the tvchart, about two-thirds of the centre, with name, price, change pill and provenance in its header, range pills (1M 3M 6M 1Y All), and a Candles/Line toggle. Compare and CSV go in a small menu. One row of 1D to 1Y changes sits under the chart.
+    - a right rail with a single "Do the sources agree?" verdict and its sources, and risk and range as label-value rows with a labelled 52-week bar;
+    - tabs for All values, Lineage, Checks and Corrections;
+    - all figures with `compact=True`.
   - **Gap-aware stats.**
-    - Horizons (1M, 3M, YTD, 1Y) refuse a base close older than the horizon allows and show "no data".
+    - Horizons refuse a base close older than the horizon allows and show "no data".
     - Realised vol, sigma and drawdown skip moves across gaps longer than 5 business days and say so.
     - Date spans include the year when they cross a year.
-  - **One verdict.** The duplicate and contradictory "sources agree" messages become one verdict.
+  - **Caches.** The caches in `instrument.py` and `tearsheet.py` are keyed on `data.data_version()`.
+  - **An inventory table** in the PR, listing every item on today's Home and where it now lives:
+    - three-tier ladder and "Do the sources agree?" → right-rail verdict;
+    - 14-day cross-check strip and "Known limits" → Checks tab;
+    - withheld-instruments caption, status and mode chips → top-bar status dot and the page footer;
+    - chart and compare captions (sources, tiers, date span) → a chart footer line;
+    - "Every value we hold" → All values tab;
+    - lineage, checks and corrections → their tabs;
+    - biggest moves → σ tags;
+    - yield curve and the 30-day small multiples → Macro (link from Home).
+
+    Anything else is listed too.
   - **Spec.** §10.2 and §10.3 are rewritten to match P-022.
 - Acceptance:
-  - Tests pin the layout blocks and every inventory item from the T36/T54 Home, or its new location.
-  - A data-gap fixture shows horizons and vol do not cross the gap.
-  - No `title` attribute remains on a container.
-  - Hosted versus local tests pass.
-  - Desktop and phone screenshots match the mockup in the PR.
-  - A first render after warm caches takes under 1.5 s on the synthetic store, measured.
-- Changelog: card created from P-022 and the 2026-11-20 study (the candle chart, the stuck tooltip, stats across gaps).
+  - Tests pin every layout block and every inventory row at its new location.
+  - A data-gap fixture shows horizons, vol and drawdown do not cross the gap.
+  - No `title` attribute appears (test).
+  - Hosted-versus-local tests pass.
+  - Desktop and phone screenshots sit beside the mockup fixture in the PR.
+  - A warm-cache first render is at least 3× faster than the pre-T56 baseline on the T56 benchmark store.
+- Changelog: card created from P-022 and the 2026-11-19 study (the candle chart, the stuck tooltip, stats across gaps). Cache keys, the inventory and relative timings were added after the [PR #85 round-1 review, findings 6, 9 and 10](https://github.com/allenvarghese05/desk-brief/pull/85).
 
 #### T59 — Other pages in the v2 design
 - **Depends:** T58 merged · **Owns:** `app/pages/*.py`, `app/components/{macro.py,incidents.py}`, `tests/unit/app/{test_pages.py,test_macro.py}`.
 - Deliverables:
-  - Macro, Cross-checks, Data health, Sources and Runs use the T57 theme, compact provenance and in-session navigation.
+  - Macro, Cross-checks, Data health, Sources and Runs use the theme, `compact=True` provenance, the glyph legend and in-session navigation.
   - Each page follows the identical card template: title on the left, controls on the right, content, then an optional footer.
-  - Each page shows 4–6 blocks, with deeper detail in tabs.
-  - Macro charts use `tvchart` where they are time series. The heatmap may stay Altair.
-  - Every cache is keyed on `data.data_version()`.
+  - Each page shows 4–6 blocks, with depth in tabs.
+  - Macro's time series use `tvchart` with attribution. The heatmap may stay Altair.
+  - Every cache, including `4_Data_health.py`'s, is keyed on `data.data_version()`.
+  - Once every page uses it, `compact=True` becomes the default.
 - Acceptance:
-  - The existing page tests pass, updated for the new layout.
-  - Hosted versus local tests hold.
+  - The page tests pass, updated for the new layout.
+  - Hosted-versus-local tests hold.
   - Each page has desktop and phone screenshots in the PR.
-  - No `<a target="_self">` is used for in-app navigation.
+  - No `<a target="_self">` and no `title` attributes appear (test).
 - Changelog: card created from P-022.
 
 ### Phase 5 — Stretch (only after DoD)
