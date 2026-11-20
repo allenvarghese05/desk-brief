@@ -75,6 +75,6 @@ From a terminal: `gh workflow run history.yml -R allenvarghese05/desk-brief -f d
 - In the dashboard, ETF, stock, curve and volatility charts should now reach back two years. In DuckDB: `SELECT source, min(as_of), max(as_of), count(*) FROM obs_latest GROUP BY 1`.
 - It runs no checks, scorecard or serving. The next scheduled run's checks and serving pick the history up.
 
-**Re-run after an interruption.** Dispatch it again with the same inputs. Keys already stored are skipped, so it writes only what is missing and never writes a row twice. A source that failed (a Yahoo rate limit, say) can be re-run alone with `sources=yahoo`.
+**Re-run after an interruption.** Dispatch it again with the same inputs. Keys already stored are skipped, so it writes only what is missing and never writes a row twice. A re-run completes a `degraded` run, or one that crashed with a handled error, because those still flush every row they fetched. A killed process (the 60-minute timeout, or a cancel that sends SIGTERM) loses the rows it had not yet flushed; nothing of them is stored, and the next run fetches them again. A source that failed (a Yahoo rate limit, say) can be re-run alone with `sources=yahoo`.
 
 **Concurrency.** Its group is `deskbrief-history`, not `deskbrief-pipeline`, so it neither waits for nor cancels scheduled runs. Two history dispatches queue one behind the other.

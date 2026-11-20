@@ -201,3 +201,26 @@ def test_two_year_range_fetches_once_per_symbol_and_parses_every_session(
     body = json.loads(raw.body)
     assert body["yfinance_version"] == "9.9.9"
     assert len(body["symbols"]["SPY"]["bars"]) == len(days)
+
+
+def test_fetch_during_the_session_drops_the_in_progress_bar_over_a_range(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thu 19 Nov 11:00 ET, mid-session: Yahoo already returns a bar for today. Over a
+    multi-day range every finished session is kept and today's partial bar is not."""
+    mid = datetime(2026, 11, 19, 16, 0, tzinfo=UTC)  # 11:00 ET, XNYS open
+    start, today = date(2026, 11, 10), date(2026, 11, 19)
+    days = sessions(start, today)
+    assert days[-1] == today
+    assert len(days) == 8
+    monkeypatch.setattr(yahoo, "yf", FakeYF({"SPY": frame(days, 600.0)}))
+    src = YahooSource(config, sleep=lambda _: None, now=lambda: mid)
+    (req,) = src.plan_range(start, today, ctx(config))
+    raw = src.fetch(replace(req, symbols=("SPY",)), http=None)  # type: ignore[arg-type]
+    assert raw.error is None
+    assert len(json.loads(raw.body)["symbols"]["SPY"]["bars"]) == len(days)  # raw keeps it
+    df = src.parse(raw)
+    closes = df[df["field"] == "close"]
+    dated = {pd.Timestamp(t).tz_convert("America/New_York").date() for t in closes["as_of"]}
+    assert dated == set(days[:-1])  # 10-18 Nov, never the session still running
+    assert len(df) == len(days[:-1]) * 4

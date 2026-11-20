@@ -57,6 +57,8 @@ LINEAGE_HEADERS = (
 )  # fmt: skip
 
 YIELD_FMT, BP_FMT, PRICE_FMT, FX_FMT = '0.00"%"', "+0;-0", "#,##0.00", "0.0000"
+#: a CFTC position and its weekly change: whole contracts with thousands separators
+CONTRACTS_FMT, CONTRACTS_CHANGE_FMT = "#,##0", "+#,##0;-#,##0"
 #: an ``fx_rate`` below this is a major pair (4 decimals); a larger one (JPY and the like) is not
 FX_FOUR_DECIMALS_BELOW = 20
 #: ``as_of_utc`` is text in this shape, so VBA reads it the same under every locale. An official
@@ -145,7 +147,17 @@ def _value_fmt(unit: str, value: float) -> str:
         return BP_FMT
     if unit == "fx_rate" and abs(value) < FX_FOUR_DECIMALS_BELOW:
         return FX_FMT
+    if unit == "contracts":
+        return CONTRACTS_FMT
     return PRICE_FMT
+
+
+def _change_fmt(value_unit: str | None, change_unit: str | None) -> str:
+    """The change's format, chosen from the value's unit first: a contracts change is whole
+    contracts, although its ``change_unit`` text stays "pts" (that text is P-015 contract)."""
+    if value_unit == "contracts":
+        return CONTRACTS_CHANGE_FMT
+    return _CHANGE_FMT[change_unit or "pct"]
 
 
 def _market_row(r: Row) -> list[Cell]:
@@ -163,7 +175,7 @@ def _market_row(r: Row) -> list[Cell]:
         field,
         (value, _value_fmt(r.value_unit or "", value)) if value is not None else None,
         r.value_unit,
-        (change, _CHANGE_FMT[r.change_value_unit or "pct"]) if change is not None else None,
+        (change, _change_fmt(r.value_unit, r.change_value_unit)) if change is not None else None,
         r.change_value_unit if change is not None else None,
         r.basis,
         status,
@@ -249,6 +261,18 @@ def _about(w: _Book, ws: Any, m: BriefModel) -> None:
                              "10-year minus 2-year yield of one date, in bp."),
         ("tiers", " ".join(f"{TIER_GLYPH[t]} {TIER_NAME[t]}" for t in (1, 3, 2))
                   + ". Tier 1 live or proxy, tier 2 delayed, tier 3 official."),
+        ("level", "An index level, such as NFCI or the broad dollar index. Change is in points "
+                  "since the previous value of the same frequency."),
+        ("net_position", "CFTC net speculative position: non-commercial long minus short "
+                         "futures contracts. Change is week-on-week."),
+        ("open_interest", "CFTC open interest: all futures contracts outstanding. Change is "
+                          "week-on-week."),
+        ("index", "Unit of a published index level; changes are in points, not percent."),
+        ("contracts", "Unit of a CFTC position: whole futures contracts. The change cell shows "
+                      "whole contracts; its change_unit column still reads pts."),
+        ("1w", "A weekly value is dated to its reference day, not its release day: a CFTC "
+               "report is dated the Tuesday it measures, though released the Friday after. "
+               "The as_of column shows that date, never a time."),
         ("proxy", "A proxy is an ETF standing in for the underlying, never the index itself."),
         ("empty tables", "A table with nothing to list keeps one placeholder row ('none')."),
         ("report", f"{m.title}; config {m.config_hash[:12]}; model schema {m.schema_version}."),

@@ -201,3 +201,28 @@ def test_dashboard_draws_bars_from_yahoo_history(
     assert last["close"] == pytest.approx(close_on(iid, REF))
     assert last["high"] == pytest.approx(close_on(iid, REF) * 1.005)
     assert last["low"] == pytest.approx(close_on(iid, REF) * 0.995)
+
+
+def test_hosted_mode_withholds_close_vs_official(
+    full_store: LocalBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``close_vs_official`` now has real results, and its left leg is the tier-1 SIP bar, so
+    the hosted Cross-checks page (exposed_sources + keep_rows) must drop every such row."""
+    monkeypatch.syspath_prepend(str(REPO))  # `app` is a plain folder, not an installed package
+    from app.components import kit
+
+    xdf, _ = run_crosschecks(
+        make_ctx(config, full_store), duck_for(full_store, config),
+        only=["close_vs_official", "proxy_vs_exact"],
+    )  # fmt: skip
+    real = xdf[(xdf["check_name"] == "close_vs_official") & (xdf["status"] != "skip")]
+    assert len(real) == 5  # real results, not skips: the case the hosted filter must catch
+    hosted = frozenset(config.dashboard.hosted_hidden_tiers)
+    exposed = kit.exposed_sources(config, hosted)
+    assert "alpaca" in exposed
+    shown = kit.keep_rows(xdf, ("left_source", "right_source"), exposed)
+    assert "close_vs_official" not in set(shown["check_name"])
+    assert set(shown["check_name"]) == {"proxy_vs_exact"}  # yahoo/fred rows stay visible
+    assert len(shown) == 7
+    # the local (non-hosted) view keeps everything
+    assert len(kit.keep_rows(xdf, ("left_source", "right_source"), frozenset())) == len(xdf)

@@ -66,27 +66,24 @@ day's row by 20:00 ET; before that freshness is `skip`. The exact posting time w
 if live runs show it later than 20:00 ET, the freshness entry should move.
 
 In the morning brief a Cboe close dated the previous NYSE day shows its value with "no move yet"
-(`query.overnight_changes`, price family). VIX gets its overnight move from the Yahoo quote; the
-six new indices have no intraday feed, so their brief rows show the value and date only. The
-dashboard bars show the full daily series.
+(`query.overnight_changes`, price family). VIX gets its overnight move from the Yahoo quote
+(`^VIX`). Since T55, VIX9D, VIX3M, VIX6M, VXN and GVZ have one too: a tier-2 Yahoo `quote` feed
+each (`^VIX9D`, `^VIX3M`, `^VIX6M`, `^VXN`, `^GVZ`). Like `^VIX` these tick through the session,
+and the last tick is the close: 16:15 ET for the four S&P and Nasdaq indices, 16:02 ET for
+GVZ in the probe. The implementer's live probe on 2026-11-20 at 00:28 UTC,
+through `YahooSource._quote`, got a USD price for each. SKEW has no Yahoo quote feed: Yahoo
+publishes `^SKEW` as one post-close print (about 17:00 ET; 5-minute intraday history returns no
+bars), so `feed_completeness`, which needs a `yahoo/quote` tick inside 09:30–16:00 ET, would fail
+every session day, and the print equals the Cboe close anyway. SKEW's brief row shows its value and
+date only. The dashboard bars show the full daily series.
 
 ## Live probe (2026-11-19, T47)
 
-Run by the implementer on 2026-11-19 at about 20:10 UTC. The sandboxed shell's `curl` was not
-permitted in that session, so each file was read with the agent's web-fetch tool. That tool
-returns the text (no status code, so HTTP 200 is inferred from the CSV being served) and pages
-through it; it does not compute statistics. Row counts below are estimated from the reported
-text length and the row width; min and max were not computed (owner command below). No bot check,
-CAPTCHA or block page was seen.
-
-| Symbol | Header | First row | Newest row (date, close) | Rows (est.) |
-|---|---|---|---|---|
-| VIX9D | `DATE,OPEN,HIGH,LOW,CLOSE` | 01/04/2011 | 11/18/2026, 23.95 | ≈3,980 (202,835 chars) |
-| VIX3M | `DATE,OPEN,HIGH,LOW,CLOSE` | 09/18/2009 | 11/18/2026, 24.29 | ≈4,320 (220,294 chars) |
-| VIX6M | `DATE,OPEN,HIGH,LOW,CLOSE` | 01/02/2008 | 11/18/2026, 24.75 | ≈4,750 (242,326 chars) |
-| VXN | `DATE,OPEN,HIGH,LOW,CLOSE` | 09/14/2009 | 11/18/2026, 33.12 | ≈4,330 (220,593 chars) |
-| GVZ | `DATE,GVZ` | 09/18/2009 | 11/18/2026, 28.04 | ≈4,300 (by trading days) |
-| SKEW | `DATE,SKEW` | 01/02/1990 | 11/18/2026, 142.84 | ≈9,270 (204,016 chars) |
+Run by the implementer on 2026-11-19 at about 20:10 UTC with the agent's web-fetch tool (the
+sandboxed shell's `curl` was not permitted). It confirmed each file's layout: `DATE,OPEN,HIGH,LOW,CLOSE`
+for VIX9D, VIX3M, VIX6M and VXN, and a single value column (`DATE,GVZ`, `DATE,SKEW`) for GVZ and
+SKEW. No bot check, CAPTCHA or block page was seen. Its estimated row counts are superseded by the
+owner's exact run below (T55).
 
 Values are printed with six decimals (`23.950000`). The fixtures under
 `tests/fixtures/synthetic/cboe/` copy each header and layout with invented values (header line
@@ -98,6 +95,25 @@ Owner check (exact counts, min and max; keyless, prints no body). Run from the r
 ```bash
 PYTHONPATH=src .venv/bin/python -c 'from datetime import date; from deskbrief.config import load_config; from deskbrief.models import JobKind, RunContext, Trigger; from deskbrief.sources.cboe import CboeSource; from deskbrief.sources.http import DefaultHttpClient; from deskbrief.timeutil import utc_now; c = load_config("config.yaml"); s = CboeSource(c); h = DefaultHttpClient(c.sources); e = date.today(); x = RunContext(run_id="probe", job=JobKind.HISTORY, trigger=Trigger.MANUAL, target_date=e, now_utc=utc_now(), git_sha="-", config_hash="-", config=c, store=None); [print(r.symbols[0], w.http_status, w.error or "", *((len(d), d.sort_values("as_of")["as_of"].iloc[-1].tz_convert("America/New_York").date(), d.sort_values("as_of")["value"].iloc[-1], d["value"].min(), d["value"].max()) if (d := (s.parse(w) if w.ok else None)) is not None else ())) for r in s.plan_range(date(1990, 1, 1), e, x) for w in [s.fetch(r, h)]]'
 ```
+
+### Owner run of that check (2026-11-19 15:29 ET, exact)
+
+Run by the owner at the T47 head and posted in
+[the PR #78 comment](https://github.com/allenvarghese05/desk-brief/pull/78#issuecomment-7021366889).
+These are the exact counts, newest closes, minima and maxima. Every file came from `cdn-api.cboe.com` with no bot
+check. At 15:29 ET each file still ended at the prior trading day, which fits an after-close
+update; the 20:00 ET freshness time is still to be confirmed by the first scheduled runs. Every
+value is within the `index_pts` validity bounds.
+
+| Symbol | HTTP | Rows | Newest (ET date, close) | Min | Max |
+|---|---|---|---|---|---|
+| VIX | 200 | 9,319 | 2026-11-18, 24.56 | 9.14 | 82.69 |
+| VIX9D | 200 | 3,993 | 2026-11-18, 23.95 | 7.10 | 106.66 |
+| VIX3M | 200 | 4,319 | 2026-11-18, 24.29 | 11.85 | 72.98 |
+| VIX6M | 200 | 4,751 | 2026-11-18, 24.75 | 13.75 | 61.47 |
+| VXN | 200 | 4,325 | 2026-11-18, 33.12 | 10.31 | 80.08 |
+| GVZ | 200 | 4,317 | 2026-11-18, 28.04 | 8.88 | 48.98 |
+| SKEW | 200 | 9,273 | 2026-11-18, 142.84 | 101.23 | 183.12 |
 
 ## Live probe (2026-11-18, T25)
 

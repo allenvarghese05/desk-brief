@@ -81,10 +81,20 @@ def test_conventions_secrets_and_pins() -> None:
     j = job()
     assert j["runs-on"] == "ubuntu-latest"
     assert j["timeout-minutes"] <= 360
-    env = j["env"]
+    # job-level env: the validated inputs only, never a secret (T55)
+    assert set(j["env"]) == {"PYTHONUNBUFFERED", "IN_START", "IN_END", "IN_SOURCES", "IN_DRY_RUN"}
+    assert "secrets." not in repr(j["env"])
+    # secrets live on the "Run history" step only; no other step (or the job) sees them
+    (run,) = [s for s in j["steps"] if s.get("name") == "Run history"]
+    env = run["env"]
     assert env["DESKBRIEF_STORAGE_BACKEND"] == "r2"
     assert env["DESKBRIEF_STORAGE_BUCKET"] == "${{ secrets.R2_BUCKET }}"
+    for step in j["steps"]:
+        if step is not run:
+            assert "secrets." not in repr(step), step.get("name") or step.get("uses")
+    assert "secrets." not in repr({k: v for k, v in j.items() if k != "steps"})
     secrets = set(re.findall(r"secrets\.([A-Z0-9_]+)", WORKFLOW.read_text()))
+    assert secrets == set(re.findall(r"secrets\.([A-Z0-9_]+)", repr(env)))
     # writer keys and FRED only: the range sources need no other key
     assert secrets == {
         "R2_BUCKET", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "FRED_API_KEY",
