@@ -8,8 +8,10 @@ Shape (``--files``, default 2000, sets the number of ``observations`` files):
 
 * one history file per weekday over two years (daily rows of every daily feed in
   ``config.yaml``; Yahoo history bars carry open, high, low, close and volume);
-* the remaining files are intraday polls on the last 30 weekdays, each a file of Yahoo quote
-  ticks (one tick per quoted instrument), spread evenly over those days;
+* the last 7 weekdays (``COMPACTED_DAYS``, eod's window, P-017) each get 40 intraday polls
+  and are then compacted into ``run=compacted-{date}.parquet``, as production looks after eod;
+* the remaining files are intraday polls on the 23 weekdays before those, each a file of Yahoo
+  quote ticks (one tick per quoted instrument), spread evenly over those days;
 * one ``runs`` row and two ``dq_results`` rows on each of the last 30 weekdays.
 
 Command (one line, from the repo root; DIR must not exist yet or be empty)::
@@ -34,6 +36,7 @@ from typing import Any
 from deskbrief.config import Config, Instrument, load_config
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.schemas import to_frame
+from deskbrief.store.compaction import compact_partition
 from deskbrief.store.datasets import Datasets
 from deskbrief.store.local import LocalBackend
 from deskbrief.timeutil import et_to_utc
@@ -43,6 +46,8 @@ REPO = Path(__file__).resolve().parents[2]
 END = date(2026, 11, 19)
 YEARS = 2
 RECENT_WEEKDAYS = 30
+COMPACTED_DAYS = 7
+POLLS_PER_COMPACTED_DAY = 40
 #: daily feeds written into the history files: (source, dataset) -> field
 _DAILY_FIELD = {
     ("yahoo", "history"): "close",
@@ -214,10 +219,15 @@ def build(out: Path, files: int = 2000) -> Path:
         rows = _history_rows(config, walk, d, run_id)
         ds.append("observations", to_frame("observations", rows), _ctx(config, store, run_id, d), d)
     recent = history[-RECENT_WEEKDAYS:]
-    for n, (d, at) in enumerate(_poll_times(recent, max(files - len(history), 0))):
+    open_days, compacted = recent[:-COMPACTED_DAYS], recent[-COMPACTED_DAYS:]
+    polls = list(_poll_times(open_days, max(files - len(history), 0)))
+    polls += _poll_times(compacted, POLLS_PER_COMPACTED_DAY * len(compacted))
+    for n, (d, at) in enumerate(polls):
         run_id = f"SYNPOLL-{n:05d}"
         rows = _tick_rows(config, walk, at, run_id)
         ds.append("observations", to_frame("observations", rows), _ctx(config, store, run_id, d), d)
+    for d in compacted:
+        compact_partition(store, "observations", d)
     for d in recent:
         run_id = f"SYNRUN-{d.isoformat()}"
         ctx = _ctx(config, store, run_id, d)

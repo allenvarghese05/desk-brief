@@ -59,6 +59,9 @@ CACHE_TTL_SECONDS = 60
 DATA_CACHE_TTL_SECONDS = 15 * 60
 #: the store's listing is checked at most this often; the connection is rebuilt only on change
 LISTING_CHECK_SECONDS = 60
+#: a background check running longer than this (a LIST or GET that never returns) is
+#: abandoned and the next call starts a new one
+REFRESH_TIMEOUT_SECONDS = 5 * 60
 #: views the dashboard connection never builds (no LIST, no httpfs): the dashboard reads the
 #: scorecard from its serving file
 DASHBOARD_SKIP_VIEWS = frozenset({"scorecard"})
@@ -167,6 +170,8 @@ class _Slot:
     checked: float = float("-inf")  # time.monotonic() of the last finished listing check
     busy: bool = False  # the first build or a listing check is running
     error: str = ""  # type of the last failed background check (never its message)
+    started: float = float("-inf")  # time.monotonic() when the running check started
+    gen: int = 0  # id of the newest background check; an abandoned one changes nothing
 
 
 _SLOTS: dict[tuple[str, str], _Slot] = {}
@@ -189,11 +194,12 @@ def _retire(old: _Shared) -> None:
         old.conn.close()
 
 
-def _refresh(config: Config, env: Mapping[str, str], slot: _Slot) -> None:
+def _refresh(config: Config, env: Mapping[str, str], slot: _Slot, gen: int) -> None:
     """One listing check; a rebuild only if the listing changed (runs in a background thread).
 
     The old connection keeps serving every query until the new one is built, then is swapped
-    in and the old one closed."""
+    in and the old one closed. A check that ran longer than ``REFRESH_TIMEOUT_SECONDS`` has
+    been superseded (``slot.gen`` moved on): it then swaps nothing and leaves the slot alone."""
     error = ""
     try:
         cur = slot.current
@@ -202,16 +208,36 @@ def _refresh(config: Config, env: Mapping[str, str], slot: _Slot) -> None:
         if cur is None or listing != cur.listing:
             fresh = _build(store, config, env, listing)
             with _SHARED_GUARD:
-                slot.current = fresh
-            if cur is not None:
+                current = slot.gen == gen
+                if current:
+                    slot.current = fresh
+            if not current:
+                _retire(fresh)
+            elif cur is not None:
                 _retire(cur)
     except Exception as exc:  # the old connection keeps serving; the next check tries again
         error = type(exc).__name__
         _log.warning("dashboard listing check failed: %s", error)
     finally:
         with _SHARED_GUARD:
-            slot.busy, slot.error, slot.checked = False, error, time.monotonic()
+            if slot.gen == gen:
+                slot.busy, slot.error, slot.checked = False, error, time.monotonic()
             _SHARED_GUARD.notify_all()
+
+
+def _start_check(config: Config, env: Mapping[str, str], slot: _Slot) -> None:
+    """Start a background check (``_SHARED_GUARD`` held). If the thread cannot start, the slot
+    is released at once and the next due call tries again."""
+    slot.gen += 1
+    slot.busy, slot.started = True, time.monotonic()
+    try:
+        threading.Thread(
+            target=_refresh, args=(config, env, slot, slot.gen), name="deskbrief-listing",
+            daemon=True,
+        ).start()  # fmt: skip
+    except Exception as exc:  # e.g. RuntimeError: can't start new thread
+        slot.busy, slot.error, slot.checked = False, type(exc).__name__, time.monotonic()
+        _log.warning("dashboard listing check not started: %s", slot.error)
 
 
 def _shared(
@@ -230,12 +256,11 @@ def _shared(
             _SHARED_GUARD.wait()
         cur = slot.current
         if cur is not None:
-            if not slot.busy and time.monotonic() - slot.checked >= LISTING_CHECK_SECONDS:
-                slot.busy = True
-                threading.Thread(
-                    target=_refresh, args=(config, env, slot), name="deskbrief-listing",
-                    daemon=True,
-                ).start()  # fmt: skip
+            now = time.monotonic()
+            due = not slot.busy and now - slot.checked >= LISTING_CHECK_SECONDS
+            hung = slot.busy and now - slot.started >= REFRESH_TIMEOUT_SECONDS
+            if due or hung:
+                _start_check(config, env, slot)
             return cur
         slot.busy = True
     try:
@@ -330,15 +355,22 @@ def build_snapshot(
 
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached(
-    _config: Config, backend: str, where: str, hidden: frozenset[int], version: str
+    _config: Config,
+    backend: str,
+    where: str,
+    hidden: frozenset[int],
+    version: str,
+    minute: datetime,
 ) -> Snapshot:
-    # backend, where, hidden and the data version are the key; the config is not hashed
+    # backend, where, hidden, the data version and the minute are the key; the config is not
+    # hashed. The minute keeps the as-of, health and data-age text at most a minute old.
     return build_snapshot(_config, os.environ, current_time(), hidden)
 
 
 def load_snapshot(config: Config, hidden: frozenset[int] = frozenset()) -> Snapshot:
     s = config.storage
-    return _cached(config, s.backend, _where(config), hidden, data_version(config))
+    minute = current_time().replace(second=0, microsecond=0)
+    return _cached(config, s.backend, _where(config), hidden, data_version(config), minute)
 
 
 def build_bars(

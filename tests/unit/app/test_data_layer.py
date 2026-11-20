@@ -228,3 +228,86 @@ def test_snapshot_cache_is_keyed_on_the_data_version(
     assert len(calls) == 2
     assert calls[0] != calls[1]
     assert data.DATA_CACHE_TTL_SECONDS == 15 * 60
+
+
+def test_a_hung_check_is_abandoned_after_the_timeout(
+    world: World, config: Config, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A LIST that never returns must not stop every later check (review round 1, finding 2)."""
+    with data.shared_connection(config) as old:
+        pass
+    hang, release = threading.Event(), threading.Event()
+    real = data.store_listing
+
+    def stuck(store: Any) -> data.Listing:
+        if not hang.is_set():
+            hang.set()
+            assert release.wait(30)
+        return real(store)
+
+    monkeypatch.setattr(data, "store_listing", stuck)
+    clock[0] += data.LISTING_CHECK_SECONDS + 1
+    data.data_version(config)  # starts the check that hangs
+    assert hang.wait(30)
+    add_file(world, date(2026, 11, 2), 1.0)
+    clock[0] += data.LISTING_CHECK_SECONDS + 1
+    data.data_version(config)  # still within the timeout: no second check
+    slot = data._SLOTS[(config.storage.backend, data._where(config))]
+    assert slot.gen == 1
+    clock[0] += data.REFRESH_TIMEOUT_SECONDS
+    data.data_version(config)  # the hung check is abandoned; a new one runs
+    assert slot.gen == 2
+    assert data.wait_for_refresh(config)
+    with data.shared_connection(config) as conn:
+        assert conn is not old
+        assert conn.execute("SELECT count(*) FROM obs_all WHERE value = 1.0").fetchone() == (1,)
+    newest = conn
+    release.set()  # the abandoned check finishes late: it must not swap or reopen anything
+    for t in [t for t in threading.enumerate() if t.name == "deskbrief-listing"]:
+        t.join(10)
+    with data.shared_connection(config) as conn:
+        assert conn is newest
+    assert slot.gen == 2
+
+
+def test_a_thread_that_cannot_start_releases_the_slot(
+    config: Config, clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with data.shared_connection(config) as old:
+        pass
+
+    def no_start(_self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", no_start)
+    clock[0] += data.LISTING_CHECK_SECONDS + 1
+    with data.shared_connection(config) as conn:
+        assert conn is old
+    slot = data._SLOTS[(config.storage.backend, data._where(config))]
+    assert not slot.busy
+    assert slot.error == "RuntimeError"
+
+
+def test_the_snapshot_cache_refreshes_its_clock_every_minute(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same data version, a minute later: the as-of and data-age text are recomputed."""
+    from datetime import timedelta
+
+    st.cache_data.clear()
+    calls: list[object] = []
+    real: Callable[..., data.Snapshot] = data.build_snapshot
+
+    def counting(*args: Any) -> data.Snapshot:
+        calls.append(args[2])
+        return real(*args)
+
+    now = [MON_0700]
+    monkeypatch.setattr(data, "build_snapshot", counting)
+    monkeypatch.setattr(data, "current_time", lambda: now[0])
+    data.load_snapshot(config, frozenset({1}))
+    now[0] = MON_0700 + timedelta(seconds=30)
+    data.load_snapshot(config, frozenset({1}))  # same minute: cached
+    now[0] = MON_0700 + timedelta(minutes=1)
+    data.load_snapshot(config, frozenset({1}))
+    assert calls == [MON_0700, MON_0700 + timedelta(minutes=1)]

@@ -296,3 +296,66 @@ def test_existing_signatures_are_kept() -> None:
         "store", "table", "clean_version", "keys",
     ]  # fmt: skip
     assert list(inspect.signature(table_cache.read_files).parameters) == ["store", "table", "keys"]
+
+
+def test_a_partition_compacted_twice_with_an_unseen_file_is_reread(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daily schedule (PR #86 review round 1, finding 1): eod D-1 writes ``compacted-D``;
+    the morning job writes M into D; nobody loads the dashboard; eod D merges M into
+    ``compacted-D`` in place (same key) and compacts D2. The key set of D never changes, yet M's
+    rows must show up as soon as the listing changes anywhere."""
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)  # the dashboard is another process
+    write_on(store, config, "R1", D2, 1.0)
+    write_on(store, config, "R2", D2, 2.0)
+    compact_day(store, D2, tables=("observations",))  # eod D-1
+    load(store)
+    write_on(store, config, "M", D2, 3.0)  # morning D, never listed by the dashboard
+    write_on(store, config, "R1", D, 10.0)
+    write_on(store, config, "R2", D, 11.0)
+    compact_day(store, D2, tables=("observations",))  # eod D: M merged into compacted-D2
+    compact_day(store, D, tables=("observations",))
+    got = load(store)
+    assert sorted(r["value"] for r in got.to_pylist()) == [1.0, 2.0, 3.0, 10.0, 11.0]
+    assert sorted_rows(got) == sorted_rows(fresh_load(store))
+
+
+def test_compacted_files_outside_the_recent_window_are_not_read_again(
+    store: CountingBackend, config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import deskbrief.store.compaction as compaction
+
+    monkeypatch.setattr(compaction, "invalidate", lambda: None)
+    old = D - timedelta(days=table_cache.COMPACTED_WINDOW_DAYS)
+    recent = D - timedelta(days=table_cache.COMPACTED_WINDOW_DAYS - 1)
+    for part in (old, recent):
+        write_on(store, config, "R1", part, 1.0)
+        write_on(store, config, "R2", part, 2.0)
+        compact_day(store, part, tables=("observations",))
+    write_on(store, config, "R1", D, 10.0)
+    load(store)
+    store.reads.clear()
+    write_on(store, config, "R2", D, 11.0)
+    load(store)
+    assert sorted(obs_reads(store)) == sorted(
+        [
+            table_key(table="observations", part_date=D, run_id="R2"),
+            table_key(table="observations", part_date=recent, run_id=f"compacted-{recent}"),
+        ]
+    )
+
+
+def test_the_recent_window_matches_compaction() -> None:
+    import deskbrief.store.compaction as compaction
+
+    assert table_cache.COMPACTED_WINDOW_DAYS == compaction.RECENT_DAYS
+
+
+def test_an_older_clean_version_entry_is_dropped(store: CountingBackend, config: Config) -> None:
+    write(store, config, "R1", value=1.0)
+    table_cache.load_table(store, "observations", "v0", ())
+    load(store)
+    versions = {ident[3] for ident in table_cache._cache if ident[2] == "observations"}
+    assert versions == {"v1"}
