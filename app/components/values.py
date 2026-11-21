@@ -122,12 +122,21 @@ def _hidden(p: Provenance, extra: str = "", *, cls: str = "db-sr") -> str:
     )
 
 
-def value_cell(text: str, p: Provenance, *, compact: bool = False) -> str:
-    """A value with its provenance: the full line by default, the glyph when ``compact``."""
+def value_cell(text: str, p: Provenance, *, compact: bool = False, show_as_of: bool = True) -> str:
+    """A value with its provenance: the full line by default, the glyph when ``compact``.
+
+    A compact value also prints its as-of under the figure, as the T36 compact tag did, so a
+    table (Macro, the tear sheet) still shows how old each figure is. ``show_as_of=False``
+    leaves it to the tooltip, for the Markets lists, where every row is the same day."""
     if compact:
+        when = (
+            f'<span class="db-asofline" aria-hidden="true">{escape(p.as_of)}</span>'
+            if show_as_of
+            else ""
+        )
         return (
             f'<span class="db-fig"><span class="db-val">{escape(text)}</span>'
-            f"{provenance_glyph(p)}{flags_html(p)}</span>"
+            f"{provenance_glyph(p)}{flags_html(p)}{when}</span>"
         )
     return (
         f'<span class="db-fig"><span class="db-val">{escape(text)}{flags_html(p)}</span>'
@@ -152,20 +161,24 @@ def change_cell(
 
     ``compact`` draws the change as a tinted pill with the glyph beside it. ``glyph=False``
     keeps the provenance in the markup for screen readers but off screen: for a change printed
-    right next to its value, which already shows the glyph.
+    right next to its value, which already shows the glyph and the caveat words. Otherwise the
+    caveat words (proxy, IEX, fallback, HYPOTHETICAL) are printed beside the change.
     """
     cls = direction(text)
     if compact:
         vs = f"vs {basis}" if basis else ""
         tag = (
-            provenance_glyph(p, vs, cls="db-prov db-of-chg")
+            provenance_glyph(p, vs, cls="db-prov db-of-chg") + flags_html(p)
             if glyph
             else _hidden(p, vs, cls="db-sr db-of-chg")
         )
         return f'<span class="db-fig"><span class="db-val {cls}">{escape(text)}</span>{tag}</span>'
     cls = "" if cls == "db-flat" else cls
     meta = _meta(p, f" · {escape(basis)}" if basis else "")
-    return f'<span class="db-fig"><span class="db-val {cls}">{escape(text)}</span>{meta}</span>'
+    return (
+        f'<span class="db-fig"><span class="db-val {cls}">{escape(text)}{flags_html(p)}</span>'
+        f"{meta}</span>"
+    )
 
 
 def status_marker(status: str) -> str:

@@ -132,7 +132,7 @@ def test_provenance_of_raises_value_error_not_assert() -> None:
 import re  # noqa: E402
 import tomllib  # noqa: E402
 from collections.abc import Callable  # noqa: E402
-from html import unescape  # noqa: E402
+from html.parser import HTMLParser  # noqa: E402
 
 from app import theme  # noqa: E402
 from app.components import kit  # noqa: E402
@@ -155,18 +155,50 @@ T57_FILES = (
 )
 
 
+class _Visible(HTMLParser):
+    """Collects the text a sighted reader sees: no attributes (so no aria-label), nothing inside
+    a screen-reader-only (``db-sr``) element and nothing inside a tooltip (``db-tip``)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.depth = 0  # > 0 while inside a hidden element
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        classes = (dict(attrs).get("class") or "").split()
+        if self.depth or "db-sr" in classes or "db-tip" in classes:
+            self.depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.depth:
+            self.parts.append(data)
+
+
 def visible(html: str) -> str:
-    """Text a sighted reader sees: screen-reader-only spans, tooltips and tags removed."""
-    html = re.sub(r'<span class="db-sr(?: [^"]*)?"[^>]*>.*?</span></span>', "", html, flags=re.S)
-    html = re.sub(r'<span class="db-tip"[^>]*>.*?</span></span>', "", html, flags=re.S)
-    return unescape(re.sub(r"<[^>]+>", "", html))
+    """Text a sighted reader sees (see :class:`_Visible`)."""
+    parser = _Visible()
+    parser.feed(html)
+    parser.close()
+    return "".join(parser.parts)
+
+
+def test_visible_drops_hidden_text_and_attributes() -> None:
+    html = (
+        '<span aria-label="proxy"><span class="db-sr x">IEX</span>'
+        '<span class="db-tip"><b>fallback</b></span>shown</span>'
+    )
+    assert visible(html) == "shown"
 
 
 def test_theme_tokens_are_the_p022_palette_and_match_config() -> None:
     assert (theme.PAGE, theme.PANEL, theme.RAISED, theme.DIVIDER) == (
         "#0B0D10", "#13161B", "#181C22", "#22262E",
     )  # fmt: skip
-    assert (theme.TEXT, theme.SECONDARY, theme.META) == ("#E8EAED", "#9AA0A6", "#6B7078")
+    assert (theme.TEXT, theme.SECONDARY, theme.META) == ("#E8EAED", "#9AA0A6", "#8A9099")
     assert (theme.UP, theme.DOWN, theme.ACCENT) == ("#2EBD85", "#F6465D", "#5B9DFF")
     assert (theme.RADIUS, theme.PAD, theme.GAP) == (12, 24, 20)
     assert theme.SANS.startswith("Inter")
@@ -219,7 +251,10 @@ def test_every_tier_has_glyph_tooltip_focus_and_label(tier: int) -> None:
         "treasury",
     ):
         assert part in tip.group(1)
-    assert visible(html).strip() == f"4.31%{TIER_GLYPH[tier]}"  # the figure and its glyph
+    assert visible(html).strip() == f"4.31%{TIER_GLYPH[tier]}17 Nov"  # figure, glyph, as-of
+    listed = value_cell("4.31%", p, compact=True, show_as_of=False)  # Markets lists
+    assert visible(listed).strip() == f"4.31%{TIER_GLYPH[tier]}"
+    assert 'db-asof">17 Nov 00:00 ET, 2d ago<' in listed  # still in the tooltip
 
 
 def test_tooltip_shows_on_hover_focus_and_tap() -> None:
@@ -254,6 +289,48 @@ def test_row_caveats_become_visible_flags(monkeypatch: pytest.MonkeyPatch) -> No
     p = panels.provenance_of(row, now)  # type: ignore[arg-type]
     assert p.flags == ("proxy", "IEX", "fallback")
     shown = visible(value_cell("$600.00", p, compact=True))
+    for word in ("proxy", "IEX", "fallback"):
+        assert word in shown
+
+
+def test_flag_words_stay_visible_beside_a_change() -> None:
+    """A change printed on its own (biggest moves, the chart header) shows the caveat words."""
+    p = Provenance("alpaca", 2, "10:27", "last", flags=("proxy", "IEX", "fallback"))
+    for html in (
+        change_cell("+1.2%", p, "previous close", compact=True),
+        change_cell("+1.2%", p, "previous close"),
+    ):
+        shown = visible(html)
+        for word in ("proxy", "IEX", "fallback"):
+            assert word in shown, html
+    # beside its value the change stays quiet: the value already shows the words
+    quiet = visible(change_cell("+1.2%", p, "previous close", compact=True, glyph=False))
+    assert quiet.strip() == "+1.2%"
+
+
+def test_biggest_moves_show_proxy_and_caveats_visibly(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.components import panels
+
+    monkeypatch.setattr(panels, "field_label", lambda last: "last")
+    now = datetime(2026, 11, 16, 12, tzinfo=UTC)
+    last = SimpleNamespace(source="alpaca", as_of=now)
+    spy = SimpleNamespace(
+        instrument_id="SPY", name="SPDR S&P 500 ETF", tier=2, as_of_text="10:27",
+        is_proxy=True, available=True, change=SimpleNamespace(last=last),
+        change_text="+1.2%", basis="previous close",
+        qualifiers=("fallback source: alpaca", "IEX: single exchange, not the consolidated tape"),
+    )  # fmt: skip
+    ov = SimpleNamespace(
+        sections=[SimpleNamespace(rows=(spy,))],
+        moves=[SimpleNamespace(instrument_id="SPY", text="SPY +1.2% is 3.1σ its usual move")],
+        as_of=now,
+    )
+    items = panels.move_items(ov)  # type: ignore[arg-type]
+    assert [iid for iid, _ in items] == ["SPY"]
+    shown = visible(items[0][1])
     for word in ("proxy", "IEX", "fallback"):
         assert word in shown
 
@@ -365,3 +442,61 @@ def test_kit_version_survives_an_unreadable_store(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(kit.data, "data_version", boom)
     assert kit.version(load_config(REPO / "config.yaml")) == ""
+
+
+def _rgb(colour: str) -> tuple[float, float, float]:
+    h = colour.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _tint(rgba: str, under: str) -> tuple[float, float, float]:
+    """An ``rgba(r, g, b, a)`` tint composited over an opaque colour."""
+    *rgb, alpha = (float(x) for x in rgba[rgba.index("(") + 1 : -1].split(","))
+    base = _rgb(under)
+    return (
+        rgb[0] * alpha + base[0] * (1 - alpha),
+        rgb[1] * alpha + base[1] * (1 - alpha),
+        rgb[2] * alpha + base[2] * (1 - alpha),
+    )
+
+
+def _contrast(fg: tuple[float, float, float], bg: tuple[float, float, float]) -> float:
+    def lum(c: tuple[float, float, float]) -> float:
+        def ch(v: float) -> float:
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2])
+
+    hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_text_colours_reach_wcag_aa_on_every_surface_they_sit_on() -> None:
+    """4.5:1 for every text token on the shades it is drawn on (the 12 px meta text too)."""
+    t = theme
+    surfaces = (t.PAGE, t.PANEL, t.RAISED, t.HOVER)
+    pairs: list[tuple[str, tuple[float, float, float], tuple[float, float, float]]] = []
+    for name, fg in (("text", t.TEXT), ("secondary", t.SECONDARY), ("meta", t.META),
+                     ("up", t.UP), ("down", t.DOWN)):  # fmt: skip
+        pairs += [(f"{name} on {bg}", _rgb(fg), _rgb(bg)) for bg in surfaces]
+    pairs.append(("meta on divider", _rgb(t.META), _rgb(t.DIVIDER)))
+    pairs += [(f"tooltip {n}", _rgb(c), _rgb(t.TOOLTIP)) for n, c in
+              (("text", t.TEXT), ("secondary", t.SECONDARY))]  # fmt: skip
+    for bg in surfaces:  # pills and markers: text on its tint over the shade under it
+        pairs.append((f"up pill on {bg}", _rgb(t.UP), _tint(t.UP_TINT, bg)))
+        pairs.append((f"down pill on {bg}", _rgb(t.DOWN_PILL), _tint(t.DOWN_TINT, bg)))
+        pairs.append((f"amber mark on {bg}", _rgb(t.AMBER), _tint(t.AMBER_TINT, bg)))
+        pairs.append((f"flat pill on {bg}", _rgb(t.SECONDARY), _rgb(t.RAISED)))
+    for status, colour in kit.STATUS_COLOUR.items():  # the check squares' glyphs
+        pairs.append((f"{status} square", _rgb(kit._STATUS_INK[status]), _rgb(colour)))
+    low = {name: round(_contrast(fg, bg), 2) for name, fg, bg in pairs if _contrast(fg, bg) < 4.5}
+    assert low == {}
+    assert f"color: {theme.DOWN_PILL}" in theme.CSS  # the down pill really uses it
+
+
+def test_status_strip_gives_each_day_its_detail_for_screen_readers() -> None:
+    html = kit.status_strip([("16 Nov", "fail", "SPY vs ES 31 bps"), ("13 Nov", "pass", "")])
+    assert 'aria-label="16 Nov fail: SPY vs ES 31 bps"' in html
+    assert 'aria-label="13 Nov pass"' in html
+    assert "title=" not in html

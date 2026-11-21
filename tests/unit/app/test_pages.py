@@ -199,7 +199,7 @@ def test_data_health_hosted_withholds_tier1_rows(run_page: RunPage) -> None:
 
 def test_data_health_freshness_timeline_per_dataset(run_page: RunPage) -> None:
     t = text(run_page("health", "hosted"))
-    assert 'aria-label="12 Nov fail"' in t  # Thursday's late arrival
+    assert 'aria-label="12 Nov fail: ' in t  # Thursday's late arrival (T57: detail follows)
     assert "minutes late" in t
 
 

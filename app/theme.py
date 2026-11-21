@@ -24,11 +24,15 @@ RAISED = "#181C22"  # hover, selection, controls inside a card
 DIVIDER = "#22262E"  # hairlines between rows (never a card border)
 TEXT = "#E8EAED"  # 15.2:1 on PANEL
 SECONDARY = "#9AA0A6"  # 6.9:1 on PANEL
-META = "#6B7078"  # 3.7:1 on PANEL: meta text only (as-of, field, kickers), never a figure
+META = "#8A9099"  # meta text (as-of, field, kickers): 5.6:1 on PANEL, 4.7:1 on DIVIDER
 UP = "#2EBD85"
 DOWN = "#F6465D"
 UP_TINT = "rgba(46, 189, 133, .13)"
 DOWN_TINT = "rgba(246, 70, 93, .13)"
+#: text of a "down" pill: DOWN on its tint is 3.9:1 on the hover shade, this is 4.8:1 (the
+#: DOWN token itself is unchanged)
+DOWN_PILL = "#FF6377"
+HOVER = "#1D2229"  # an overview card under the pointer or selected (one step above RAISED)
 ACCENT = "#5B9DFF"
 ACCENT_TINT = "rgba(91, 157, 255, .14)"
 AMBER = "#E6B450"  # failed and warn markers (with ✕ / "failed" and "warn", never colour alone)
@@ -85,6 +89,8 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
   font-feature-settings: "tnum"; }}
 .db-val {{ display: block; font-weight: 500; }}
 .db-meta {{ display: block; white-space: nowrap; color: {META}; font-size: {SIZE_META}px; }}
+.db-asofline {{ display: block; color: {META}; font-size: {SIZE_META}px; font-weight: 400;
+  white-space: nowrap; font-variant-numeric: tabular-nums; }}
 .db-tagline {{ display: block; color: {META}; font-size: {SIZE_META}px; font-weight: 400;
   white-space: nowrap; font-variant-numeric: tabular-nums; }}
 .db-up {{ color: {UP}; }} .db-down {{ color: {DOWN}; }} .db-flat {{ color: {SECONDARY}; }}
@@ -92,7 +98,7 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
 .db-fig > .db-val:has(+ .db-of-chg) {{ display: inline-block; padding: 1px 7px;
   border-radius: 6px; font-weight: 500; background: {RAISED}; }}
 .db-fig > .db-up:has(+ .db-of-chg) {{ background: {UP_TINT}; }}
-.db-fig > .db-down:has(+ .db-of-chg) {{ background: {DOWN_TINT}; }}
+.db-fig > .db-down:has(+ .db-of-chg) {{ background: {DOWN_TINT}; color: {DOWN_PILL}; }}
 .db-fig .db-val:has(+ .db-prov) {{ display: inline; }}
 .db-unavailable {{ color: {SECONDARY}; font-style: italic; }}
 .db-sr {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -117,6 +123,7 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
 .db-prov:hover .db-tip, .db-prov:focus .db-tip, .db-prov:focus-within .db-tip,
 .db-tipwrap:hover .db-tip, .db-tipwrap:focus .db-tip {{ display: block; }}
 .db-tipwrap {{ position: relative; outline: none; }}
+.st-key-db-pick-health:has(button:focus-visible) .db-tip {{ display: block; }}
 .db-glyphs {{ display: flex; gap: 16px; flex-wrap: wrap; color: {META};
   font-size: {SIZE_META}px; }}
 .db-glyphs b {{ font-weight: 400; color: {SECONDARY}; margin-right: 4px; }}
@@ -241,7 +248,7 @@ div[class*="st-key-db-ovgrid-"] {{ gap: 10px !important; }}
 div[class*="st-key-db-ovgrid-"] > div {{ flex: 0 0 172px; }}
 .db-card {{ display: block; background: {RAISED}; border-radius: 10px; padding: 10px 12px 8px;
   color: {TEXT}; }}
-{_PICK}:hover .db-card, .db-card.is-sel {{ background: #1D2229; }}
+{_PICK}:hover .db-card, .db-card.is-sel {{ background: {HOVER}; }}
 .db-card.is-sel {{ box-shadow: inset 0 0 0 1px rgba(91, 157, 255, .35); }}
 .db-card-top {{ display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
   font-size: 13px; }}

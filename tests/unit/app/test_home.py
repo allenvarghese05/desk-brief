@@ -56,7 +56,9 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     for title in ("Rates", "FX", "Commodities", "Equities"):
         assert f'db-sec-title">{title}</div>' in text
     assert "Cross checks" in nav_titles(at)  # T57: the page list is st.navigation's top bar
-    assert at.button(key="-".join(("pick", "health"))).label == "Open Data health"
+    assert at.button(key="-".join(("pick", "health"))).label == (
+        "Open Data health: 2/2 checks pass"  # T57: counts readable without hovering
+    )
     assert at.text_input[0].label == "Search instruments"
 
 

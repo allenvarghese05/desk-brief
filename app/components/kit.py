@@ -52,7 +52,8 @@ TIER_DASH = {3: "", 2: "5 3", 1: "1.5 3"}
 STATUS_MARK = {"pass": "✓", "warn": "!", "fail": "✕", "skip": "-"}
 #: P-022: failed and warn are amber (with ✕ and !), never red; red means "down" only
 STATUS_COLOUR = {"pass": theme.UP, "warn": theme.WARN, "fail": theme.FAIL, "skip": theme.META}
-_STATUS_INK = {"pass": theme.PAGE, "warn": theme.PAGE, "fail": theme.PAGE, "skip": theme.TEXT}
+#: glyph colour on each square: page-dark ink, at least 6:1 on every square colour
+_STATUS_INK = {"pass": theme.PAGE, "warn": theme.PAGE, "fail": theme.PAGE, "skip": theme.PAGE}
 
 PAGE_CSS = f"""
 <style>
@@ -285,7 +286,8 @@ def status_strip(items: list[tuple[str, str, str]]) -> str:
     sq = "".join(
         f'<span class="db-sq db-sq-{escape(s)}" tabindex="0" role="img" '
         f'style="background:{STATUS_COLOUR.get(s, theme.META)};'
-        f'color:{_STATUS_INK.get(s, theme.TEXT)}" aria-label="{escape(lab)} {escape(s)}">'
+        f'color:{_STATUS_INK.get(s, theme.TEXT)}" '
+        f'aria-label="{escape(lab)} {escape(s)}{": " + escape(hover) if hover else ""}">'
         f"{STATUS_MARK.get(s, '-')}"
         f'<span class="db-tip" aria-hidden="true">{escape(hover)}</span></span>'
         for lab, s, hover in items

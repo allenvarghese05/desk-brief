@@ -165,6 +165,15 @@ def test_every_page_opens_through_the_router_with_an_id(run_home: Run, file: str
     assert '<span class="db-brand">' in page(at)
 
 
+def test_health_counts_are_readable_without_hovering(run_home: Run) -> None:
+    from app import theme
+
+    at = run_home("hosted")
+    assert at.button(key=pick("health")).label == "Open Data health: 2/2 checks pass"
+    # keyboard focus on the badge's button shows the same counts as the hover tooltip
+    assert ".st-key-db-pick-health:has(button:focus-visible) .db-tip" in theme.CSS
+
+
 def test_health_badge_opens_data_health_in_session(run_home: Run) -> None:
     at = run_home("hosted")
     at.session_state["probe"] = "still here"

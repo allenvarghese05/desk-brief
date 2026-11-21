@@ -145,7 +145,8 @@ def _overview(ov: data.Overview, sel: str) -> None:
 def _health(ov: data.Overview) -> None:
     with st.container(key="db-pick-health"):
         _html(st, panels.status(ov))
-        if st.button("Open Data health", key="pick-health"):
+        # the counts are in the label, so they are read out without hovering (T57 review)
+        if st.button(f"Open Data health: {ov.health.text}", key="pick-health"):
             st.switch_page(HEALTH_PAGE)
 
 

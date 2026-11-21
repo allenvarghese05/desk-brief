@@ -93,6 +93,11 @@ def flags(row: Row) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _listed(text: str, p: Provenance) -> str:
+    """A value in a Markets list: glyph and caveat words, as-of in the tooltip."""
+    return value_cell(text, p, compact=True, show_as_of=False)
+
+
 def _has_change(row: Row) -> bool:
     return row.change is not None and row.change_text not in ("n/a", "")
 
@@ -178,7 +183,7 @@ def tile_items(ov: Overview, sel: str = "") -> list[Item]:
         else:
             p = provenance_of(row, ov.as_of)
             body = (
-                f'<div class="db-tile-value">{value_cell(row.value_text, p, compact=True)}</div>'
+                f'<div class="db-tile-value">{_listed(row.value_text, p)}</div>'
                 f'<div class="db-tile-row"><span class="db-tile-chg">{_change(row, p)}</span>'
                 f"{_spark(ov.sparks.get(row.instrument_id, ()), _trend_cls(row))}</div>"
             )
@@ -266,7 +271,7 @@ def wl_row(row: Row, now: datetime, sel: str) -> str:
     else:
         p = provenance_of(row, now)
         cells = (
-            f'<span class="db-wl-val">{value_cell(row.value_text, p, compact=True)}</span>'
+            f'<span class="db-wl-val">{_listed(row.value_text, p)}</span>'
             f'<span class="db-wl-chg">{_change(row, p)}</span>'
         )
     current = ' aria-current="true"' if row.instrument_id == sel else ""
@@ -355,7 +360,7 @@ def overview(ov: Overview, sel: str = "") -> list[tuple[str, list[Item]]]:
                     f'<div class="db-card-top"><b>{escape(short(row))}'
                     f'<span class="db-sr"> · {escape(row.name)}</span></b>'
                     f"{_change(row, p)}</div>"
-                    f'<div class="db-card-val">{value_cell(row.value_text, p, compact=True)}</div>'
+                    f'<div class="db-card-val">{_listed(row.value_text, p)}</div>'
                     f"{spark}</a>",
                 )
             )
