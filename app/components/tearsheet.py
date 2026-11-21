@@ -1,4 +1,4 @@
-"""Instrument tearsheet (T36 phase 1): what an analyst needs about one instrument on one screen.
+"""Instrument tearsheet (T36 phase 1, T58 v2): what an analyst needs about one instrument.
 
 * performance over horizons (1D from the report; 1W, 1M, 3M, YTD, 1Y from daily closes),
   a weekly series (``1w``) shows its week-on-week change first and says that daily-move
@@ -9,20 +9,30 @@
   with when it was true (as of) and when we fetched it,
 * source agreement over time (cross-checks naming the instrument) and corrections (revisions).
 
+Statistics respect data gaps (T58): a horizon refuses a base close older than the horizon
+allows and says "no data"; realised volatility, sigma and drawdown skip every move across a
+gap of more than :data:`GAP_BDAYS` business days and say so; a date span names the year when it
+crosses one.
+
 Every figure is printed through ``values.value_cell`` with a :class:`Provenance` naming its
 source, tier, date and what it is. Derived statistics name the closes they were computed from.
 Hosted mode never reads a hidden tier (SQL excludes them; cross-checks naming a source with a
-hidden-tier feed are withheld whole).
+hidden-tier feed are withheld whole). Caches are keyed on ``data.data_version()`` (T58). No
+markup here carries a ``title`` attribute (P-022).
 """
 # ruff: noqa: RUF001  (minus, sigma and en dash are intentional output)
 
 from __future__ import annotations
 
+import itertools
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from html import escape
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from app.components import data
@@ -46,6 +56,14 @@ HORIZONS: tuple[tuple[str, int | None], ...] = (
 )
 XCHECK_DAYS = 14
 REVISION_DAYS = 30
+#: a move across more than this many business days without a close is a gap: volatility, sigma
+#: and drawdown skip it (T58)
+GAP_BDAYS = 5
+#: how much older than a horizon's start its base close may be (calendar days): a long weekend
+#: or a holiday is fine, a hole in the data is not (T58)
+BASE_SLACK_DAYS = 5
+BASE_SLACK_DAYS_WEEKLY = 10
+DRAWDOWN_DAYS = 365
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +119,7 @@ def _bar_prov(
     if latest is not None and latest.change is not None:
         tiers.add(latest.change.last.tier)
         sources.add(latest.change.last.source)
-    a, b = used["d"].iloc[0], used["d"].iloc[-1]
-    span = f"{b:%d %b}" if a == b else f"{a:%d %b} – {b:%d %b}"
+    span = date_span(used["d"].iloc[0], used["d"].iloc[-1])
     if len(tiers) > 1:
         what += "; mixed tiers: " + ", ".join(TIER_NAME[t] for t in sorted(tiers, reverse=True))
     return Provenance(", ".join(sorted(sources)), min(tiers), span, what)
@@ -120,16 +137,68 @@ def _move(now: float, then: float, mode: str) -> tuple[float, str]:
 
 def _utc(ts: object) -> datetime:
     """A stored timestamp as an aware UTC datetime (DuckDB may hand back naive UTC)."""
-    t = pd.Timestamp(ts)
+    t = pd.Timestamp(ts)  # type: ignore[arg-type]
     t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
-    return t.to_pydatetime()  # type: ignore[no-any-return]
+    return t.to_pydatetime()
+
+
+def _records(df: pd.DataFrame) -> Iterator[Any]:
+    """Rows of a query result as named tuples (typed loosely: DuckDB decides the types)."""
+    return iter(df.itertuples())
 
 
 def _need(n_need: int, n_have: int) -> str:
+    """Too little history, said on screen and in full for screen readers (no ``title``)."""
     return (
-        f'<span class="db-unavailable" title="needs {n_need} days of history, '
-        f'the store holds {n_have}">needs {n_need}d</span>'
+        f'<span class="db-unavailable">needs {n_need}d<span class="db-sr"> (needs {n_need} '
+        f"days of history, the store holds {n_have})</span></span>"
     )
+
+
+def date_span(a: object, b: object) -> str:
+    """Two dates joined by an en dash; both carry the year when the span crosses one (T58)."""
+    x, y = pd.Timestamp(a), pd.Timestamp(b)  # type: ignore[arg-type]
+    if x.date() == y.date():
+        return f"{y:%d %b}"
+    if x.year != y.year:
+        return f"{x:%d %b %Y} – {y:%d %b %Y}"
+    return f"{x:%d %b} – {y:%d %b}"
+
+
+@dataclass(frozen=True)
+class Gap:
+    """A hole in the daily history: the last close before it and the first after it."""
+
+    before: date
+    after: date
+    bdays: int  # business days between the two closes, the second one included
+
+    @property
+    def text(self) -> str:
+        return f"{date_span(self.before, self.after)} ({self.bdays} business days)"
+
+
+def gaps(bars: pd.DataFrame) -> list[Gap]:
+    """Every step between consecutive closes longer than :data:`GAP_BDAYS` business days.
+
+    A weekly series steps a week at a time by design, so it has no gaps by this rule."""
+    if len(bars) < 2 or _is_weekly(bars):
+        return []
+    days = [d.date() for d in pd.to_datetime(bars["d"])]
+    out = []
+    for a, b in itertools.pairwise(days):
+        n = int(np.busday_count(a, b))
+        if n > GAP_BDAYS:
+            out.append(Gap(a, b, n))
+    return out
+
+
+def _gap_note(skipped: list[Gap]) -> str:
+    if not skipped:
+        return ""
+    noun = "gap" if len(skipped) == 1 else "gaps"
+    where = "; ".join(g.text for g in skipped)
+    return f"skips the {noun} in the data longer than {GAP_BDAYS} business days: {where}"
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +235,7 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
     value, day = latest
     mode = _mode(bars)
     first = bars["d"].iloc[0].date()
+    slack = BASE_SLACK_DAYS_WEEKLY if _is_weekly(bars) else BASE_SLACK_DAYS
     for label, days in HORIZONS:
         start = date(day.year - 1, 12, 31) if days is None else day - timedelta(days=days)
         before = bars[bars["d"].dt.date <= start]
@@ -174,6 +244,10 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
             out.append(Horizon(label, _need(need, (day - first).days)))
             continue
         base = before.iloc[-1]
+        base_day = base["d"].date()
+        if (start - base_day).days > slack:  # a hole in the data: never a longer change
+            out.append(Horizon(label, _no_base(label, base_day, start)))
+            continue
         chg, unit = _move(value, float(base["close"]), mode)
         base_tier, base_src = int(base["tier"]), str(base["source"])
         if row.change is not None:  # the latest value can be another feed than the base close
@@ -196,6 +270,15 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
     return out
 
 
+def _no_base(label: str, base: date, start: date) -> str:
+    """The closest earlier close is too old for this horizon (a gap in the data)."""
+    return (
+        '<span class="db-unavailable">no data<span class="db-sr"> (no close near '
+        f"{start:%d %b %Y}: the closest earlier one, {base:%d %b %Y}, is older than the "
+        f"{escape(label)} horizon allows)</span></span>"
+    )
+
+
 def horizons_html(items: list[Horizon]) -> str:
     cells = "".join(
         f'<div class="db-hz"><span class="db-hz-label">{escape(h.label)}</span>{h.html}</div>'
@@ -210,12 +293,40 @@ def horizons_html(items: list[Horizon]) -> str:
 
 
 def _moves(bars: pd.DataFrame) -> pd.Series:
-    closes = bars["close"].astype(float)
+    """Daily moves (bp for yields, points for levels, log returns in % otherwise), indexed by
+    the later bar's position. A move across a gap (see :func:`gaps`) is left out (T58)."""
+    closes = bars["close"].astype(float).reset_index(drop=True)
     if _is_yield(bars):
-        return closes.diff().dropna() * 100  # bp
-    if _mode(bars) != "%":
-        return closes.diff().dropna()  # points: a level may be zero or negative
-    return (closes.apply(math.log).diff().dropna()) * 100  # log return in %
+        moves = closes.diff() * 100  # bp
+    elif _mode(bars) != "%":
+        moves = closes.diff()  # points: a level may be zero or negative
+    else:
+        moves = closes.apply(math.log).diff() * 100  # log return in %
+    days = pd.to_datetime(bars["d"]).dt.date.reset_index(drop=True)
+    if not _is_weekly(bars):
+        for i in range(1, len(days)):
+            if int(np.busday_count(days[i - 1], days[i])) > GAP_BDAYS:
+                moves.iloc[i] = float("nan")
+    return moves.dropna()
+
+
+def _skipped(bars: pd.DataFrame, since: object) -> list[Gap]:
+    """The gaps that fall inside the window a statistic used."""
+    cut = pd.Timestamp(since).date()  # type: ignore[arg-type]
+    return [g for g in gaps(bars) if g.after >= cut]
+
+
+def _segments(bars: pd.DataFrame) -> list[pd.DataFrame]:
+    """The bars cut at every gap, so a drawdown never runs across one."""
+    cuts = {g.after for g in gaps(bars)}
+    out, start = [], 0
+    days = [d.date() for d in pd.to_datetime(bars["d"])]
+    for i, d in enumerate(days):
+        if d in cuts and i > start:
+            out.append(bars.iloc[start:i])
+            start = i
+    out.append(bars.iloc[start:])
+    return [x for x in out if not x.empty]
 
 
 def _num(v: float, unit: str) -> str:
@@ -224,16 +335,21 @@ def _num(v: float, unit: str) -> str:
     return f"{v:,.2f}" if abs(v) >= 10 else f"{v:,.4f}"
 
 
+def _fact(label: str, value: str) -> str:
+    return f'<div class="db-fact"><span>{escape(label)}</span><b>{value}</b></div>'
+
+
 def risk_html(row: Row, bars: pd.DataFrame) -> str:
-    """Realised vol, today's move in sigmas, max drawdown and the 52-week range, honestly."""
+    """Realised vol, today's move in sigmas, max drawdown and the 52-week range, as label and
+    value rows and a labelled range bar. Moves across a gap are skipped and the card says so."""
     if bars.empty:
         return '<div class="db-empty">No daily history yet.</div>'
     yields = _is_yield(bars)
     mode = _mode(bars)
-    unit = str(bars["unit"].iloc[-1])
     moves = _moves(bars)
     n = len(moves)
     facts: list[tuple[str, str]] = []
+    skipped: list[Gap] = []
     weekly = _is_weekly(bars)
     # 20 weekly moves are not "20-day" volatility, and a % volatility of a level that may cross
     # zero means nothing: both say so instead of printing a mislabelled number
@@ -241,54 +357,116 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
         "weekly series: needs daily values" if weekly
         else None if mode in ("%", "bp") else "not computed for a level series"
     )  # fmt: skip
+    vol_label = f"Realised vol, {VOL_DAYS} days"
     if skip:
         note = f'<span class="db-unavailable">{skip}</span>'
-        facts += [("Realised vol 20d", note), ("Latest move", note)]
+        facts += [(vol_label, note), ("Latest move", note)]
     elif n >= VOL_DAYS:
-        vol = float(moves.tail(VOL_DAYS).std()) * math.sqrt(252)
+        used = moves.tail(VOL_DAYS)
+        vol = float(used.std()) * math.sqrt(252)
         text = f"{vol:,.0f} bp" if yields else f"{vol:.1f}%"
-        p = _bar_prov(bars.tail(VOL_DAYS + 1), f"{VOL_DAYS}-day realised volatility, annualised")
-        facts.append(("Realised vol 20d", value_cell(text, p)))
+        window = bars.iloc[max(0, int(used.index[0]) - 1) :]
+        gone = _skipped(bars, window["d"].iloc[0])
+        skipped += gone
+        what = f"{VOL_DAYS}-day realised volatility, annualised"
+        p = _bar_prov(window, what + (f"; {_gap_note(gone)}" if gone else ""))
+        facts.append((vol_label, value_cell(text, p, compact=True, show_as_of=False)))
     else:
-        facts.append(("Realised vol 20d", _need(VOL_DAYS + 1, n + 1)))
+        facts.append((vol_label, _need(VOL_DAYS + 1, n + 1)))
     latest = _latest(row, bars)
     if skip is None and latest is not None and n >= SIGMA_MIN_DAYS:
         value, day = latest
         last_close = float(bars["close"].iloc[-1])
-        intraday = day > bars["d"].iloc[-1].date()
+        last_day = bars["d"].iloc[-1].date()
+        intraday = day > last_day
+        across = (
+            int(np.busday_count(last_day, day)) > GAP_BDAYS
+            if intraday
+            else (len(bars) - 1) not in moves.index  # the last move was across a gap
+        )
         today = _move(value, last_close, mode)[0] if intraday else float(moves.iloc[-1])
         hist = moves if intraday else moves.iloc[:-1]
         sd = float(hist.tail(60).std())
-        if sd > 0:
+        if across:
+            facts.append(
+                ("Latest move", '<span class="db-unavailable">no data<span class="db-sr"> '
+                 "(the latest move spans a gap in the data)</span></span>")
+            )  # fmt: skip
+        elif sd > 0:
+            window = bars.iloc[max(0, int(hist.tail(60).index[0]) - 1) :]
+            gone = _skipped(bars, window["d"].iloc[0])
+            skipped += gone
+            what = f"latest move in standard deviations of {len(hist.tail(60))} daily moves"
             p = _bar_prov(
-                bars.tail(61),
-                f"latest move in standard deviations of {len(hist.tail(60))} daily moves",
+                window,
+                what + (f"; {_gap_note(gone)}" if gone else ""),
                 latest=row if intraday else None,
             )
-            facts.append(("Latest move", value_cell(f"{today / sd:+.1f}σ".replace("-", _MINUS), p)))
+            text = f"{today / sd:+.1f}σ".replace("-", _MINUS)
+            facts.append(("Latest move", value_cell(text, p, compact=True, show_as_of=False)))
     elif skip is None:
         facts.append(("Latest move", _need(SIGMA_MIN_DAYS + 1, n + 1)))
     if mode == "%" and len(bars) >= 2:
-        closes = bars["close"].astype(float)
-        dd = float((closes / closes.cummax() - 1).min()) * 100
-        p = _bar_prov(bars, "largest fall from a high, daily closes")
-        facts.append(("Max drawdown", value_cell(_signed(dd, "%"), p)))
+        recent = bars[bars["d"] >= bars["d"].iloc[-1] - pd.Timedelta(days=DRAWDOWN_DAYS)]
+        dd = 0.0
+        for seg in _segments(recent):
+            closes = seg["close"].astype(float)
+            dd = min(dd, float((closes / closes.cummax() - 1).min()) * 100)
+        gone = _skipped(recent, recent["d"].iloc[0])
+        skipped += gone
+        what = "largest fall from a high, daily closes"
+        p = _bar_prov(recent, what + (f"; {_gap_note(gone)}" if gone else ""))
+        span = (recent["d"].iloc[-1] - recent["d"].iloc[0]).days
+        label = "Max drawdown, 1Y" if span >= 360 else f"Max drawdown, {len(recent)} days"
+        facts.append((label, value_cell(_signed(dd, "%"), p, compact=True, show_as_of=False)))
+    body = "".join(_fact(k, v) for k, v in facts)
+    note = ""
+    if skipped:
+        uniq = list(dict.fromkeys(skipped))
+        note = f'<div class="db-note db-gapnote">Vol, sigma and drawdown {_gap_note(uniq)}.</div>'
+    return f'<div class="db-facts">{body}</div>{note}{range_html(row, bars)}'
+
+
+def range_html(row: Row, bars: pd.DataFrame) -> str:
+    """The 52-week range as a labelled bar: label and latest value, the bar with a marker at
+    the latest value, and the low and high at its ends, each with provenance."""
+    unit = str(bars["unit"].iloc[-1])
+    weekly = _is_weekly(bars)
     year = bars[bars["d"] >= bars["d"].iloc[-1] - pd.Timedelta(days=365)]
     hi, lo = float(year["close"].max()), float(year["close"].min())
     days = (year["d"].iloc[-1] - year["d"].iloc[0]).days
     span, step = ("weekly", "weeks") if weekly else ("daily", "days")
     label = "52-week range" if days >= 360 else f"Range, {len(year)} {step}"
-    p = _bar_prov(year, f"lowest and highest {span} {year['field'].iloc[-1]}")
-    facts.append((label, value_cell(f"{_num(lo, unit)} – {_num(hi, unit)}", p)))
-    body = "".join(f"<tr><th>{escape(k)}</th><td>{v}</td></tr>" for k, v in facts)
+    field = year["field"].iloc[-1]
+    lo_row = year.loc[year["close"].astype(float).idxmin()]
+    hi_row = year.loc[year["close"].astype(float).idxmax()]
+    p_lo = _bar_prov(year[year["d"] == lo_row["d"]], f"lowest {span} {field} of the range")
+    p_hi = _bar_prov(year[year["d"] == hi_row["d"]], f"highest {span} {field} of the range")
+    latest = _latest(row, bars)
+    head = f'<span class="db-range-label">{escape(label)}</span>'
+    if latest is not None:
+        if row.change is not None:
+            last = row.change.last
+            p_now = Provenance(
+                last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", "latest value"
+            )
+        else:
+            p_now = _bar_prov(bars.tail(1), f"latest {span} {field}")
+        head += f"<b>{value_cell(_num(latest[0], unit), p_now, compact=True, show_as_of=False)}</b>"
     bar = ""
     if latest is not None and hi > lo:
         pos = min(1.0, max(0.0, (latest[0] - lo) / (hi - lo)))
         bar = (
-            f'<div class="db-range" role="img" aria-label="latest value at {pos:.0%} of the '
-            f'range"><span style="left:calc({pos * 100:.1f}% - 1px)"></span></div>'
+            f'<div class="db-range" role="img" aria-label="{escape(label)}: latest value at '
+            f'{pos:.0%} of the way from the low to the high">'
+            f'<span class="db-range-fill" style="width:{pos * 100:.1f}%"></span>'
+            f'<span class="db-range-mk" style="left:calc({pos * 100:.1f}% - 1px)"></span></div>'
         )
-    return f'<table class="db-dl">{body}</table>{bar}'
+    ends = (
+        f'<div class="db-range-ends"><span>{value_cell(_num(lo, unit), p_lo, compact=True)}'
+        f"</span><span>{value_cell(_num(hi, unit), p_hi, compact=True)}</span></div>"
+    )
+    return f'<div class="db-rangebox"><div class="db-range-head">{head}</div>{bar}{ends}</div>'
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +483,9 @@ def _tiers_sql(hidden: frozenset[int]) -> str:
     return ", ".join(str(int(t)) for t in (1, 2, 3) if t not in hidden) or "0"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _all_values(
-    _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
+    _config: Config, where: str, iid: str, hidden: frozenset[int], ver: str, _now: datetime
 ) -> pd.DataFrame:
     with data.shared_connection(_config) as conn:
         return conn.execute(
@@ -352,11 +530,11 @@ def all_values_html(
     config: Config, iid: str, hidden: frozenset[int], now: datetime
 ) -> tuple[str, int]:
     """One line per source, dataset, field and interval: value, as of, fetched. (html, count)"""
-    df = _all_values(config, _where(config), iid, hidden, now)
+    df = _all_values(config, _where(config), iid, hidden, data.data_version(config), now)
     if df.empty:
         return '<div class="db-empty">No values stored for this instrument.</div>', 0
     rows = []
-    for r in df.itertuples():
+    for r in _records(df):
         as_of = to_et(_utc(r.as_of))
         fetched = _utc(r.ingested_at)
         field = _FIELD_TEXT.get(str(r.field), str(r.field))
@@ -392,8 +570,8 @@ def all_values_html(
 # ---------------------------------------------------------------------------
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _xchecks(_config: Config, where: str, iid: str, today: date) -> pd.DataFrame:
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _xchecks(_config: Config, where: str, iid: str, today: date, ver: str) -> pd.DataFrame:
     with data.shared_connection(_config) as conn:
         return conn.execute(
             "SELECT check_name, target_date, status, diff_bps, warn_bps, fail_bps, "
@@ -407,20 +585,41 @@ def _xchecks(_config: Config, where: str, iid: str, today: date) -> pd.DataFrame
 _STATUS_MARK = {"pass": "✓", "warn": "!", "fail": "✕", "skip": "–"}
 
 
-def agreement_html(config: Config, iid: str, hidden: frozenset[int], today: date) -> str:
-    """Each cross-check naming the instrument: the last 14 days as marks, the latest gap."""
-    df = _xchecks(config, _where(config), iid, today)
+def _visible_xchecks(config: Config, iid: str, hidden: frozenset[int], today: date) -> pd.DataFrame:
+    """Cross-checks naming the instrument, without skips and without any naming a source that
+    has a hidden-tier feed (hosted mode withholds those whole)."""
+    df = _xchecks(config, _where(config), iid, today, data.data_version(config))
     exposed = exposed_sources(config, hidden)
     if not df.empty and exposed:
         df = df[~(df["left_source"].isin(exposed) | df["right_source"].isin(exposed))]
-    df = df[df["status"] != "skip"] if not df.empty else df
+    return df[df["status"] != "skip"] if not df.empty else df
+
+
+def xcheck_summary(config: Config, iid: str, hidden: frozenset[int], today: date) -> str:
+    """One sentence for the verdict card: how the last 14 days of cross-checks went."""
+    df = _visible_xchecks(config, iid, hidden, today)
+    if df.empty:
+        return f"No cross-checks in the last {XCHECK_DAYS} days."
+    n, ok = len(df), int((df["status"] == "pass").sum())
+    pairs = ", ".join(
+        dict.fromkeys(f"{r.left_source} vs {r.right_source}" for r in df.itertuples())
+    )
+    fails = int((df["status"] == "fail").sum())
+    tail = f"{ok} of {n} passed" + (f", {fails} failed" if fails else "")
+    return f"Cross-checks, last {XCHECK_DAYS} days ({pairs}): {tail}."
+
+
+def agreement_html(config: Config, iid: str, hidden: frozenset[int], today: date) -> str:
+    """Each cross-check naming the instrument: the last 14 days as marks, the latest gap."""
+    df = _visible_xchecks(config, iid, hidden, today)
     if df.empty:
         return f'<div class="db-empty">No cross-checks in the last {XCHECK_DAYS} days.</div>'
     lines = []
     for name, g in df.groupby("check_name", sort=False):
         marks = "".join(
-            f'<span class="db-st-{escape(str(s))}" title="{r.target_date:%d %b}: {escape(str(s))}">'
+            f'<span class="db-st-{escape(str(s))}" aria-hidden="true">'
             f"{_STATUS_MARK.get(str(s), '?')}</span>"
+            f'<span class="db-sr">{r.target_date:%d %b %Y}: {escape(str(s))}; </span>'
             for r, s in zip(g.itertuples(), g["status"], strict=True)
         )
         last = g.iloc[-1]
@@ -439,9 +638,9 @@ def agreement_html(config: Config, iid: str, hidden: frozenset[int], today: date
     return f'<div class="db-checks">{"".join(lines)}</div>'
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _revisions(
-    _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
+    _config: Config, where: str, iid: str, hidden: frozenset[int], ver: str, _now: datetime
 ) -> pd.DataFrame:
     with data.shared_connection(_config) as conn:
         return conn.execute(
@@ -457,11 +656,11 @@ def _revisions(
 
 
 def revisions_html(config: Config, iid: str, hidden: frozenset[int], now: datetime) -> str:
-    df = _revisions(config, _where(config), iid, hidden, now)
+    df = _revisions(config, _where(config), iid, hidden, data.data_version(config), now)
     if df.empty:
         return f'<div class="db-empty">No corrections in the last {REVISION_DAYS} days.</div>'
     lines = []
-    for r in df.itertuples():
+    for r in _records(df):
         as_of = to_et(_utc(r.as_of))
         at = to_et(_utc(r.revised_at))
         unit, field = str(r.unit), str(r.field)

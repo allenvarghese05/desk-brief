@@ -322,15 +322,17 @@ def test_biggest_moves_show_proxy_and_caveats_visibly(monkeypatch: pytest.Monkey
         is_proxy=True, available=True, change=SimpleNamespace(last=last),
         change_text="+1.2%", basis="previous close",
         qualifiers=("fallback source: alpaca", "IEX: single exchange, not the consolidated tape"),
+        label="SPDR S&P 500 ETF — proxy for the S&P 500", value_text="$600.00",  # T58 row
     )  # fmt: skip
     ov = SimpleNamespace(
         sections=[SimpleNamespace(rows=(spy,))],
         moves=[SimpleNamespace(instrument_id="SPY", text="SPY +1.2% is 3.1σ its usual move")],
         as_of=now,
     )
-    items = panels.move_items(ov)  # type: ignore[arg-type]
-    assert [iid for iid, _ in items] == ["SPY"]
-    shown = visible(items[0][1])
+    # T58: biggest moves became a sigma tag on the watchlist row (P-022)
+    sig = panels.sigmas(ov)["SPY"]  # type: ignore[arg-type]
+    shown = visible(panels.wl_row(spy, now, "", (), sig))  # type: ignore[arg-type]
+    assert "3.1σ" in shown
     for word in ("proxy", "IEX", "fallback"):
         assert word in shown
 
@@ -397,18 +399,17 @@ def test_rendered_t57_markup_has_no_title_or_link(run_home: Callable[..., AppTes
     run_home("local")
     cfg = load_config(__import__("os").environ["DESKBRIEF_CONFIG"])
     ov = data.overview(data.load_snapshot(cfg, frozenset()), data.LOCAL, frozenset())
-    parts = [panels.brand(ov), panels.status(ov), panels.yield_curve(ov), panels.NO_MOVES]
-    parts += [h for _, h in panels.tile_items(ov, "UST_10Y") + panels.move_items(ov)]
-    for g in panels.watchlist(ov.sections, ov.as_of, "SPY"):
+    parts = [panels.brand(ov), panels.status(ov), panels.footer(ov, kit.glyph_legend())]
+    parts += [h for _, h in panels.tile_items(ov, "UST_10Y")]
+    sigs = {"SPY": ("3.1σ", "SPY moved 3.1σ")}  # T58: moves are sigma tags on the rows
+    for g in panels.watchlist(ov.sections, ov.as_of, "SPY", sparks=ov.sparks, sigs=sigs):
         parts += [panels.group_title(g.title)] + [h for _, h in g.rows + g.proxies]
-    for title, cards in panels.overview(ov, "UST_10Y"):
-        parts += [panels.section_title(title)] + [h for _, h in cards]
     rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
     parts += [panels.chart_header(r, ov.as_of) for r in rows.values()]
     parts += [kit.glyph_legend(), kit.kpis([("Checks", "3", "fail", "x")]), kit.status_legend()]
     parts += [kit.status_strip([("16 Nov", "fail", "1 failed"), ("13 Nov", "pass", "ok")])]
     html = "".join(parts)
-    assert len(parts) > 40
+    assert len(parts) > 30
     assert "title=" not in html
     assert "href=" not in html
     assert "target=" not in html

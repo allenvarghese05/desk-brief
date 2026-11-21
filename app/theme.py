@@ -121,7 +121,8 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
   pointer-events: none; }}
 .db-tip .db-src, .db-tip .db-asof {{ color: {SECONDARY}; }}
 .db-prov:hover .db-tip, .db-prov:focus .db-tip, .db-prov:focus-within .db-tip,
-.db-tipwrap:hover .db-tip, .db-tipwrap:focus .db-tip {{ display: block; }}
+.db-tipwrap:hover .db-tip, .db-tipwrap:focus .db-tip,
+.st-key-db-pick-health:hover .db-tip {{ display: block; }}
 .db-tipwrap {{ position: relative; outline: none; }}
 .st-key-db-pick-health:has(button:focus-visible) .db-tip {{ display: block; }}
 .db-glyphs {{ display: flex; gap: 16px; flex-wrap: wrap; color: {META};

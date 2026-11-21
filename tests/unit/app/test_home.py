@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001  (the sigma sign is intentional output)
 """Dashboard workspace (T34, T36): AppTest smoke, hosted-mode licence rule, no bare numbers,
 selection by ``?id=``, the folded-in Instrument details and the price chart's data rules.
 
@@ -16,15 +17,20 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from brief_synth import FRI, daily, monday_rows
+from brief_synth import FRI, MON_0700, daily, monday_rows
 
-HOME = Path(__file__).resolve().parents[3] / "app" / "Home.py"
+REPO = Path(__file__).resolve().parents[3]
+HOME = REPO / "app" / "Home.py"
 Run = Callable[..., AppTest]
 
 
 def page(at: AppTest, *, limits: bool = True) -> str:
     """All rendered markdown and captions; ``limits=False`` drops the known-limits bullets."""
-    parts = [m.value for m in at.markdown if limits or not m.value.startswith("- ")]
+    parts = [
+        m.value
+        for m in at.markdown
+        if (limits or not m.value.startswith("- ")) and not m.value.lstrip().startswith("<style>")
+    ]
     return "\n".join(parts + [c.value for c in at.caption] + [e.label for e in at.expander])
 
 
@@ -294,14 +300,18 @@ def test_single_search_match_selects_it(run_home: Run) -> None:
     assert '<span class="db-ch-name">EURUSD</span>' in text
 
 
+def verdict_card(text: str) -> str:
+    """The right rail's "Do the sources agree?" card (T58: the old tier ladder)."""
+    return text.split('<div class="db-card-h">Do the sources agree?</div>', 1)[1].split(
+        '<div class="db-card-h">Risk and range</div>', 1
+    )[0]
+
+
 def test_ladder_uses_p009_labels(run_home: Run) -> None:
-    text = page(select(run_home("local"), "UST_10Y"))
-    ladder = text.split('db-kicker">Do the sources agree?</div>', 1)[1].split("Cross-checks", 1)[0]
+    ladder = verdict_card(page(select(run_home("local"), "UST_10Y")))
     assert 'db-field">yield<' in ladder
     assert 'db-field">close<' not in ladder  # a yield is not a close
-    eur = page(select(run_home("local"), "EURUSD")).split(
-        'db-kicker">Do the sources agree?</div>', 1
-    )[1]
+    eur = verdict_card(page(select(run_home("local"), "EURUSD")))
     assert "ECB reference rate" in eur
 
 
@@ -314,7 +324,7 @@ def test_hosted_details_never_show_tier1(run_home: Run) -> None:
 
 def test_local_details_show_every_tier_and_checks(run_home: Run) -> None:
     text = page(select(run_home("local"), "SPY"))
-    ladder = text.split('db-kicker">Do the sources agree?</div>', 1)[1].split("Cross-checks", 1)[0]
+    ladder = verdict_card(text)
     assert "alpaca" in ladder
     assert "live" in ladder
     assert "Data checks, last 14 days" in text
@@ -380,7 +390,7 @@ def test_horizons_say_how_much_history_they_need(run_home: Run) -> None:
 def test_risk_panel_needs_twenty_days_before_volatility(run_home: Run) -> None:
     text = page(select(run_home("hosted"), "UST_10Y"))
     risk = text.split("Risk and range", 1)[1]
-    assert "Realised vol 20d" in risk
+    assert "Realised vol, 20 days" in risk
     assert "needs 21d" in risk
 
 
@@ -414,17 +424,340 @@ def test_corrections_show_both_versions(run_home: Run) -> None:
     ]
     at = select(run_home("hosted", rows=[*rows, old, new]), "UST_2Y")
     text = page(at)
-    corr = text.split("Corrections, last 30 days", 1)[0]
+    corr = text.split("Corrections, last 30 days", 1)[1]
     assert "2 versions" in corr
     assert "4.100%" in corr
     assert "4.180%" in corr
 
 
-def test_verdict_under_the_price_answers_do_the_sources_agree(run_home: Run) -> None:
-    text = page(select(run_home("local"), "SPY"))
-    verdict = re.search(r'<div class="db-verdict db-verdict-(\w+)".*?</div>', text, flags=re.S)
+def test_verdict_card_answers_do_the_sources_agree(run_home: Run) -> None:
+    """T58: one verdict in the right rail, with a mark that does not rely on colour, then the
+    sources it compared (each tier's value with its provenance)."""
+    card = verdict_card(page(select(run_home("local"), "SPY")))
+    verdict = re.search(r'<div class="db-verdict db-verdict-(\w+)">(.*?)</div>', card, flags=re.S)
     assert verdict is not None
-    assert "Do the sources agree?" in verdict.group(0)
-    assert verdict.start() < text.index('<div class="db-hzs"')
-    one = page(select(run_home("hosted"), "UST_2Y"))
-    assert "One source only" in one or "sources" in one
+    assert verdict.group(1) in ("ok", "warn", "fail")
+    assert re.search(r'db-verdict-ico" aria-hidden="true">[✓!✕]<', verdict.group(2))
+    assert card.count('class="db-src-row"') >= 2  # one row per visible tier with a value
+    one = verdict_card(page(select(run_home("hosted"), "UST_2Y")))
+    assert "One source only" in one
+
+
+# --- T58: Home v2 layout (P-022, the approved mockup) ----------------------------------------
+
+T58_FILES = [
+    REPO / "app" / "views" / "markets.py",
+    REPO / "app" / "components" / "panels.py",
+    REPO / "app" / "components" / "tearsheet.py",
+    REPO / "app" / "components" / "instrument.py",
+]
+_TITLE_ATTR = re.compile(r"""\stitle\s*=\s*["'{\\]""")
+
+
+def qp(at: AppTest, key: str) -> str:
+    value = at.query_params[key]
+    return value[0] if isinstance(value, list) else value
+
+
+def visible(html: str) -> str:
+    """Text a sighted user reads: no screen-reader-only spans, no tooltips, no tags."""
+    html = re.sub(r'<span class="db-sr[^"]*"[^>]*>.*?</span>', "", html, flags=re.S)
+    html = re.sub(r'<span class="db-tip"[^>]*>.*?</span></span>', "</span>", html, flags=re.S)
+    return re.sub(r"<[^>]+>", " ", html)
+
+
+def chart_card(text: str) -> str:
+    return text.split('<div class="db-ch">', 1)[1].split('<div class="db-hzs"', 1)[0]
+
+
+def test_layout_top_bar_has_brand_search_and_one_status_dot(run_home: Run) -> None:
+    at = run_home("hosted")
+    text = page(at)
+    status = re.search(r'<div class="db-status">.*?</div>', text, flags=re.S)
+    assert status is not None
+    assert status.group(0).count('class="db-dot ') == 1
+    assert "db-mode" not in status.group(0)  # the mode chip moved to the footer
+    assert at.text_input(key="q").label == "Search instruments"
+    assert '<span class="db-brand">Desk Brief</span>' in text
+
+
+def test_layout_headline_strip_outlines_the_selection(run_home: Run) -> None:
+    at = select(run_home("hosted"), "UST_10Y")
+    tiles = re.findall(r'<a class="db-tile[^"]*" data-db-id="([^"]+)"', page(at))
+    assert 1 <= len(tiles) <= 5
+    sel = re.findall(r'<a class="db-tile is-sel" data-db-id="([^"]+)"', page(at))
+    assert sel == ["UST_10Y"]
+    tile = re.search(r'<a class="db-tile is-sel".*?</a>', page(at), flags=re.S)
+    assert tile is not None
+    assert 'class="db-prov"' in tile.group(0)
+
+
+def test_layout_watchlist_has_full_names_and_no_raw_ids(run_home: Run) -> None:
+    from app.components import panels
+
+    from deskbrief.report.model import Row as _Row
+
+    text = page(run_home("hosted"))
+    rows = re.findall(ROW, text, flags=re.S)
+    ten = next(r for r in rows if 'data-db-id="UST_10Y"' in r)
+    assert "<b>US 10-year Treasury yield</b>" in ten
+    assert "<small>10Y" in ten
+    for r in rows:
+        shown = visible(r.split(">", 1)[1])
+        assert not re.search(r"\b[A-Z0-9]+_[A-Z0-9_]+\b", shown), shown  # no UST_10Y, ES_F
+    for iid in ("UST_10Y_REAL", "BEI_10Y", "USD_BROAD", "HY_OAS", "COT_GC_NET", "SPY", "ES_F"):
+        stub = _Row.__new__(_Row)
+        object.__setattr__(stub, "instrument_id", iid)
+        assert "_" not in panels.short(stub)
+    css = panels.HOME_CSS
+    rule = css.split(".db-wl-name small {", 1)[1].split("}", 1)[0]
+    assert "white-space: normal" in rule
+    assert "text-overflow: clip" in rule
+
+
+def test_sigma_tags_mark_unusual_moves_on_watchlist_rows() -> None:
+    """Biggest moves (T36 strip) became a sigma tag on the row (P-022)."""
+    from types import SimpleNamespace
+
+    from app.components import panels
+
+    from deskbrief.report.model import Notable
+
+    ov = SimpleNamespace(
+        moves=(
+            Notable("move", "10Y fell 12bp; the move is 3.4σ of its 60-day moves", "UST_10Y"),
+            Notable("move", "no sigma here", "SPY"),
+        )
+    )
+    sigs = panels.sigmas(ov)  # type: ignore[arg-type]
+    assert sigs == {"UST_10Y": ("3.4σ", ov.moves[0].text)}
+    tag = panels.sigma_tag(sigs["UST_10Y"])
+    assert '<span class="db-sig">3.4σ' in tag
+    assert "unusual move: 10Y fell 12bp" in tag  # the report's sentence, for screen readers
+
+
+def test_layout_chart_card_header_controls_and_horizons(run_home: Run) -> None:
+    at = run_home("hosted")
+    text = page(at)
+    card = chart_card(text)
+    assert '<span class="db-ch-name">S&amp;P fut</span>' in card
+    assert '<span class="db-ch-value">' in card
+    assert 'class="db-prov"' in card
+    assert '<div class="db-ch-foot">' in card  # provenance line: field, tier, as-of, source
+    rng = at.segmented_control(key="db-rng")
+    assert rng.options == ["1M", "3M", "6M", "1Y", "All"]
+    assert at.selectbox(key="vs-ES_F").label == "Compare with"  # in the small menu
+    assert at.get("download_button")[0].label == "Download CSV of the range shown"
+    strip = text.split('aria-label="performance over horizons"', 1)[1]
+    for label in ("1D", "1W", "1M", "3M", "YTD", "1Y"):
+        assert f">{label}<" in strip
+    assert '<div class="db-chfoot">Daily ' in text  # chart and compare captions: the footer
+
+
+def test_layout_tabs_and_right_rail(run_home: Run) -> None:
+    at = run_home("local")
+    assert [t.label for t in at.tabs] == ["All values", "Lineage", "Checks", "Corrections"]
+    text = page(at)
+    assert '<div class="db-card-h">Do the sources agree?</div>' in text
+    risk = text.split('<div class="db-card-h">Risk and range</div>', 1)[1]
+    for label in ("Realised vol, 20 days", "Latest move"):
+        assert f"<span>{label}</span>" in risk
+    assert '<div class="db-rangebox">' in risk
+    assert re.search(r'class="db-range-label">(52-week range|Range, \d+ days)<', risk)
+    assert at.button(key="-".join(("src", "ES_F"))).label == "Lineage: source, fetch and raw file"
+
+
+def test_layout_footer_carries_mode_and_glyph_legend(run_home: Run) -> None:
+    text = page(run_home("local"))
+    foot = text.split('<div class="db-foot">', 1)[1]
+    assert "local · live+delayed+official" in foot
+    assert 'class="db-glyphs"' in foot
+
+
+# --- T58: the inventory table, every T36/T54 item at its new place -----------------------------
+
+
+def tab(at: AppTest, label: str) -> str:
+    t = next(t for t in at.tabs if t.label == label)
+    return "\n".join(m.value for m in t.markdown)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "ladder_and_verdict", "crosscheck_strip", "known_limits", "withheld_status_mode",
+        "chart_captions", "every_value", "lineage", "checks", "corrections", "moves",
+        "curve_and_small_multiples",
+    ],
+)  # fmt: skip
+def test_inventory_item_lives_at_its_new_place(run_home: Run, item: str) -> None:
+    at = select(run_home("local"), "SPY")
+    text = page(at)
+    if item == "ladder_and_verdict":  # three-tier ladder and the verdict: the right rail
+        card = verdict_card(text)
+        assert "alpaca" in card
+        assert 'class="db-verdict db-verdict-' in card
+    elif item == "crosscheck_strip":  # 14-day cross-check strip: Checks tab
+        assert "Cross-checks, last 14 days" in tab(at, "Checks")
+    elif item == "known_limits":  # Known limits: Checks tab
+        limits = [m.value for t in at.tabs if t.label == "Checks" for m in t.markdown]
+        assert any(v.startswith("- Dashboard:") for v in limits)
+        assert not [e for e in at.expander if e.label == "Known limits"]
+    elif item == "withheld_status_mode":  # status dot in the top bar, mode in the footer
+        assert 'class="db-dot db-dot-' in text.split('<div class="db-status">', 1)[1]
+        assert "local · live+delayed+official" in text.split('<div class="db-foot">', 1)[1]
+    elif item == "chart_captions":  # sources, tiers and the date span: the chart footer
+        foot = text.split('<div class="db-chfoot">', 1)[1].split("</div>", 1)[0]
+        assert re.search(r"\d{4} to \d+ \w{3} \d{4}", foot)
+    elif item == "every_value":
+        assert "Every value we hold" in tab(at, "All values")
+    elif item == "lineage":
+        assert "Parser" in tab(at, "Lineage")
+    elif item == "checks":
+        assert "Data checks, last 14 days" in tab(at, "Checks")
+    elif item == "corrections":
+        assert "Corrections, last 30 days" in tab(at, "Corrections")
+    elif item == "moves":  # biggest moves: sigma tags on the rows (no strip)
+        assert "db-moves-label" not in text
+        assert "db-move" not in text
+    elif item == "curve_and_small_multiples":  # Macro, linked from Home
+        assert "db-curve" not in text
+        assert "db-ovgrid" not in text
+        link = next(p for p in at.page_link if "Macro" in p.label)
+        assert link.proto.page.endswith("Macro") or "2_Macro" in link.proto.page
+
+
+def test_hosted_withholds_the_known_tier1_rows_in_every_tab(run_home: Run) -> None:
+    at = select(run_home("hosted"), "SPY")
+    for t in at.tabs:
+        body = "\n".join(m.value for m in t.markdown if not m.value.startswith("- "))
+        assert "alpaca" not in body  # (the known-limits bullets name every source)
+        assert 'data-tier="1"' not in body
+
+
+# --- T58: review-round extras --------------------------------------------------------------
+
+
+def test_every_home_chart_shows_the_tradingview_attribution(run_home: Run) -> None:
+    from app.components import tvchart
+
+    for mode in ("hosted", "local"):
+        text = page(run_home(mode))
+        assert text.count(tvchart.attribution_html()) == 1  # one chart, one attribution
+        assert tvchart.NOTE_FALLBACK not in text
+
+
+def test_attribution_follows_the_compare_chart_too(run_home: Run) -> None:
+    from app.components import tvchart
+
+    at = run_home("hosted")
+    at.selectbox(key="vs-ES_F").set_value("UST_10Y").run()
+    assert not at.exception
+    assert page(at).count(tvchart.attribution_html()) == 1
+
+
+def test_markets_draws_tvcharts_only_through_tvchart_chart() -> None:
+    """``tvchart.chart`` always ends with ``tvchart.attribution()``; Home has no other path."""
+    src = (REPO / "app" / "views" / "markets.py").read_text(encoding="utf-8")
+    assert "tvchart.chart(" in src
+    assert "altair_chart" not in src
+    assert "price_chart" not in src
+    assert "compare_chart" not in src
+
+
+@pytest.mark.parametrize("path", T58_FILES, ids=lambda p: p.name)
+def test_no_sixty_second_caches_remain(path: Path) -> None:
+    src = path.read_text(encoding="utf-8")
+    assert "ttl=60" not in src
+    for block in re.findall(r"@st\.cache_data\(([^)]*)\)\ndef \w+\(([^)]*)\)", src, flags=re.S):
+        assert "DATA_CACHE_TTL_SECONDS" in block[0]
+        assert re.search(r"\bver: str\b", block[1]), block[1]  # keyed on data.data_version()
+
+
+def test_caches_are_keyed_on_the_data_version(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.components import data, instrument
+
+    run_home("hosted")  # store and config
+    seen: list[str] = []
+    real = instrument._ladder
+
+    def spy(*args: object) -> object:
+        seen.append(str(args[4]))
+        return real(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(instrument, "_ladder", spy)
+    monkeypatch.setattr(data, "data_version", lambda config: "v-test")
+    import os
+
+    from deskbrief.config import load_config
+
+    cfg = load_config(os.environ["DESKBRIEF_CONFIG"])
+    instrument.ladder(cfg, "UST_10Y", frozenset({1}), MON_0700)
+    assert seen == ["v-test"]
+
+
+def test_selection_and_range_survive_a_visit_to_macro(run_home: Run) -> None:
+    """Markets, then Macro, then Markets: the instrument and range come back, although
+    Streamlit drops the widget's state and the browser's page change drops ``?id=``/``?r=``."""
+    at = run_home("hosted")
+    at.button(key="-".join(("pick", "wl", "UST_10Y"))).click().run()
+    at.segmented_control(key="db-rng").set_value("1Y").run()
+    assert qp(at, "r") == "1Y"
+    at.switch_page("pages/2_Macro.py").run()
+    assert not at.exception
+    assert "db-rng" not in at.session_state  # Streamlit dropped the widget's own state
+    for key in list(at.query_params):  # what the browser's page change does to the URL
+        del at.query_params[key]
+    at.switch_page("Home.py").run()
+    assert not at.exception
+    assert '<span class="db-ch-name">10Y</span>' in page(at)
+    assert at.segmented_control(key="db-rng").value == "1Y"
+    assert qp(at, "id") == "UST_10Y"
+    assert qp(at, "r") == "1Y"
+
+
+def test_a_deep_link_range_opens_that_range(run_home: Run) -> None:
+    run_home("hosted")
+    at = AppTest.from_file(str(HOME), default_timeout=60)
+    at.query_params["r"] = "6M"
+    at.run()
+    assert at.segmented_control(key="db-rng").value == "6M"
+
+
+def test_chart_header_shows_each_caveat_word_once(run_home: Run) -> None:
+    """Review round: "$151.58 proxy … +22.0% proxy" showed the caveat twice. Once, visibly."""
+    from app.components.values import VISIBLE_FLAGS
+
+    at = select(run_home("hosted"), "SPY")  # an ETF proxy
+    shown = visible(chart_card(page(at)))
+    assert len(re.findall(r"\bproxy\b", shown)) == 1
+    for word in VISIBLE_FLAGS:
+        assert len(re.findall(rf"\b{word}\b", shown)) <= 1, word
+    assert 'class="db-flag">proxy</span>' in chart_card(page(at))  # still visible as a tag
+
+
+@pytest.mark.parametrize("mode", ["hosted", "local"])
+def test_no_title_attribute_in_generated_markup(run_home: Run, mode: str) -> None:
+    """P-022: tooltips are CSS. Streamlit's own ``title`` on the component's ``<iframe>`` is
+    framework markup and is not part of what this page generates."""
+    at = select(run_home(mode), "SPY")
+    everything = page(at) + "\n".join(m.value for t in at.tabs for m in t.markdown)
+    assert not _TITLE_ATTR.search(everything)
+
+
+@pytest.mark.parametrize("path", T58_FILES, ids=lambda p: p.name)
+def test_no_title_attribute_in_t58_sources(path: Path) -> None:
+    src = path.read_text(encoding="utf-8")
+    assert not re.search(r"""\btitle=["'\\]""", src)
+
+
+def test_health_tooltip_shows_on_hover_through_the_button() -> None:
+    """T57 carry-over: the transparent button covers the badge, so hovering the badge's
+    container (not the badge) must show the counts."""
+    from app import theme
+
+    assert ".st-key-db-pick-health:hover .db-tip" in theme.CSS
+    rule = theme.CSS.split(".st-key-db-pick-health:hover .db-tip", 1)[1].split("}", 1)[0]
+    assert "display: block" in rule

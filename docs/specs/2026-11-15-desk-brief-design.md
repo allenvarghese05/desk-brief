@@ -565,32 +565,46 @@ Build: H6 imports `.bas` files into a blank `.xlsm` in desktop Excel, adds butto
 
 Dashboard never writes to R2. It uses the read-only token.
 
-### 10.2 Design principles (minimalist, insight-first)
+### 10.2 Design principles (refined dark, one focal point; P-022, rewritten by T58)
 
-- One accent color for state only: neutral text, muted green/red for direction, **red reserved for check failures**. No gradients, no shadows, no card borders where whitespace works.
-- Tabular figures, right-aligned numbers; units always shown; as-of in ET, relative age on hover ("4m ago").
-- Every number has a tier glyph (● ◐ ○); proxies italic + "proxy" label.
-- Nothing flashes. Stale data turns grey with "stale" tag, not red.
-- Progressive disclosure: overview → row click → provenance drawer.
-- Implementers must follow the `dataviz` skill guidance for charts and `taste-skill:minimalist-ui` for layout.
+- **Look.** Near-black page, panels one shade lighter, no card borders: cards are told apart by shade, and card padding (24 px) is larger than the gaps between cards (20 px). One blue accent, for the selected state and keyboard focus only. Four type sizes (about 40, 26, 14 and 12 px), Inter with tabular figures. Every page has one focal point and 4–6 blocks per screen, built from identical card templates; depth goes into tabs, not further down the page. Charts are quiet: gridlines, lines and candles only.
+- **Colour.** Muted green and red mean up and down, and nothing else. **P-022 supersedes "red reserved for check failures":** a failed check is a ✕ and the word "failed" on an amber tint, a warning is "warn" in the same amber family, so neither relies on colour alone. Nothing flashes. Stale data turns grey with a "stale" tag.
+- **Numbers.** Tabular figures, right-aligned in tables; units always shown; as-of in ET, with the relative age in the tooltip ("45h ago"). Statistics respect data gaps: a horizon change refuses a base close older than the horizon allows and says "no data"; realised volatility, sigma and drawdown skip every move across a gap longer than 5 business days and say so; a date span names the year when it crosses one.
+- **Provenance (P-009, P-022).** Every figure keeps source, tier, as-of and field in its markup and its accessible label. On screen it shows a tier glyph (● live, ◐ delayed, ○ official) whose CSS tooltip gives field, tier, as-of and source on hover, keyboard focus and tap. Clicking a source opens a details panel with the full lineage. A glyph legend on each page labels the glyphs. The words "proxy", "IEX", "fallback" and "HYPOTHETICAL" always stay visible as text beside the figure, once, never only in a tooltip. Generated markup has no `title` attributes. Hosted mode never shows or reads tier 1.
+- **Charts.** Time-series and candle charts use TradingView Lightweight Charts, vendored at a pinned version and served by a custom component with no CDN; every such chart shows the "Charts by TradingView" attribution. The time axis has no weekend gaps, candles are drawn only from a real open, high and low, and the latest value is a dashed price line. Altair stays for small charts where it is enough.
+- **Navigation.** Selecting an instrument or a page happens inside the Streamlit session (`st.navigation`, buttons that set `st.query_params`), never as a full browser reload. `?id=` deep links work. The selected instrument, range and chart style survive a visit to another page.
+- Implementers follow the `dataviz` skill for charts.
 
 ### 10.3 Pages
 
-1. **Overview** (home)
+1. **Markets (Home; P-022, the approved mockup `tests/fixtures/design/home-mockup-2026-11-19.html`)**
    ```
-   Desk Brief                     Tue 18 Nov · 10:42 ET   ● Healthy (46/48)   hosted · delayed+official
-   ─────────────────────────────────────────────────────────────────────────────
-   S&P fut  6,012  −0.4%   10Y 4.31% −3bp   EURUSD 1.0842 +0.2%   WTI 71.20 −1.1%   VIX 16.8 +0.6
-   (each: tiny 1-day sparkline, tier glyph)
-   ─────────────────────────────────────────────────────────────────────────────
-   RATES                                          │  Yield curve  (today · 1w · 1m)
-   instrument   last    chg   30d z  tier  as of  │   ╭───────────
-   2Y           4.18%   −2bp   −0.8   ○    17 Nov │  ╱
-   10Y          4.31%   −3bp   −1.1   ◐    10:27  │
-   …                                              │
-   FX · COMMODITIES · EQUITIES · GLOBAL (same table, collapsible)
+   Markets  Macro  Cross checks  Data health  Sources  Runs                  (st.navigation)
+   Desk Brief  Sat 21 Nov · 12:58 ET        [ Search: 10y, gold, AAPL ]        ● Healthy
+   ┌ S&P fut ◐ ┐ ┌ 10Y ◐ ┐ ┌ EURUSD ◐ ┐ ┌ WTI ◐ ┐ ┌ VIX ◐ ┐     headline strip: value, change
+   │ 6,012 −0.4%│ │ 4.31% │ │ 1.0842   │ │ 71.20 │ │ 16.8  │     pill, sparkline; selected
+   └──── ~~~ ───┘ └ ~~~ ──┘ └ ~~~ ─────┘ └ ~~~ ──┘ └ ~~~ ──┘     one outlined
+   ┌ Watchlist ───────┐ ┌ S&P fut  E-mini S&P 500 …   [1M 3M 6M 1Y All][Candles Line][⋯] ┐ ┌ Do the sources agree? ┐
+   │ RATES            │ │ 6,012.00 ◐  −0.4%  vs previous close                           │ │ ✓ Yes, within 5.4 bp  │
+   │ US 10-year …  ~~ │ │ last · ◐ delayed · 18 Nov 10:42 ET · yahoo                     │ │ ◐ yahoo · delayed  …  │
+   │ 10Y 2.1σ  4.31%◐ │ │            TradingView chart (candles or line)                 │ │ ○ … · official     …  │
+   │           −3bp   │ │ Charts by TradingView · TradingView Lightweight Charts™ …      │ ├ Risk and range ───────┤
+   │ FX · VOLATILITY  │ │ 1D │ 1W │ 1M │ 3M │ YTD │ 1Y                                   │ │ Realised vol, 20 days │
+   │ EQUITIES · …     │ │ Daily closes · ◐ delayed · yahoo · 20 Aug 2026 to 19 Nov 2026  │ │ Latest move   −1.4σ   │
+   │ (scrolls)        │ ├ All values │ Lineage │ Checks │ Corrections ────────────────────┤ │ Max drawdown, 1Y      │
+   └──────────────────┘ │ every value we hold: field, value, source, as of, fetched      │ │ 52-week range ──|──   │
+                        └────────────────────────────────────────────────────────────────┘ │ › Lineage  › Macro    │
+   local · live+delayed+official    ● live ◐ delayed ○ official    Hover, focus or tap a glyph … (footer)
    ```
-2. **Instrument** (drill-down / provenance drawer): three-tier ladder — proxy value, delayed value, official value side by side with gaps vs tolerance; 30-day chart with all tiers overlaid; lineage: source, fetch time, latency, raw key + sha256, parser version; check history for this instrument.
+   - **Top bar:** brand and date, a compact search (a single match selects it) and one status dot that opens Data health; the page tabs are `st.navigation`'s.
+   - **Headline strip:** five instruments, each with its value, a change pill, a 30-day sparkline and a tier glyph; the selected one is outlined.
+   - **Watchlist rail:** every instrument grouped by asset class, with its full name, its short name, a 30-day sparkline, value and change. An unusual move (the report's notable moves) is a σ tag on the row. ETF proxies fold behind one line unless searching. The rail scrolls on its own.
+   - **Chart card (the focal point):** name, price, change pill and a provenance line in its header; range pills (1M 3M 6M 1Y All) and a Candles/Line toggle on the right; compare (two series rebased to 100) and CSV download in a small menu. Under the chart: the attribution, one row of 1D, 1W, 1M, 3M, YTD and 1Y changes, and a footer line naming the field, tiers, sources and date span. The card is a fragment, so a range, style or compare change reruns only the card.
+   - **Right rail:** the "Do the sources agree?" verdict (✓ yes / ! not like-for-like / ✕ no, with the gap in bp), a sentence on the last 14 days of cross-checks, and each visible tier's latest value with its gap to the official value; then risk and range as label-value rows (realised volatility, latest move in σ, max drawdown) and a labelled 52-week bar with the low and high at its ends; then links to the lineage panel and to Macro.
+   - **Tabs under the chart:** All values (one line per source, dataset, field and interval, with as-of and fetch age), Lineage (source, fetch, latency, raw key and sha256, parser), Checks (14 days of cross-checks, 14 days of data checks, Known limits) and Corrections (revisions of the last 30 days).
+   - **Footer:** display mode and tiers, withheld instruments (hosted), and the glyph legend.
+   - The yield curve and the market's 30-day overview moved off Home: the curve to Macro (linked from the right rail), the 30-day trend of every instrument to its watchlist sparkline.
+2. **Instrument** (folded into Markets since T36): the three-tier ladder is the right rail's verdict card, the chart is the hero, and lineage and check history are the Lineage and Checks tabs (see 1).
 3. **Cross-checks**: one row per check × group, last 7 days as a compact status strip (pass/warn/fail squares), click → gap chart vs tolerance band.
 4. **Data health**: today's DQ results grouped by type; freshness timeline per dataset (expected vs actual arrival); revisions log; quarantine list.
 5. **Sources (scorecard)**: per source: uptime, median & p95 latency, median data age, error rate, disagreement rate; 30-day trend. Measured numbers only, with "n days of data" shown.
