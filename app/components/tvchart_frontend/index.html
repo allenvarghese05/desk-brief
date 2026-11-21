@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  Desk Brief price chart (T57B, P-022): a Streamlit custom component with no build step.
+  The vendored TradingView Lightweight Charts bundle and the glue script are loaded from this
+  folder only (no CDN, no network). Provenance tooltips are drawn by tvchart.js as plain DOM
+  text; nothing here uses a hover-text attribute.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         font-variant-numeric: tabular-nums; }
+  #wrap { position: relative; width: 100%; }
+  #chart { position: relative; width: 100%; }
+  #tip { position: absolute; display: none; pointer-events: none; z-index: 5;
+         padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.45;
+         white-space: nowrap; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+  #tip .k { display: inline-block; min-width: 54px; opacity: .72; }
+  #tip .d { font-weight: 600; margin-bottom: 2px; }
+  #note { display: none; padding: 16px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="chart" role="img" aria-label="Price chart"></div>
+  <div id="tip" role="tooltip"></div>
+  <div id="note" role="status"></div>
+</div>
+<script src="lightweight-charts.standalone.production.js"></script>
+<script src="tvchart.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+TradingView Lightweight Charts(TM) v5.3.0, vendored for Desk Brief (card T57B, ruling P-022)
+==========================================================================================
+
+File:       lightweight-charts.standalone.production.js (copied unmodified)
+Package:    lightweight-charts 5.3.0 (npm), licence Apache-2.0 (see LICENSE in this folder)
+Source:     https://registry.npmjs.org/lightweight-charts/-/lightweight-charts-5.3.0.tgz
+            path inside the tarball: package/dist/lightweight-charts.standalone.production.js
+Integrity:  sha512-w16fu2/FteUkIJdgc9G2tOCKs1fwFSqnqF8+kMgHGv0uGIfcfpEJhziSaQbML1yrkbeg4nQXV3msjmhBzhLNhw==
+            (the registry's dist.integrity for 5.3.0; the tarball was checked against it
+            before extraction)
+Tarball SHA-256: 7d9e9ab2b1a91db18a916fd5d5e17d7dd19a7dc7da022fd0d23f06bdd92ecc2a
+File SHA-256:    338a625ece52c5b85fb026e222dad5d0f365f745060afbfae96bda91636142e9  (also in SHA256SUMS)
+Vendored:   2026-11-20
+
+Upstream notices
+----------------
+The npm package ships no NOTICE file. The library's NOTICE file in its source repository
+(tag v5.3.0) reads, verbatim:
+
+  TradingView Lightweight Charts™
+  Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/
+
+The bundle itself carries this header, reproduced verbatim:
+
+  TradingView Lightweight Charts(TM) v5.3.0
+  Copyright (c) 2026 TradingView, Inc.
+  Licensed under Apache License 2.0 https://www.apache.org/licenses/LICENSE-2.0
+
+LICENSE: Copyright 2023 TradingView, Inc. Licensed under the Apache License, Version 2.0.
+
+Attribution
+-----------
+The library's README asks every page that uses it to show the attribution notice above and a
+link to https://www.tradingview.com/. It names the chart's attributionLogo option as one way
+to show the link, not a requirement.
+
+Desk Brief turns the logo off (attributionLogo: false in tvchart.js), because the logo's
+link carries a title attribute and P-022 allows none. Instead, under every chart,
+app/components/tvchart.py (attribution) draws a visible, keyboard-focusable text link
+"Charts by TradingView" to https://www.tradingview.com/ followed by the attribution notice
+("TradingView Lightweight Charts™ © 2025 TradingView, Inc."), in the theme's meta colour.
+
+Upgrading: Dependabot does not track this file. Follow the steps in the docstring of
+app/components/tvchart.py and update this NOTICE, SHA256SUMS and LIBRARY_VERSION together.
