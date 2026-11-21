@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001  (minus, en dash and sigma are intentional output)
 """Workspace data rules (T36 review round 1): daily bars, tearsheet statistics, the hosted-mode
 filters of the instrument panels, the yield curve's provenance and the shared connection.
 
@@ -137,6 +138,101 @@ def test_risk_volatility_matches_the_formula() -> None:
     assert "needs 21d" in short
 
 
+# --- T58: statistics that respect data gaps ------------------------------------------------
+
+
+def _gapped(before: list[float], after: list[float], gap_from: date, gap_to: date) -> pd.DataFrame:
+    """Business-day closes up to ``gap_from``, nothing in between, then from ``gap_to``."""
+    a = pd.bdate_range(end=pd.Timestamp(gap_from), periods=len(before))
+    b = pd.bdate_range(start=pd.Timestamp(gap_to), periods=len(after))
+    days = list(a) + list(b)
+    closes = before + after
+    n = len(closes)
+    return pd.DataFrame({
+        "d": pd.to_datetime(days), "open": closes, "high": closes, "low": closes,
+        "close": closes, "volume": [1.0] * n, "tier": [2] * n, "source": ["yahoo"] * n,
+        "field": ["close"] * n, "unit": ["USD"] * n,
+    })  # fmt: skip
+
+
+# SYNTHETIC FIXTURE: 40 closes to Thu 1 Oct 2026, a hole of 16 business days, then 18 closes
+# from Mon 26 Oct to Wed 18 Nov. The price halves across the hole.
+GAP_FROM, GAP_TO = date(2026, 10, 1), date(2026, 10, 26)
+BEFORE = [200.0 + (i % 2) for i in range(40)]
+AFTER = [100.0 + (i % 3) * 0.5 for i in range(18)]
+
+
+def test_gaps_are_found_by_business_days() -> None:
+    from app.components import tearsheet
+
+    bars = _gapped(BEFORE, AFTER, GAP_FROM, GAP_TO)
+    gaps = tearsheet.gaps(bars)
+    assert [(g.before, g.after) for g in gaps] == [(GAP_FROM, GAP_TO)]
+    assert gaps[0].bdays > tearsheet.GAP_BDAYS
+    assert tearsheet.gaps(_bars([1.0] * 30)) == []  # weekends and holidays are not gaps
+
+
+def test_horizons_refuse_a_base_close_older_than_the_horizon_allows() -> None:
+    from app.components import tearsheet
+
+    bars = _gapped(BEFORE, AFTER, GAP_FROM, GAP_TO)
+    items = {h.label: h.html for h in tearsheet.horizons(_row(), bars)}
+    # 1M from 18 Nov starts on 19 Oct: the closest earlier close (1 Oct) is inside the hole
+    assert "no data" in items["1M"]
+    assert "%" not in re.sub(r'<span class="db-sr">.*?</span>', "", items["1M"])  # no change
+    assert "01 Oct 2026" in items["1M"]  # says which close was too old (for screen readers)
+    assert "%" in items["1W"]  # 1W starts on 11 Nov, after the hole: a real change
+    assert "%" in items["3M"]  # 3M starts in August, before the hole, with a close that day
+
+
+def test_volatility_and_sigma_skip_moves_across_a_gap() -> None:
+    from app.components import tearsheet
+
+    bars = _gapped(BEFORE, AFTER, GAP_FROM, GAP_TO)
+    html = tearsheet.risk_html(_row(), bars)
+    closes = pd.Series(BEFORE + AFTER)
+    logs = closes.apply(math.log).diff()
+    logs.iloc[len(BEFORE)] = float("nan")  # the move across the hole
+    want = float(logs.dropna().tail(20).std() * 100) * math.sqrt(252)
+    assert f"{want:.1f}%" in html
+    naive = float(logs.fillna(math.log(0.5)).tail(20).std() * 100) * math.sqrt(252)
+    assert f"{naive:.1f}%" not in html  # the halving across the hole is not a daily move
+    assert "skips the gap in the data longer than 5 business days" in html
+    assert "01 Oct – 26 Oct" in html
+
+
+def test_drawdown_does_not_cross_a_gap() -> None:
+    from app.components import tearsheet
+
+    bars = _gapped(BEFORE, AFTER, GAP_FROM, GAP_TO)
+    html = tearsheet.risk_html(_row(), bars)
+    m = re.search(r"Max drawdown[^<]*</span><b>.*?db-val\">([^<]+)<", html, flags=re.S)
+    assert m is not None
+    assert m.group(1) != "−50.2%"  # never the fall across the hole
+    # inside each side: 101 to 100 after the hole is the deepest fall
+    assert m.group(1) == "−1.0%"
+
+
+def test_latest_move_right_after_a_gap_is_no_data() -> None:
+    from app.components import tearsheet
+
+    bars = _gapped(BEFORE[:30], [100.0], GAP_FROM, GAP_TO)
+    html = tearsheet.risk_html(_row(), bars)
+    latest = html.split("<span>Latest move</span>", 1)[1].split("</div>", 1)[0]
+    assert "no data" in latest
+    assert "σ" not in latest
+
+
+def test_date_spans_name_the_year_when_they_cross_one() -> None:
+    from app.components import tearsheet
+
+    assert tearsheet.date_span(date(2025, 12, 22), date(2026, 1, 9)) == "22 Dec 2025 – 09 Jan 2026"
+    assert tearsheet.date_span(date(2026, 10, 1), date(2026, 10, 26)) == "01 Oct – 26 Oct"
+    bars = _bars([100.0, 101.0] * 13, end=date(2026, 1, 9))  # 26 closes from mid-December
+    html = tearsheet.risk_html(_row(), bars)
+    assert re.search(r"\d{2} Dec 2025 – \d{2} Jan 2026", html)
+
+
 # --- hosted filters of the instrument panels ---------------------------------------------------
 
 
@@ -177,22 +273,22 @@ def test_hosted_corrections_never_read_tier1(run_home: Run) -> None:
 # --- yield curve and shared connection ---------------------------------------------------------
 
 
-def test_yield_curve_figures_carry_provenance(run_home: Run) -> None:
+def test_yield_curve_moved_to_macro_with_provenance(run_home: Run) -> None:
+    """T58 inventory: the yield curve left Home for Macro (linked from Home's right rail)."""
     from brief_synth import FRI
 
     ust = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
     rows = [*monday_rows(), daily("UST_10Y", FRI, 4.4, **ust), daily("UST_30Y", FRI, 4.6, **ust)]
-    text = page(run_home("hosted", rows=rows))
-    svg = re.search(r'<svg class="db-curve".*?</svg>', text, flags=re.S)
-    assert svg is not None
-    assert "4.40" not in svg.group(0)  # no figure printed inside the chart
-    assert "4.6" not in svg.group(0).split("aria-label", 1)[1].split('"', 2)[1]
-    strip = text.split('<div class="db-tenors">', 1)[1].split("</div></div>\n", 1)[0]
-    cells = re.findall(r'<span class="db-fig".*?</span></span>', strip, flags=re.S)
+    at = run_home("hosted", rows=rows)
+    assert '<svg class="db-curve"' not in page(at)
+    at.switch_page("pages/2_Macro.py").run()
+    assert not at.exception
+    text = page(at)
+    assert "Treasury curve" in text
+    cells = re.findall(r'<span class="db-fig".*?</span></span>', text, flags=re.S)
     assert cells
     for cell in cells:
         assert "db-src" in cell
-        assert 'db-field">yield<' in cell
 
 
 def test_shared_connection_is_reused_then_replaced_and_closed(

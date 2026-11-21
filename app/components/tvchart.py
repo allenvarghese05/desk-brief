@@ -228,11 +228,13 @@ def attribution_html() -> str:
     tradingview.com and the attribution notice of the library's NOTICE file, in the meta
     colour. The library's own logo is switched off (``attributionLogo: false`` in
     ``tvchart.js``) because it carries a ``title`` attribute (P-022: no ``title``)."""
+    # the link takes the line's colour through ``theme.apply()``'s ``.stMarkdown a { color:
+    # inherit }``: Streamlit's sanitiser strips an inline ``color: … !important`` on the link
     return (
         f'<div class="db-tv-attr" style="font-size:{theme.SIZE_META}px;color:{theme.META};'
         f'margin-top:-6px">Charts by <a href="{ATTRIBUTION_URL}" target="_blank" '
-        f'rel="noopener noreferrer" style="color:{theme.META} !important;'
-        f'text-decoration:underline" aria-label="{ATTRIBUTION_TEXT} (opens tradingview.com)">'
+        f'rel="noopener noreferrer" style="text-decoration:underline" '
+        f'aria-label="{ATTRIBUTION_TEXT} (opens tradingview.com)">'
         f"TradingView</a> · {ATTRIBUTION_NOTICE}</div>"
     )
 
@@ -295,6 +297,10 @@ def _fail_key(key: str) -> str:
     return f"{key}__tvchart_failed"
 
 
+def _seen_key(key: str) -> str:
+    return f"{key}__tvchart_seen"
+
+
 def chart(
     series: Sequence[Series],
     *,
@@ -314,13 +320,22 @@ def chart(
     ``st.fragment`` so range and style changes rerun only the chart."""
     payload = spec(series, height=height, precision=precision, last=last, label=label)
     state = st.session_state.get(key)
+    # the component keeps returning its last value on every rerun, so an error report arms the
+    # fallback only the first time it is seen; otherwise a stale report would re-arm it when
+    # the user comes back to that payload, and the chart would never be retried (T58). Each
+    # report carries a unique ``n`` from the frontend, so a new failure of the same payload
+    # after a retry is a new report and brings the fallback back.
     if isinstance(state, dict) and state.get("status") == "error" and state.get("sig"):
-        st.session_state[_fail_key(key)] = state["sig"]
+        report = (state["sig"], str(state.get("n", state.get("message", ""))))
+        if st.session_state.get(_seen_key(key)) != report:
+            st.session_state[_seen_key(key)] = report
+            st.session_state[_fail_key(key)] = state["sig"]
     component = _component()
     if component is None or st.session_state.get(_fail_key(key)) == payload["sig"]:
         st.caption(NOTE_FALLBACK)
         st.altair_chart(fallback_chart(series, height=height), theme=None)
         return False
+    st.session_state.pop(_fail_key(key), None)  # drawn: a later failure is a new report
     component(spec=payload, key=key, default=None)
     attribution()
     return True

@@ -360,6 +360,70 @@ def test_a_frontend_error_falls_back_for_that_payload_only(
     assert sent[1] != sent[0]
 
 
+def test_a_failed_payload_is_retried_when_the_user_comes_back_to_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T58 carry-over: the component keeps returning its last (error) value on every rerun. A
+    report arms the fallback once; drawing another payload clears it, so going back to the
+    failed range tries the TradingView chart again instead of the fallback for ever."""
+    from app.components import tvchart
+
+    sent: list[str] = []
+    monkeypatch.setattr(tvchart, "_component", lambda: lambda **kw: sent.append(kw["spec"]["sig"]))
+    at = _run()
+    failed = sent[0]
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": failed}
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+    at.session_state["t-rng"] = "1M"  # another range draws
+    at.run()
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    at.session_state["t-rng"] = "3M"  # back to the payload that failed: the stale report stays
+    at.run()
+    assert at.session_state["t-chart"]["sig"] == failed
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    assert sent[-1] == failed  # drawn again
+    assert tvchart._fail_key("t-chart") not in at.session_state
+
+
+def test_a_payload_that_fails_again_after_a_retry_falls_back_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, item 5: fail, another range, back (retried), fail again. The frontend's
+    second report carries a new ``n``, so it is a new report and the fallback comes back;
+    reruns that only see the stale first report never re-arm it."""
+    from app.components import tvchart
+
+    sent: list[str] = []
+    monkeypatch.setattr(tvchart, "_component", lambda: lambda **kw: sent.append(kw["spec"]["sig"]))
+    at = _run()
+    failed = sent[0]
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": failed, "n": "1-1"}
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+    at.session_state["t-rng"] = "1M"
+    at.run()
+    at.session_state["t-rng"] = "3M"  # back: the stale report is not re-armed, the chart retries
+    at.run()
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    assert sent[-1] == failed
+    at.run()  # another rerun with only the stale report: still the chart
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    # the retry fails too: the browser sends a second report for the same payload
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": failed, "n": "2-1"}
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+
+
+def test_the_frontend_numbers_each_error_report() -> None:
+    js = (FRONT / "tvchart.js").read_text(encoding="utf-8")
+    assert re.search(
+        r'status: "error",[^}]*sig: currentSig,\s*n: Date\.now\(\) \+ "-" \+ \(\+\+reports\)', js
+    )
+    assert "if (event.source !== window.parent) { return; }" in js  # unchanged guards
+    assert re.search(r"attributionLogo:\s*false\b", js)
+
+
 def test_an_error_for_another_payload_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.components import tvchart
 
@@ -414,7 +478,16 @@ def test_attribution_is_a_visible_focusable_link_with_the_notice() -> None:
     assert "Charts by <a " in html
     assert "title" not in attrs
     assert "tabindex" not in attrs  # an <a href> is in the tab order by default
-    assert theme.META in attrs  # the link itself is in the meta colour
+    # the link inherits the line's meta colour: Streamlit's sanitiser strips an inline
+    # ``color: … !important`` on it (T58 carry-over), so none is sent
+    assert "color" not in attrs
+    assert "!important" not in html
+    line = re.search(r'<div class="db-tv-attr" style="([^"]*)"', html)
+    assert line is not None
+    assert f"color:{theme.META}" in line.group(1)
+    assert ".stMarkdown a, .stMarkdown a:hover { color: inherit !important;" in theme.CSS.replace(
+        "{{", "{"
+    )
     assert tvchart.ATTRIBUTION_NOTICE in html
     assert "TradingView Lightweight Charts™" in tvchart.ATTRIBUTION_NOTICE
     assert "2025 TradingView, Inc." in tvchart.ATTRIBUTION_NOTICE  # the library's NOTICE

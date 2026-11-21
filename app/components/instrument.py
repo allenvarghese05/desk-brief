@@ -1,15 +1,18 @@
-"""Instrument details for the workspace's right-hand panel (spec 10.3 page 2, folded into Home
-by T36): the tier ladder, lineage of the shown value and the last fortnight of checks.
+"""Instrument details (spec 10.3 page 2, folded into Home by T36; v2 by T58): the "Do the
+sources agree?" verdict card with each visible tier's value, the lineage of a value and the
+last fortnight of data checks.
 
 Hosted mode never reads a hidden tier: the ladder queries one visible tier at a time and the
 check list drops rows naming a source with a hidden-tier feed (they may carry its values).
-Every figure goes through ``values.value_cell`` with its full provenance line.
+Every figure goes through ``values.value_cell``. Caches are keyed on ``data.data_version()``
+(T58). No markup here carries a ``title`` attribute (P-022).
 """
 
 # ruff: noqa: RUF001  (the en dash marks an empty value on purpose)
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from html import escape
 
@@ -31,9 +34,9 @@ def _where(config: Config) -> str:
     return s.bucket if s.backend == "r2" else s.local_root
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _ladder(
-    _config: Config, where: str, iid: str, hidden: frozenset[int], _now: datetime
+    _config: Config, where: str, iid: str, hidden: frozenset[int], ver: str, _now: datetime
 ) -> list[ValueRow]:
     rows: list[ValueRow] = []
     with data.shared_connection(_config) as conn:
@@ -46,14 +49,14 @@ def _ladder(
     return rows
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _lineage(_config: Config, where: str, row: ValueRow) -> Lineage:
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _lineage(_config: Config, where: str, row: ValueRow, ver: str) -> Lineage:
     with data.shared_connection(_config) as conn:
         return lineages(conn, [row])[0]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _checks(_config: Config, where: str, iid: str, today: date) -> pd.DataFrame:
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _checks(_config: Config, where: str, iid: str, today: date, ver: str) -> pd.DataFrame:
     with data.shared_connection(_config) as conn:
         return conn.execute(
             "SELECT target_date, check_name, source, status FROM dq WHERE instrument_id = ? "
@@ -69,12 +72,26 @@ def exposed_sources(config: Config, hidden: frozenset[int]) -> frozenset[str]:
 
 def ladder(config: Config, iid: str, hidden: frozenset[int], now: datetime) -> list[ValueRow]:
     """Latest value per visible tier, highest tier number (official) first."""
-    rows = _ladder(config, _where(config), iid, hidden, now)
+    rows = _ladder(config, _where(config), iid, hidden, data.data_version(config), now)
     return sorted(rows, key=lambda r: -r.tier)
 
 
+def caveats(r: ValueRow) -> tuple[str, ...]:
+    """The caveat words that stay visible beside a stored value (P-022): the same rule as the
+    report's per-row qualifiers (``panels.flags``): a proxy instrument, an IEX (single-exchange)
+    dataset, a fallback source."""
+    out = ["proxy"] if r.is_proxy else []
+    if r.dataset.startswith("iex"):
+        out.append("IEX")
+    if r.is_fallback:
+        out.append("fallback")
+    return tuple(out)
+
+
 def _prov(r: ValueRow) -> Provenance:
-    return Provenance(r.source, r.tier, f"{to_et(r.as_of):%d %b %H:%M}", field_label(r))
+    return Provenance(
+        r.source, r.tier, f"{to_et(r.as_of):%d %b %H:%M}", field_label(r), flags=caveats(r)
+    )
 
 
 _PLAIN_UNITS = {"USD", "index_pts", "shares"}
@@ -108,67 +125,86 @@ def _gap_bp(r: ValueRow, best: ValueRow) -> float | None:
     return (r.value - best.value) / best.value * 10_000 if best.value else None
 
 
-def verdict_html(rows: list[ValueRow]) -> str:
-    """One line answering "do the sources agree?", shown under the price."""
+@dataclass(frozen=True)
+class Verdict:
+    """The answer to "do the sources agree?" for the visible tiers' latest values."""
+
+    tone: str  # ok | warn | fail | muted
+    mark: str  # a check, !, a cross or a dash, so the answer never relies on colour alone
+    headline: str
+    detail: str
+
+
+def verdict(rows: list[ValueRow]) -> Verdict | None:
+    """Compare each visible tier's latest value with the official (highest) tier's."""
     if not rows:
-        return ""
+        return None
     best = rows[0]
-    names = ", ".join(f"{r.source} ({TIER_NAME[r.tier]})" for r in rows)
     if len(rows) == 1:
-        tone, text = "muted", f"One source only: {names}. Nothing to cross-check yet."
-    else:
-        gaps = [abs(g) for r in rows[1:] if (g := _gap_bp(r, best)) is not None]
-        worst = max(gaps, default=0.0)
-        apart = max(abs((x.as_of - best.as_of).total_seconds()) for x in rows[1:])
-        if apart > LIKE_FOR_LIKE_S:
-            tone = "warn"
-            text = (
-                f"{len(rows)} sources, {worst:.1f} bp apart, but their prices are "
-                f"{_apart(apart)} apart in time: not like-for-like."
-            )
-        elif worst <= AGREE_BP:
-            tone, text = "ok", f"{len(rows)} sources agree within {worst:.1f} bp."
-        else:
-            tone, text = (
-                "fail",
-                f"{len(rows)} sources disagree by {worst:.1f} bp at the same moment.",
-            )
-        text += f" ({names})"
-    return (
-        f'<div class="db-verdict db-verdict-{tone}" title="compares each tier\'s latest value">'
-        f'<span class="db-dot db-dot-{"unknown" if tone == "muted" else tone}"></span>'
-        f"<b>Do the sources agree?</b> {escape(text)}</div>"
+        return Verdict("muted", "–", "One source only", "Nothing to cross-check yet.")
+    gaps = [abs(g) for r in rows[1:] if (g := _gap_bp(r, best)) is not None]
+    worst = max(gaps, default=0.0)
+    apart = max(abs((x.as_of - best.as_of).total_seconds()) for x in rows[1:])
+    if apart > LIKE_FOR_LIKE_S:
+        return Verdict(
+            "warn", "!", "Not like-for-like",
+            f"{len(rows)} sources, {worst:.1f} bp apart, but their prices are {_apart(apart)} "
+            "apart in time.",
+        )  # fmt: skip
+    if worst <= AGREE_BP:
+        return Verdict(
+            "ok", "✓", f"Yes, within {worst:.1f} bp", f"{len(rows)} sources at the same moment."
+        )
+    return Verdict(
+        "fail",
+        "✕",
+        f"No, {worst:.1f} bp apart",
+        f"{len(rows)} sources disagree at the same moment.",
     )
 
 
-def ladder_html(rows: list[ValueRow]) -> str:
-    """Each visible tier's latest value and its gap to the official (highest) tier."""
-    if not rows:
-        return '<div class="db-empty">No value in a tier shown in this mode.</div>'
+def _gap_text(r: ValueRow, best: ValueRow) -> str:
+    if r is best:
+        return "reference"
+    if r.unit == "pct":
+        gap = f"{(r.value - best.value) * 100:+.1f} bp"
+    elif best.value:
+        gap = f"{(r.value - best.value) / best.value * 10_000:+.1f} bp"
+    else:
+        gap = "–"
+    apart = abs((r.as_of - best.as_of).total_seconds())
+    if apart > LIKE_FOR_LIKE_S:  # a gap between different moments is not a gap
+        gap += f", {_apart(apart)} apart: not like-for-like"
+    return gap
+
+
+def verdict_card_html(rows: list[ValueRow], summary: str = "") -> str:
+    """The right-rail card (P-022): one verdict, a sentence, then each visible tier's latest
+    value with its source, tier and gap to the official value. ``summary`` is a line about the
+    last fortnight of cross-checks."""
+    head = '<div class="db-card-h">Do the sources agree?</div>'
+    v = verdict(rows)
+    if v is None:
+        return head + '<div class="db-empty">No value in a tier shown in this mode.</div>'
     best = rows[0]
-    body = ""
-    for r in rows:
-        if r is best:
-            gap = "reference"
-        elif r.unit == "pct":
-            gap = f"{(r.value - best.value) * 100:+.1f} bp"
-        elif best.value:
-            gap = f"{(r.value - best.value) / best.value * 10_000:+.1f} bp"
-        else:
-            gap = "–"
-        apart = abs((r.as_of - best.as_of).total_seconds())
-        if r is not best and apart > 15 * 60:  # a gap between different moments is not a gap
-            gap += f", {_apart(apart)} apart: not like-for-like"
-        body += (
-            f"<tr><th>{TIER_GLYPH[r.tier]} {TIER_NAME[r.tier]}"
-            f'<span class="db-tagline">{escape(gap)}</span></th>'
-            f"<td>{value_cell(_num(r), _prov(r))}</td></tr>"
-        )
-    return f'<table class="db-dl">{body}</table>'
+    srcs = "".join(
+        f'<div class="db-src-row"><span>{TIER_GLYPH[r.tier]} {escape(r.source)} · '
+        f'{TIER_NAME[r.tier]}<span class="db-tagline">{escape(_gap_text(r, best))}</span></span>'
+        f"<b>{value_cell(_num(r), _prov(r), compact=True)}</b></div>"
+        for r in rows
+    )
+    more = f'<p class="db-verdict-sum">{escape(summary)}</p>' if summary else ""
+    return (
+        f'{head}<div class="db-verdict db-verdict-{v.tone}">'
+        f'<span class="db-verdict-ico" aria-hidden="true">{v.mark}</span>'
+        f"<b>{escape(v.headline)}</b></div>"
+        f'<p class="db-verdict-p">{escape(v.detail)}</p>{more}'
+        f'<div class="db-srcs">{srcs}</div>'
+    )
 
 
 def lineage_html(config: Config, row: ValueRow) -> str:
-    lg = _lineage(config, _where(config), row)
+    lg = _lineage(config, _where(config), row, data.data_version(config))
     v = lg.value
     facts = [
         ("Source", f"{v.source} / {v.dataset} / {v.symbol}"),
@@ -184,7 +220,7 @@ def lineage_html(config: Config, row: ValueRow) -> str:
 
 
 def checks_html(config: Config, iid: str, hidden: frozenset[int], today: date) -> str:
-    df = _checks(config, _where(config), iid, today)
+    df = _checks(config, _where(config), iid, today, data.data_version(config))
     exposed = exposed_sources(config, hidden)
     if not df.empty and exposed:
         df = df[~df["source"].isin(exposed)]

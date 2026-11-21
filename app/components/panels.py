@@ -1,27 +1,32 @@
-"""Workspace panels (T36 layout, T57 v2 look): top bar, market strip, biggest moves,
-watchlist, chart header, overview small multiples and the yield curve.
+"""Markets panels (T36 layout, T57 v2 look, T58 Home v2): top bar, headline strip, watchlist
+with sigma tags, chart header, yield curve, the page footer and the Home stylesheet.
 
 All text comes from ``BriefModel`` rows (labels, signed changes, as-of text); every number is
-printed through ``values.value_cell`` / ``change_cell``. Lists use compact provenance (a
-focusable tier glyph with a CSS tooltip, P-022); the chart header prints the full line.
+printed through ``values.value_cell`` / ``change_cell`` with compact provenance (a focusable
+tier glyph with a CSS tooltip, P-022). The caveat words (proxy, IEX, fallback, HYPOTHETICAL)
+are printed once beside each figure, never twice in one place.
 
 Selection is in-session (T57): each selectable item is returned as ``(instrument id, html)``
 and the page draws it under a transparent button whose callback sets ``st.query_params``
 (``app/views/markets.py``). The markup itself holds no link, no ``target`` and no ``title``.
+
+:data:`HOME_CSS` styles the T58 blocks (watchlist rows, verdict, risk facts, range bar, tabs,
+footer) from the ``app/theme.py`` tokens; the page injects it after ``theme.apply()``.
 """
 # ruff: noqa: RUF001  (the sigma sign is intentional output)
 
 from __future__ import annotations
 
-import math
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from html import escape
 
-from app.components.data import CURVE_TENORS, Overview
+import numpy as np
+from app.components.data import Overview
 from app.components.values import (
+    TIER_NAME,
     Provenance,
     change_cell,
     direction,
@@ -49,6 +54,16 @@ SHORT = {
     "N225": "Nikkei",
     "UNRATE": "Unemployment",
     "DFF": "Fed funds",
+    "UST_10Y_REAL": "10Y real",
+    "BEI_10Y": "10Y BEI",
+    "USD_BROAD": "Broad USD",
+    "HY_OAS": "HY OAS",
+    "COT_GC_NET": "Gold COT net",
+    "COT_ES_NET": "ES COT net",
+    "COT_ZN_NET": "10Y note COT net",
+    "COT_GC_OI": "Gold COT OI",
+    "COT_ES_OI": "ES COT OI",
+    "COT_ZN_OI": "10Y note COT OI",
 }
 _TENOR_YEARS = {"UST_3M": 0.25, "UST_2Y": 2, "UST_10Y": 10, "UST_20Y": 20, "UST_30Y": 30}
 NO_CHANGE = "—"
@@ -58,7 +73,10 @@ DEFAULT_ID = "ES_F"
 
 
 def short(row: Row) -> str:
-    return SHORT.get(row.instrument_id, row.instrument_id)
+    """The trader's name (10Y, Gold); a ticker (SPY, EURUSD) as it is; never a raw id with an
+    underscore."""
+    iid = row.instrument_id
+    return SHORT.get(iid, iid.replace("_", " "))
 
 
 def _age(delta_seconds: float) -> str:
@@ -129,8 +147,9 @@ def brand(ov: Overview) -> str:
 
 
 def status(ov: Overview) -> str:
-    """Pipeline health as one quiet badge; the counts are in its CSS tooltip and for screen
-    readers. The page puts a button over it that opens Data health in the same session."""
+    """Pipeline health as one status dot and word; the counts are in its CSS tooltip and for
+    screen readers. The page puts a button over it that opens Data health in the same session.
+    The display mode moved to the page footer (T58)."""
     s = ov.health.status
     text = escape(ov.health.text)
     return (
@@ -138,9 +157,7 @@ def status(ov: Overview) -> str:
         f'<span class="db-health db-health-{s} db-tipwrap">'
         f'<span class="db-dot db-dot-{s}"></span>{_BADGE[s]}'
         f'<span class="db-sr"> · {text}</span>'
-        f'<span class="db-tip" aria-hidden="true">{text}</span></span>'
-        f'<span class="db-mode">{escape(ov.mode_label)}'
-        '<span class="db-sr"> (display mode and the data tiers it shows)</span></span></div>'
+        f'<span class="db-tip" aria-hidden="true">{text}</span></span></div>'
     )
 
 
@@ -200,38 +217,48 @@ def tile_items(ov: Overview, sel: str = "") -> list[Item]:
 
 
 _SIGMA = re.compile(r"is (\d+(?:\.\d+)?)σ")
-MOVES_LABEL = (
-    '<span class="db-moves-label">Biggest moves<span class="db-sr"> (moves at least the anomaly '
-    "threshold away from each instrument's recent daily moves)</span></span>"
-)
-NO_MOVES = '<span class="db-note">Nothing unusual: every move is within its normal range.</span>'
 
 
-def move_items(ov: Overview, limit: int = 6) -> list[Item]:
-    """The day's unusual moves, ranked by size against each instrument's own recent moves."""
+def _across_gap(row: Row) -> bool:
+    """The latest move spans a gap in the data (the tearsheet's rule: more than
+    ``GAP_BDAYS`` business days between the two values), so no sigma is shown for it."""
+    from app.components.tearsheet import GAP_BDAYS
+
+    if row.change is None or row.change.previous is None:
+        return False
+    a, b = to_et(row.change.previous.as_of).date(), to_et(row.change.last.as_of).date()
+    return int(np.busday_count(a, b)) > GAP_BDAYS
+
+
+def sigmas(ov: Overview) -> dict[str, tuple[str, str]]:
+    """The day's unusual moves as ``{instrument id: (sigma text, sentence for screen readers)}``.
+
+    These are the report's own notable moves (at least the anomaly threshold away from each
+    instrument's recent daily moves); P-022 shows them as a tag on the watchlist row. A move
+    across a gap in the data gets no tag (the risk card says "no data" for it). The sentence
+    names the instrument by its display name, never by its raw id."""
     rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
-    items = []
-    for n in ov.moves[:limit]:
-        row = rows.get(n.instrument_id or "")
-        if row is None or not row.available or not _has_change(row):
-            continue
-        p = provenance_of(row, ov.as_of)
+    out: dict[str, tuple[str, str]] = {}
+    for n in ov.moves:
         m = _SIGMA.search(n.text)
-        sigma = (
-            f' <span class="db-note">{m.group(1)}σ<span class="db-sr"> ({escape(n.text)})'
-            "</span></span>"
-            if m
-            else ""
-        )
-        items.append(
-            (
-                row.instrument_id,
-                f'<a class="db-move" data-db-id="{escape(row.instrument_id)}">'
-                f"<b>{escape(short(row))}</b>"
-                f"{change_cell(row.change_text, p, row.basis, compact=True)}{sigma}</a>",
-            )
-        )
-    return items
+        iid = n.instrument_id
+        if not iid or not m or iid in out:
+            continue
+        row = rows.get(iid)
+        if row is not None and _across_gap(row):
+            continue
+        text = n.text.replace(iid, short(row)) if row is not None else n.text
+        out[iid] = (f"{m.group(1)}σ", text)
+    return out
+
+
+def sigma_tag(sig: tuple[str, str] | None) -> str:
+    if sig is None:
+        return ""
+    return (
+        f'<span class="db-sig">{escape(sig[0])}<span class="db-sr"> (unusual move: '
+        f"{escape(sig[1])})</span></span>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -256,23 +283,32 @@ def search(sections: Iterable[Section], query: str) -> list[Section]:
     return out
 
 
-def wl_row(row: Row, now: datetime, sel: str) -> str:
-    """One watchlist row: short name, full name, value and change."""
+def wl_row(
+    row: Row,
+    now: datetime,
+    sel: str,
+    spark: Sequence[float] = (),
+    sig: tuple[str, str] | None = None,
+) -> str:
+    """One watchlist row (P-022): the full name, the short name with a sigma tag for an unusual
+    move, a 30-day sparkline, then the value over its change."""
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy and not row.available else ""
     hover = "; ".join((row.label, *row.qualifiers))
     cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
     name = (
-        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}</b>'
-        f"<small>{escape(row.name)}</small>"
+        f'<span class="db-wl-name"><b>{escape(row.name)}</b>'
+        f"<small>{escape(short(row))}{tag}{sigma_tag(sig)}</small>"
         f'<span class="db-sr"> ({escape(hover)})</span></span>'
     )
+    trend = _spark(spark, _trend_cls(row), 40, 20) if row.available else ""
     if not row.available:
         cells = f'<span class="db-wl-gap db-unavailable">{NO_DATA}</span>'
     else:
         p = provenance_of(row, now)
         cells = (
-            f'<span class="db-wl-val">{_listed(row.value_text, p)}</span>'
-            f'<span class="db-wl-chg">{_change(row, p)}</span>'
+            f'<span class="db-wl-spark">{trend}</span>'
+            f'<span class="db-wl-lv"><span class="db-wl-val">{_listed(row.value_text, p)}</span>'
+            f'<span class="db-wl-chg">{_change(row, p)}</span></span>'
         )
     current = ' aria-current="true"' if row.instrument_id == sel else ""
     return f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}"{current}>{name}{cells}</a>'
@@ -291,20 +327,28 @@ class WatchGroup:
 
 
 def watchlist(
-    sections: Sequence[Section], now: datetime, sel: str = "", *, fold_proxies: bool = True
+    sections: Sequence[Section],
+    now: datetime,
+    sel: str = "",
+    *,
+    fold_proxies: bool = True,
+    sparks: Mapping[str, Sequence[float]] | None = None,
+    sigs: Mapping[str, tuple[str, str]] | None = None,
 ) -> list[WatchGroup]:
-    """Every instrument grouped by section; ETF proxies fold behind one line unless searching."""
+    """Every instrument grouped by asset class; ETF proxies fold behind one line unless
+    searching. ``sparks`` are 30-day trends and ``sigs`` the sigma tags (:func:`sigmas`)."""
+    sparks = sparks or {}
+    sigs = sigs or {}
+
+    def item(r: Row) -> Item:
+        iid = r.instrument_id
+        return iid, wl_row(r, now, sel, sparks.get(iid, ()), sigs.get(iid))
+
     out = []
     for sec in sections:
         real = [r for r in sec.rows if not (fold_proxies and r.is_proxy)]
         proxies = [r for r in sec.rows if fold_proxies and r.is_proxy]
-        out.append(
-            WatchGroup(
-                sec.title,
-                [(r.instrument_id, wl_row(r, now, sel)) for r in real],
-                [(r.instrument_id, wl_row(r, now, sel)) for r in proxies],
-            )
-        )
+        out.append(WatchGroup(sec.title, [item(r) for r in real], [item(r) for r in proxies]))
     return out
 
 
@@ -317,9 +361,24 @@ def group_title(title: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _header_notes(row: Row) -> list[str]:
+    """What the value is, beyond its name, without repeating a caveat word that the figure
+    already shows (P-022 review: "proxy" once, not twice)."""
+    out = []
+    if row.is_proxy and row.proxy_label:
+        out.append("tracks " + row.proxy_label.removeprefix("proxy for ").strip())
+    for q in row.qualifiers:
+        if q.startswith("IEX"):
+            q = q.split(":", 1)[-1].strip()  # "single exchange, ..."; the IEX tag is shown
+        elif q.startswith("fallback"):
+            continue  # the fallback tag and the source line say it
+        out.append(q)
+    return out
+
+
 def chart_header(row: Row, now: datetime) -> str:
-    """Name, the latest value with its full provenance line, and the change with its basis."""
-    sub = escape(" · ".join(x for x in (row.label, *row.qualifiers) if x))
+    """Name and what it is; the latest value (large) with its glyph and caveat tags, the change
+    pill, and one quiet provenance line: field, tier, as-of and source."""
     head = (
         f'<div class="db-ch"><span class="db-ch-name">{escape(short(row))}</span>'
         f'<span class="db-ch-sub">{escape(row.name)}</span></div>'
@@ -328,45 +387,30 @@ def chart_header(row: Row, now: datetime) -> str:
         return head + f'<div class="db-ch-value db-unavailable">{NO_DATA}</div>'
     p = provenance_of(row, now)
     chg = (
-        change_cell(row.change_text, p, row.basis)
+        change_cell(row.change_text, p, row.basis, compact=True, glyph=False)
         if _has_change(row)
         else _no_change("no change yet")
     )
-    return (
-        head + '<div class="db-ch" style="margin-top:.3rem">'
-        f'<span class="db-ch-value">{value_cell(row.value_text, p)}</span>'
-        f'<span class="db-ch-chg">{chg}</span></div>'
-        + (f'<div class="db-ch-foot">{sub}</div>' if sub else "")
+    basis = (
+        f'<span class="db-ch-basis">vs {escape(row.basis)}</span>'
+        if row.basis and _has_change(row)
+        else ""
     )
-
-
-def overview(ov: Overview, sel: str = "") -> list[tuple[str, list[Item]]]:
-    """Small multiples: every instrument's 30-day trend, as ``(section title, cards)``."""
-    out = []
-    for sec in ov.sections:
-        cards = []
-        for row in sec.rows:
-            if row.is_proxy or not row.available:
-                continue
-            p = provenance_of(row, ov.as_of)
-            cls = "db-card is-sel" if row.instrument_id == sel else "db-card"
-            spark = _spark(
-                ov.sparks.get(row.instrument_id, ()), _trend_cls(row), 160, 34, area=True
-            )
-            cards.append(
-                (
-                    row.instrument_id,
-                    f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}">'
-                    f'<div class="db-card-top"><b>{escape(short(row))}'
-                    f'<span class="db-sr"> · {escape(row.name)}</span></b>'
-                    f"{_change(row, p)}</div>"
-                    f'<div class="db-card-val">{_listed(row.value_text, p)}</div>'
-                    f"{spark}</a>",
-                )
-            )
-        if cards:
-            out.append((sec.title, cards))
-    return out
+    line = " · ".join(
+        [
+            f'<span class="db-field">{escape(p.field)}</span>',
+            f"{tier_glyph(p.tier)} {TIER_NAME[p.tier]}",
+            f'<span class="db-asof">{escape(p.hover or p.as_of)}</span>',
+            f'<span class="db-src">{escape(p.source)}</span>',
+            *(escape(n) for n in _header_notes(row)),
+        ]
+    )
+    return (
+        head + '<div class="db-ch db-ch-price">'
+        f'<span class="db-ch-value">{value_cell(row.value_text, p, compact=True, show_as_of=False)}'
+        f'</span><span class="db-ch-chg">{chg}</span>{basis}</div>'
+        f'<div class="db-ch-foot">{line}</div>'
+    )
 
 
 def section_title(title: str) -> str:
@@ -374,83 +418,124 @@ def section_title(title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# yield curve
+# page footer and the Home stylesheet (T58)
 # ---------------------------------------------------------------------------
 
 
-def _nearest(
-    points: Sequence[tuple[date, float, str]], target: date
-) -> tuple[date, float, str] | None:
-    """The last point on or before ``target``."""
-    before = [p for p in points if p[0] <= target]
-    return before[-1] if before else None
-
-
-def _curve_prov(point: tuple[date, float, str]) -> Provenance:
-    return Provenance(point[2], 3, f"{point[0]:%d %b}", "yield")
-
-
-def yield_curve(ov: Overview, *, back_days: int = 28) -> str:
-    """Official Treasury curve: latest values against about a month earlier."""
-    tenors = [t for t in CURVE_TENORS if ov.curve.get(t)]
-    if len(tenors) < 2:
-        return (
-            '<div class="db-empty">Not enough official Treasury yields yet to draw the curve.</div>'
-        )
-    latest = max(ov.curve[t][-1][0] for t in tenors)
-    now = {t: ov.curve[t][-1] for t in tenors}
-    then = {t: _nearest(ov.curve[t], latest - timedelta(days=back_days)) for t in tenors}
-    have_then = all(then[t] is not None for t in tenors)
-    values = [p[1] for p in now.values()] + [p[1] for p in then.values() if p is not None]
-    lo, hi = min(values), max(values)
-    pad = max((hi - lo) * 0.15, 0.05)
-    lo, hi = lo - pad, hi + pad
-    w, h, left, right, top, bottom = 420, 210, 40, 14, 14, 30
-    logs = {t: math.log(_TENOR_YEARS[t]) for t in tenors}
-    x0, x1 = min(logs.values()), max(logs.values())
-
-    def x(t: str) -> float:
-        return left + (logs[t] - x0) / ((x1 - x0) or 1) * (w - left - right)
-
-    def y(v: float) -> float:
-        return top + (hi - v) / ((hi - lo) or 1) * (h - top - bottom)
-
-    grid = ""
-    for i in range(4):  # gridlines only: every yield figure is in the tenor strip below
-        v = lo + (hi - lo) * i / 3
-        grid += (
-            f'<line x1="{left}" x2="{w - right}" y1="{y(v):.1f}" y2="{y(v):.1f}" '
-            'class="db-curve-grid"/>'
-        )
-    ticks = "".join(
-        f'<text x="{x(t):.1f}" y="{h - 10}" text-anchor="middle">{SHORT[t]}</text>' for t in tenors
+def footer(ov: Overview, legend: str) -> str:
+    """The quiet last line: display mode and tiers, any withheld instruments, and what the tier
+    glyphs mean (``legend`` is ``kit.glyph_legend``)."""
+    withheld = (
+        f"<span>{ov.withheld} instrument(s) withheld in {escape(ov.mode)} mode: live (tier 1) "
+        "data is not shown here until provider display terms are verified.</span>"
+        if ov.withheld
+        else ""
     )
-    line_now = " ".join(f"{x(t):.1f},{y(now[t][1]):.1f}" for t in tenors)
-    marks = "".join(  # points only: the figures are in the tenor strip, with provenance
-        f'<circle cx="{x(t):.1f}" cy="{y(now[t][1]):.1f}" r="2.6" fill="currentColor"/>'
-        for t in tenors
-    )
-    then_svg, legend_then = "", ""
-    if have_then:
-        pts = " ".join(f"{x(t):.1f},{y(then[t][1]):.1f}" for t in tenors)  # type: ignore[index]
-        then_svg = f'<polyline class="db-curve-then" points="{pts}"/>'
-        d = min(p[0] for p in then.values() if p is not None)
-        legend_then = f"<span>- - - {d.day} {d:%b}</span>"
-    strip = "".join(
-        f'<div class="db-tenor"><span class="db-hz-label">{SHORT[t]}</span>'
-        f"{value_cell(f'{now[t][1]:.2f}%', _curve_prov(now[t]), compact=True)}"
-        "</div>"
-        for t in tenors
-    )
-    svg = (
-        f'<svg class="db-curve" viewBox="0 0 {w} {h}" width="100%" role="img" '
-        f"aria-label=\"Treasury yield curve on {latest.day} {latest:%b}; each tenor's yield is "
-        f'listed under the chart">{grid}{then_svg}'
-        f'<polyline class="db-curve-now" points="{line_now}"/>{marks}{ticks}</svg>'
-    )
-    sources = ", ".join(sorted({now[t][2] for t in tenors}))
     return (
-        f'{svg}<div class="db-curve-legend"><span>— {latest.day} {latest:%b}</span>'
-        f"{legend_then}<span>{tier_glyph(3)} official · {escape(sources)}</span></div>"
-        f'<div class="db-tenors">{strip}</div>'
+        f'<div class="db-foot"><span class="db-mode">{escape(ov.mode_label)}'
+        '<span class="db-sr"> (display mode and the data tiers it shows)</span></span>'
+        f"{withheld}{legend}</div>"
     )
+
+
+def _css() -> str:
+    from app import theme as t
+
+    pick = 'div[class*="st-key-db-pick-"]'
+    return f"""
+<style>
+/* ---- T58 Home v2 (P-022) ---- */
+.st-key-db-risk {{ background: {t.PANEL}; border-radius: {t.RADIUS}px; padding: {t.PAD}px; }}
+.st-key-db-detail, .st-key-db-risk {{ gap: 0; }}
+.db-card-h {{ color: {t.SECONDARY}; font-size: 13px; font-weight: 500; margin-bottom: 4px; }}
+.st-key-db-watch .db-card-h {{ padding: 6px {t.PAD}px 0 {t.PAD}px; }}
+
+/* the status dot's tooltip opens below it, right-aligned: it sits at the top right corner */
+.db-status .db-tip {{ left: auto; right: 0; bottom: auto; top: calc(100% + 8px);
+  transform: none; }}
+
+/* watchlist rows: full name, short name and sigma tag, sparkline, value over change */
+.db-wl-row {{ grid-template-columns: minmax(0, 1fr) 40px auto; }}
+.db-wl-name b {{ font-size: 13.5px; line-height: 1.3; }}
+.db-wl-name small {{ display: flex; align-items: center; gap: 6px; white-space: normal;
+  overflow: visible; text-overflow: clip; }}
+.db-wl-name small .db-tag {{ margin-left: 0; }}
+.db-sig {{ color: {t.AMBER}; font-size: 11px; font-weight: 500; }}
+.db-wl-spark .db-spark {{ width: 40px; height: 20px; opacity: .9; }}
+.db-wl-lv {{ text-align: right; }}
+.db-wl-lv .db-wl-val, .db-wl-lv .db-wl-chg {{ display: block; }}
+.db-wl-lv .db-fig {{ text-align: right; }}
+.db-wl-chg .db-val {{ font-size: 11.5px; }}
+{pick}:hover .db-wl-row {{ background: {t.HOVER}; }}
+
+/* chart card header */
+.db-ch-price {{ align-items: center; margin-top: 6px; }}
+.db-ch-value .db-fig {{ display: inline-flex; align-items: center; gap: 6px; }}
+.db-ch-value .db-flag {{ font-size: {t.SIZE_META}px; letter-spacing: 0; }}
+.db-ch-chg .db-val {{ font-size: 13px; }}
+.db-ch-basis {{ color: {t.META}; font-size: {t.SIZE_META}px; }}
+.db-ch-foot .db-tier {{ color: {t.META}; }}
+.st-key-db-ctrls {{ justify-content: flex-end; align-items: center; gap: 10px !important;
+  flex-wrap: wrap; }}
+.st-key-db-ctrls > div {{ width: auto !important; flex: 0 0 auto !important; }}
+.db-chfoot {{ color: {t.META}; font-size: {t.SIZE_META}px; margin-top: 4px; }}
+.db-hzs {{ margin: 0 0 12px 0; }}
+
+/* right rail: the verdict */
+.st-key-db-detail .db-verdict {{ display: flex; align-items: center; gap: 10px; margin: 10px 0 6px;
+  padding: 0; background: transparent; }}
+.db-verdict-ico {{ width: 28px; height: 28px; border-radius: 8px; display: inline-flex;
+  align-items: center; justify-content: center; font-weight: 600; background: {t.RAISED};
+  color: {t.SECONDARY}; }}
+.db-verdict-ok .db-verdict-ico {{ background: {t.UP_TINT}; color: {t.UP}; }}
+.db-verdict-warn .db-verdict-ico, .db-verdict-fail .db-verdict-ico {{
+  background: {t.AMBER_TINT}; color: {t.AMBER}; }}
+.st-key-db-detail .db-verdict b {{ font-size: 17px; font-weight: 500; color: {t.TEXT}; }}
+.db-verdict-p, .db-verdict-sum {{ color: {t.SECONDARY}; font-size: 13px; margin: 0 0 4px 0; }}
+.db-srcs {{ margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }}
+.db-src-row {{ display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }}
+.db-src-row > span {{ color: {t.SECONDARY}; }}
+.db-src-row b {{ font-weight: 500; color: {t.TEXT}; }}
+
+/* right rail: risk and range */
+.db-facts {{ margin: 4px 0 8px 0; }}
+.db-fact {{ display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 12px 0; border-top: 1px solid {t.DIVIDER}; }}
+.db-fact:first-child {{ border-top: 0; }}
+.db-fact > span {{ color: {t.SECONDARY}; font-size: 13px; }}
+.db-fact > b {{ font-weight: 500; font-size: {t.SIZE_BODY}px; color: {t.TEXT}; }}
+.db-fact .db-fig {{ text-align: right; }}
+.db-gapnote {{ margin: 0 0 8px 0; }}
+.db-rangebox {{ padding: 4px 0 8px 0; }}
+.db-range-head {{ display: flex; justify-content: space-between; font-size: 13px; }}
+.db-range-label {{ color: {t.SECONDARY}; }}
+.db-range-head b {{ font-weight: 500; font-variant-numeric: tabular-nums; }}
+.db-range .db-range-fill {{ top: 0; height: 4px; left: 0; border-radius: 2px;
+  background: linear-gradient(90deg, {t.RAISED}, #3A4250); }}
+.db-range-ends .db-fig {{ text-align: left; }}
+.db-range-ends > span:last-child .db-fig {{ text-align: right; }}
+.st-key-db-risk [data-testid="stButton"] button,
+.st-key-db-risk [data-testid="stPageLink"] a {{ color: {t.SECONDARY}; font-size: 13px; }}
+
+/* tabs under the chart */
+.st-key-db-values [data-baseweb="tab-list"] {{ gap: 24px; }}
+.st-key-db-values [data-baseweb="tab"] p {{ font-size: 13.5px; font-weight: 500; }}
+.st-key-db-values [data-baseweb="tab-highlight"] {{ background: {t.ACCENT}; }}
+.st-key-db-values [data-baseweb="tab-border"] {{ background: {t.DIVIDER}; }}
+
+@media (max-width: 640px) {{
+  .st-key-db-watch {{ max-height: 440px !important; }}
+  .db-values .db-tagline, .db-values td {{ white-space: normal; overflow-wrap: anywhere; }}
+  .st-key-db-values [data-testid="stMarkdownContainer"] {{ overflow-x: auto; }}
+}}
+
+/* footer */
+.db-foot {{ margin-top: 24px; color: {t.META}; font-size: {t.SIZE_META}px; display: flex;
+  gap: 8px 16px; flex-wrap: wrap; }}
+.db-foot .db-glyphs {{ gap: 12px; }}
+</style>
+"""
+
+
+#: the Home stylesheet (injected by ``app/views/markets.py`` after ``theme.apply()``)
+HOME_CSS = _css()

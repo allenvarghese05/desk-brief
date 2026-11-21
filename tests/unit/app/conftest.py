@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import itertools
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -33,6 +33,21 @@ _ENV = (
     "R2_READER_ACCESS_KEY_ID",
     "R2_READER_SECRET_ACCESS_KEY",
 )
+
+
+@pytest.fixture(autouse=True)
+def _close_new_connections() -> Iterator[None]:
+    """Close the shared DuckDB connections a test's stores opened (T56 keeps one per store for
+    the process, with native threads), so the whole folder can run in one process (T58: the
+    Home tests open many stores)."""
+    from app.components import data
+
+    before = set(data._SLOTS)
+    yield
+    for key in set(data._SLOTS) - before:
+        slot = data._SLOTS.pop(key)
+        if slot.current is not None and not slot.busy:
+            slot.current.conn.close()
 
 
 @pytest.fixture

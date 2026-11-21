@@ -117,7 +117,7 @@ def test_clicking_an_instrument_sets_the_id_in_the_same_session(run_home: Run) -
     assert at.text_input(key="q").value == "yield"
 
 
-@pytest.mark.parametrize("where", ["tile", "ov", "wl"])
+@pytest.mark.parametrize("where", ["tile", "wl"])  # T58: no overview cards on Home
 def test_every_selectable_item_selects_in_session(run_home: Run, where: str) -> None:
     at = run_home("hosted")
     at.button(key=pick(where, "UST_10Y")).click().run()
@@ -208,7 +208,9 @@ def test_no_full_reload_links_anywhere_on_markets(run_home: Run) -> None:
     for mode in ("hosted", "local"):
         text = page(run_home(mode))
         assert 'target="_self"' not in text
-        assert "href=" not in text
+        # T58: the only link is the chart's TradingView attribution, which leaves the app
+        hrefs = re.findall(r'href="([^"]*)"', text)
+        assert set(hrefs) <= {"https://www.tradingview.com/"}
 
 
 def test_hosted_and_local_markets_agree_on_tier1(run_home: Run) -> None:
