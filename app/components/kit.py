@@ -8,6 +8,8 @@ Lives in ``app/components`` (not ``app/pages``) so Streamlit does not list it as
   partitioned tables for drill-down: :func:`recent_table`.
 * hosted rule: :func:`exposed_sources` have a feed in a hidden tier; rows that may carry their
   values are dropped and counted (:func:`keep_rows`), never shown.
+* compact provenance helpers (P-022): :func:`glyph_legend` and the :func:`details` dialog.
+* every cache is keyed on ``data.data_version()`` (T57), so a store change is seen at once.
 * small inline-SVG charts (dataviz skill: thin marks, one axis, direct labels, a table view next
   to every chart, secondary encoding by dash and marker as well as colour).
 """
@@ -23,6 +25,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import streamlit as st
@@ -34,7 +37,7 @@ for _p in (ROOT, ROOT / "src"):
 
 from app import theme  # noqa: E402
 from app.components import data  # noqa: E402
-from app.components.values import TIER_GLYPH, TIER_NAME  # noqa: E402
+from app.components.values import TIER_GLYPH, TIER_NAME, status_marker  # noqa: E402
 
 from deskbrief.config import Config, load_config  # noqa: E402
 from deskbrief.store.backend import StorageBackend, StorageError, serving_key, table_prefix  # noqa: E402
@@ -47,13 +50,18 @@ from deskbrief.timeutil import et_date, to_et  # noqa: E402
 TIER_COLOUR = {3: "#2a78d6", 2: "#eb6834", 1: "#1baf7a"}
 TIER_DASH = {3: "", 2: "5 3", 1: "1.5 3"}
 STATUS_MARK = {"pass": "✓", "warn": "!", "fail": "✕", "skip": "-"}
-STATUS_COLOUR = {"pass": theme.UP, "warn": theme.WARN, "fail": theme.FAIL, "skip": theme.MUTED}
+#: P-022: failed and warn are amber (with ✕ and !), never red; red means "down" only
+STATUS_COLOUR = {"pass": theme.UP, "warn": theme.WARN, "fail": theme.FAIL, "skip": theme.META}
+_STATUS_INK = {"pass": theme.PAGE, "warn": theme.PAGE, "fail": theme.PAGE, "skip": theme.TEXT}
 
 PAGE_CSS = f"""
 <style>
 .db-strip-row {{ display: flex; gap: 3px; align-items: center; }}
-.db-sq {{ width: 20px; height: 20px; display: inline-flex; align-items: center;
-  justify-content: center; font-size: .72rem; color: #fff; border-radius: 2px; }}
+.db-sq {{ position: relative; width: 20px; height: 20px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: .72rem; border-radius: 4px;
+  outline: none; }}
+.db-sq:focus-visible {{ box-shadow: 0 0 0 2px {theme.ACCENT}; }}
+.db-sq:hover .db-tip, .db-sq:focus .db-tip {{ display: block; }}
 .db-sq-label {{ color: {theme.MUTED}; font-size: .72rem; margin-left: .5rem; }}
 .db-legend {{ display: flex; gap: 1.2rem; font-size: .8rem; color: {theme.MUTED};
   margin: .2rem 0 .4rem 0; flex-wrap: wrap; }}
@@ -61,26 +69,20 @@ PAGE_CSS = f"""
 .db-n {{ color: {theme.MUTED}; font-size: .85rem; }}
 .db-kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: .6rem; margin: .2rem 0 1rem 0; }}
-.db-kpi {{ background: {theme.PANEL}; border: 1px solid {theme.RULE}; border-radius: 8px;
-  padding: .7rem .9rem; border-top: 2px solid {theme.RULE}; }}
-.db-kpi-ok {{ border-top-color: {theme.UP}; }} .db-kpi-warn {{ border-top-color: {theme.WARN}; }}
-.db-kpi-fail {{ border-top-color: {theme.FAIL}; }}
-.db-kpi-label {{ color: {theme.MUTED}; font-size: .7rem; font-weight: 600; letter-spacing: .07em;
+.db-kpi {{ background: {theme.PANEL}; border-radius: {theme.RADIUS}px; padding: 18px 20px; }}
+.db-kpi .db-mark {{ margin-left: 6px; text-transform: none; letter-spacing: 0; }}
+.db-kpi-label {{ color: {theme.META}; font-size: 11.5px; font-weight: 500; letter-spacing: .04em;
   text-transform: uppercase; }}
-.db-kpi-value {{ font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums;
-  color: {theme.INK}; line-height: 1.3; }}
+.db-kpi-value {{ font-size: {theme.SIZE_FIGURE}px; font-weight: 500;
+  font-variant-numeric: tabular-nums; color: {theme.INK}; line-height: 1.3; }}
 .db-kpi-fail .db-kpi-value {{ color: {theme.FAIL}; }}
 .db-kpi-warn .db-kpi-value {{ color: {theme.WARN}; }}
-.db-kpi-note {{ color: {theme.MUTED}; font-size: .76rem; }}
+.db-kpi-note {{ color: {theme.META}; font-size: {theme.SIZE_META}px; }}
 .db-page-kicker {{ margin: 1.2rem 0 .35rem 0; font-size: .74rem; }}
 .db-xname {{ font-weight: 600; }}
 .db-id {{ color: {theme.MUTED}; font-size: .72rem; font-family: {theme.MONO}; }}
 </style>
 """
-
-
-#: page title -> its label in the top-bar navigation
-NAV_LABEL = {"Cross-checks": "Cross checks"}
 
 
 @dataclass(frozen=True)
@@ -123,16 +125,13 @@ def context(title: str) -> Ctx:
     except StorageError as exc:  # names the missing variables, never their values
         st.error(f"Cannot read the data store: {exc}")
         st.stop()
-    from app.components.panels import nav  # late: panels imports data, not kit
-
-    left, right = st.columns([2, 3], vertical_alignment="center")
-    left.markdown(
+    # the page list is st.navigation's top bar (app/Home.py); this is the page's own heading
+    st.markdown(
         f'<div class="db-top"><span class="db-brand">{escape(title)}</span>'
-        f'<span class="db-when">Desk Brief · {escape(mode)} mode</span></div>',
+        f'<span class="db-when">Desk Brief · {escape(mode)} mode</span></div>'
+        '<hr class="db-rule">',
         unsafe_allow_html=True,
     )
-    right.markdown(nav(NAV_LABEL.get(title, title)), unsafe_allow_html=True)
-    st.markdown('<hr class="db-rule">', unsafe_allow_html=True)
     return Ctx(config, mode, data.hidden_tiers(mode, config), store, data.current_time())
 
 
@@ -158,7 +157,8 @@ def keep_rows(df: pd.DataFrame, cols: tuple[str, ...], exposed: frozenset[str]) 
 
 
 # ---------------------------------------------------------------------------
-# reading (cached 60 s; the leading-underscore arguments are not hashed)
+# reading: keyed on the data version, and at most 60 s old for the serving files, which the
+# version does not cover (T56). The leading-underscore arguments are not hashed.
 # ---------------------------------------------------------------------------
 
 
@@ -166,8 +166,17 @@ def _table(raw: bytes) -> pd.DataFrame:
     return pq.read_table(io.BytesIO(raw)).to_pandas()
 
 
+def version(config: Config) -> str:
+    """``data.data_version`` for cache keys; empty when the store cannot be listed, so a page
+    that only reads serving files still works (the 60 s TTL then bounds the age)."""
+    try:
+        return data.data_version(config)
+    except (StorageError, duckdb.Error, OSError):
+        return ""
+
+
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
-def _serving_frame(_store: StorageBackend, where: str, name: str) -> pd.DataFrame:
+def _serving_frame(_store: StorageBackend, where: str, name: str, ver: str) -> pd.DataFrame:
     try:
         return _table(_store.get_bytes(serving_key(name)))
     except StorageError:
@@ -176,11 +185,11 @@ def _serving_frame(_store: StorageBackend, where: str, name: str) -> pd.DataFram
 
 def serving_frame(ctx: Ctx, name: str) -> pd.DataFrame:
     """A ``serving/*.parquet`` file; empty frame when it is not there yet."""
-    return _serving_frame(ctx.store, where_key(ctx.config), name)
+    return _serving_frame(ctx.store, where_key(ctx.config), name, version(ctx.config))
 
 
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
-def _serving_json(_store: StorageBackend, where: str, name: str) -> dict[str, object]:
+def _serving_json(_store: StorageBackend, where: str, name: str, ver: str) -> dict[str, object]:
     try:
         return dict(json.loads(_store.get_bytes(serving_key(name))))
     except (StorageError, ValueError):
@@ -188,11 +197,13 @@ def _serving_json(_store: StorageBackend, where: str, name: str) -> dict[str, ob
 
 
 def serving_json(ctx: Ctx, name: str) -> dict[str, object]:
-    return _serving_json(ctx.store, where_key(ctx.config), name)
+    return _serving_json(ctx.store, where_key(ctx.config), name, version(ctx.config))
 
 
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
-def _recent_table(_store: StorageBackend, where: str, table: str, since: date) -> pd.DataFrame:
+def _recent_table(
+    _store: StorageBackend, where: str, table: str, since: date, ver: str
+) -> pd.DataFrame:
     frames = []
     for key in sorted(_store.list(table_prefix(table))):
         if not key.endswith(".parquet"):
@@ -205,7 +216,8 @@ def _recent_table(_store: StorageBackend, where: str, table: str, since: date) -
 
 def recent_table(ctx: Ctx, table: str, days: int) -> pd.DataFrame:
     """Partitions of a daily table (revisions, quarantine) of the last ``days`` days."""
-    return _recent_table(ctx.store, where_key(ctx.config), table, ctx.today - timedelta(days=days))
+    since = ctx.today - timedelta(days=days)
+    return _recent_table(ctx.store, where_key(ctx.config), table, since, version(ctx.config))
 
 
 def withheld_note(n: int, mode: str) -> None:
@@ -246,6 +258,7 @@ def kpis(items: list[tuple[str, str, str, str]]) -> str:
     answer to "is anything wrong?" comes first on every system page."""
     cells = "".join(
         f'<div class="db-kpi db-kpi-{escape(tone)}"><div class="db-kpi-label">{escape(label)}'
+        f"{status_marker(tone) if tone in ('fail', 'warn') else ''}"
         f'</div><div class="db-kpi-value">{escape(value)}</div>'
         f'<div class="db-kpi-note">{escape(note)}</div></div>'
         for label, value, tone, note in items
@@ -270,9 +283,11 @@ def section(title: str, note: str = "") -> None:
 def status_strip(items: list[tuple[str, str, str]]) -> str:
     """Squares ``(label, status, hover)`` oldest first: glyph and colour, never colour alone."""
     sq = "".join(
-        f'<span class="db-sq" style="background:{STATUS_COLOUR.get(s, theme.MUTED)}" '
-        f'title="{escape(hover)}" aria-label="{escape(lab)} {escape(s)}">'
-        f"{STATUS_MARK.get(s, '-')}</span>"
+        f'<span class="db-sq db-sq-{escape(s)}" tabindex="0" role="img" '
+        f'style="background:{STATUS_COLOUR.get(s, theme.META)};'
+        f'color:{_STATUS_INK.get(s, theme.TEXT)}" aria-label="{escape(lab)} {escape(s)}">'
+        f"{STATUS_MARK.get(s, '-')}"
+        f'<span class="db-tip" aria-hidden="true">{escape(hover)}</span></span>'
         for lab, s, hover in items
     )
     return f'<span class="db-strip-row">{sq}</span>'
@@ -280,11 +295,36 @@ def status_strip(items: list[tuple[str, str, str]]) -> str:
 
 def status_legend() -> str:
     parts = "".join(
-        f'<span><span class="db-sq" style="background:{STATUS_COLOUR[s]}">{STATUS_MARK[s]}</span>'
-        f" {s}</span>"
+        f'<span><span class="db-sq" style="background:{STATUS_COLOUR[s]};color:{_STATUS_INK[s]}">'
+        f"{STATUS_MARK[s]}</span> {s}</span>"
         for s in ("pass", "warn", "fail", "skip")
     )
     return f'<div class="db-legend">{parts}</div>'
+
+
+def glyph_legend(hidden: frozenset[int] = frozenset()) -> str:
+    """What the tier glyphs mean, for every tier the page may show (P-022: it labels "delayed").
+
+    Hosted mode passes its hidden tiers, so the legend never offers "live" there."""
+    parts = "".join(
+        f'<span><b aria-hidden="true">{TIER_GLYPH[t]}</b>{TIER_NAME[t]}</span>'
+        for t in (1, 2, 3)
+        if t not in hidden
+    )
+    return (
+        f'<div class="db-glyphs" role="note" aria-label="Tier glyphs">{parts}'
+        "<span>Hover, focus or tap a glyph for field, source and as-of</span></div>"
+    )
+
+
+def details(title: str, body_html: str) -> None:
+    """The details panel (P-022): the full lineage of a figure in a dialog."""
+
+    @st.dialog(title, width="large")
+    def _show() -> None:
+        st.markdown(body_html, unsafe_allow_html=True)
+
+    _show()
 
 
 def tier_legend(tiers: list[int]) -> str:

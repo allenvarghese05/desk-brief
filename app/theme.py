@@ -1,262 +1,328 @@
-"""Dashboard look: a dark trading terminal (spec 10.2; apple-design + minimalist-ui, T36).
+"""Dashboard look v2: refined dark (P-022, T57).
 
-Market first, plumbing second. Near-black canvas, slightly lifted panels, one hairline colour.
-Colour carries meaning only: green / red for direction, amber for warnings, one blue accent for
-the selection and focus. Figures are tabular and right-aligned. No gradients, no shadows, no
-motion. Every text colour clears 4.5:1 on every surface it sits on (figures next to each token,
-measured against PANEL, the darkest surface text sits on is CANVAS).
+Near-black page, panels one shade lighter, a raised shade for hover and selection. Cards have
+no borders and are told apart by shade; padding (24 px) is larger than the gaps between cards
+(20 px). One blue accent, for the selected state and focus only. Muted green and red mean up
+and down, and nothing else. A failed check is a ✕ and the word "failed" on an amber tint, a
+warning is "warn" in the same amber family, and stale data is grey with a "stale" tag
+(P-022 supersedes spec §10.2's "red reserved for check failures"). Four type sizes (40, 26, 14
+and 12 px), Inter with tabular figures.
+
+The tokens are mirrored in ``.streamlit/config.toml``. The older names (``CANVAS``, ``INK``,
+``MUTED``, ``RULE``, ``GRID``, ``FAIL``, ``WARN``) stay as aliases for the pages that later
+cards (T58, T59) restyle.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
-CANVAS = "#0b0e13"  # page background (.streamlit/config.toml backgroundColor)
-PANEL = "#11161d"  # panels, tiles (config secondaryBackgroundColor)
-RAISED = "#171d26"  # hover and the selected watchlist row
-RULE = "#222a35"  # hairlines and panel borders (not text)
-GRID = "#1a2029"  # chart grid lines (not text)
-SURFACE = PANEL  # kept for callers of the light theme's name
-INK = "#e7eaf0"  # 15.1:1 on PANEL
-MUTED = "#8d96a3"  # 6.1:1 on PANEL
-UP = "#3fbf86"  # 7.8:1
-DOWN = "#f0645c"  # 5.8:1
-FAIL = "#ff6b62"  # check failures, 6.5:1
-WARN = "#d9a93a"  # check warnings, 8.4:1
-ACCENT = "#6ea8ff"  # selection and focus, 7.5:1
+# ---- design tokens (P-022) ----------------------------------------------------------------
+PAGE = "#0B0D10"  # page background (config backgroundColor)
+PANEL = "#13161B"  # cards (config secondaryBackgroundColor)
+RAISED = "#181C22"  # hover, selection, controls inside a card
+DIVIDER = "#22262E"  # hairlines between rows (never a card border)
+TEXT = "#E8EAED"  # 15.2:1 on PANEL
+SECONDARY = "#9AA0A6"  # 6.9:1 on PANEL
+META = "#6B7078"  # 3.7:1 on PANEL: meta text only (as-of, field, kickers), never a figure
+UP = "#2EBD85"
+DOWN = "#F6465D"
+UP_TINT = "rgba(46, 189, 133, .13)"
+DOWN_TINT = "rgba(246, 70, 93, .13)"
+ACCENT = "#5B9DFF"
+ACCENT_TINT = "rgba(91, 157, 255, .14)"
+AMBER = "#E6B450"  # failed and warn markers (with ✕ / "failed" and "warn", never colour alone)
+AMBER_TINT = "rgba(230, 180, 80, .14)"
+TOOLTIP = "#20252D"
 
-SANS = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif'
-MONO = '"SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace'
+RADIUS = 12  # px, cards
+PAD = 24  # px, card padding
+GAP = 20  # px, between cards
+SIZE_HERO, SIZE_FIGURE, SIZE_BODY, SIZE_META = 40, 26, 14, 12  # px
+
+SANS = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+MONO = '"JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace'
+
+# ---- aliases for pages not yet on v2 (T58/T59 retire them) --------------------------------
+CANVAS = PAGE
+SURFACE = PANEL
+RULE = DIVIDER
+GRID = DIVIDER
+INK = TEXT
+MUTED = SECONDARY
+FAIL = AMBER  # a failure is amber + ✕ + "failed"; red means "down" only (P-022)
+WARN = AMBER
+STALE = META
+
+#: keyed Streamlit containers drawn as cards
+CARDS = (
+    "db-watch", "db-chart", "db-detail", "db-overview", "db-values",
+    "db-mx-vix", "db-mx-curve", "db-mx-2s10s", "db-mx-gold", "db-mx-corr", "db-mx-cot",
+)  # fmt: skip
+
+_CARD_SEL = ", ".join(f".st-key-{k}" for k in CARDS)
+_PICK = 'div[class*="st-key-db-pick-"]'
 
 CSS = f"""
 <style>
-.block-container {{ padding: 1.1rem 1.6rem 3rem 1.6rem; max-width: 1760px; }}
-header[data-testid="stHeader"] {{ background: transparent; }}
-.stMarkdown, .stMarkdown p, .db-top, .db-tiles, .db-sec, .db-table, .db-wl {{
-  font-family: {SANS}; }}
+/* ---- page ---- */
+.block-container {{ padding: 76px 28px 3rem 28px; max-width: 1600px; }}
+header[data-testid="stHeader"] {{ background: {PAGE}; }}
+/* no sidebar rule: st.navigation(position="top") draws no sidebar list on a wide screen, and
+   on a phone Streamlit moves the page list into the sidebar, which must stay reachable */
+.stMarkdown, .stMarkdown p, .stCaption {{ font-family: {SANS}; font-size: {SIZE_BODY}px; }}
+.stCaption, [data-testid="stCaptionContainer"] {{ color: {META} !important;
+  font-size: {SIZE_META}px !important; }}
 .stMarkdown a, .stMarkdown a:hover {{ color: inherit !important;
   text-decoration: none !important; }}
+[data-testid="stHorizontalBlock"] {{ gap: {GAP}px; }}
+
+/* ---- cards: shade, radius and padding; no borders, no boxes inside boxes ---- */
+{_CARD_SEL} {{ background: {PANEL}; border-radius: {RADIUS}px; padding: {PAD}px; }}
+
+/* ---- figures ---- */
+.db-fig {{ display: inline-block; text-align: right; font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum"; }}
+.db-val {{ display: block; font-weight: 500; }}
+.db-meta {{ display: block; white-space: nowrap; color: {META}; font-size: {SIZE_META}px; }}
+.db-tagline {{ display: block; color: {META}; font-size: {SIZE_META}px; font-weight: 400;
+  white-space: nowrap; font-variant-numeric: tabular-nums; }}
+.db-up {{ color: {UP}; }} .db-down {{ color: {DOWN}; }} .db-flat {{ color: {SECONDARY}; }}
+/* a compact change is a tinted pill */
+.db-fig > .db-val:has(+ .db-of-chg) {{ display: inline-block; padding: 1px 7px;
+  border-radius: 6px; font-weight: 500; background: {RAISED}; }}
+.db-fig > .db-up:has(+ .db-of-chg) {{ background: {UP_TINT}; }}
+.db-fig > .db-down:has(+ .db-of-chg) {{ background: {DOWN_TINT}; }}
+.db-fig .db-val:has(+ .db-prov) {{ display: inline; }}
+.db-unavailable {{ color: {SECONDARY}; font-style: italic; }}
+.db-sr {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
+.db-tag, .db-flag {{ display: inline-block; background: {RAISED}; color: {SECONDARY};
+  border-radius: 5px; padding: 0 6px; margin-left: 6px; font-size: 11px; font-style: normal;
+  font-weight: 500; letter-spacing: .02em; vertical-align: 1px; }}
+.db-flags {{ white-space: nowrap; }}
+
+/* ---- compact source tag: a focusable tier glyph with a CSS tooltip (hover, focus, tap) ---- */
+.db-prov {{ position: relative; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; min-height: 18px; margin-left: 4px; color: {META}; font-size: 11px;
+  cursor: help; vertical-align: 1px; border-radius: 4px; outline: none; z-index: 2; }}
+.db-prov:hover, .db-prov:focus, .db-prov:focus-visible {{ color: {TEXT}; }}
+.db-prov:focus-visible {{ box-shadow: 0 0 0 2px {ACCENT}; }}
+.db-tip {{ display: none; position: absolute; left: 50%; bottom: calc(100% + 8px);
+  transform: translateX(-50%); background: {TOOLTIP}; color: {TEXT}; border-radius: 8px;
+  padding: 10px 12px; width: max-content; max-width: 280px; font: 400 {SIZE_META}px/1.5 {SANS};
+  white-space: normal; text-align: left; z-index: 30; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  pointer-events: none; }}
+.db-tip .db-src, .db-tip .db-asof {{ color: {SECONDARY}; }}
+.db-prov:hover .db-tip, .db-prov:focus .db-tip, .db-prov:focus-within .db-tip,
+.db-tipwrap:hover .db-tip, .db-tipwrap:focus .db-tip {{ display: block; }}
+.db-tipwrap {{ position: relative; outline: none; }}
+.db-glyphs {{ display: flex; gap: 16px; flex-wrap: wrap; color: {META};
+  font-size: {SIZE_META}px; }}
+.db-glyphs b {{ font-weight: 400; color: {SECONDARY}; margin-right: 4px; }}
+
+/* ---- check markers (P-022): amber for failed and warn, grey for stale; never red ---- */
+.db-mark {{ display: inline-block; border-radius: 5px; padding: 0 7px; font-size: {SIZE_META}px;
+  font-weight: 500; white-space: nowrap; }}
+.db-mark-fail {{ color: {AMBER}; background: {AMBER_TINT}; }}
+.db-mark-warn {{ color: {AMBER}; background: {AMBER_TINT}; }}
+.db-mark-pass {{ color: {UP}; }}
+.db-mark-stale, .db-mark-skip {{ color: {META}; background: {RAISED}; }}
+.db-st-pass {{ color: {UP}; }} .db-st-warn, .db-st-fail {{ color: {AMBER}; }}
+.db-st-skip {{ color: {META}; }}
 
 /* ---- top bar ---- */
-.db-top {{ display: flex; align-items: baseline; gap: .9rem; white-space: nowrap; color: {INK}; }}
-.db-brand {{ font-size: 1.15rem; font-weight: 650; letter-spacing: -.01em; }}
-.db-top .db-mode {{ margin-left: auto; }}
-.db-when {{ color: {MUTED}; font-size: .85rem; font-variant-numeric: tabular-nums; }}
-.db-status {{ display: flex; justify-content: flex-end; align-items: baseline; gap: .8rem;
-  flex-wrap: wrap; font-size: .8rem; }}
-.stMarkdown a.db-health {{ color: {MUTED} !important; white-space: nowrap; }}
-.stMarkdown a.db-health:hover {{ color: {INK} !important; }}
-.db-dot {{ display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
-  margin-right: .4rem; vertical-align: .05rem; }}
-.db-dot-ok {{ background: {UP}; }} .db-dot-warn {{ background: {WARN}; }}
-.db-dot-fail {{ background: {FAIL}; }} .db-dot-unknown {{ background: {MUTED}; }}
-.db-mode, .db-meta, .db-tag, .db-note {{ color: {MUTED}; font-size: .78rem; }}
-.db-rule {{ border: 0; border-top: 1px solid {RULE}; margin: .5rem 0 .8rem 0; }}
-div[data-testid="stTextInput"] input {{ font-family: {SANS}; font-size: .9rem;
-  background: {PANEL}; border-color: {RULE}; }}
+.db-top {{ display: flex; align-items: baseline; gap: 12px; white-space: nowrap; color: {TEXT}; }}
+.db-brand {{ font-size: 16px; font-weight: 600; letter-spacing: -.01em; }}
+.db-when {{ color: {META}; font-size: 13px; font-variant-numeric: tabular-nums; }}
+.db-status {{ display: flex; justify-content: flex-end; align-items: center; gap: 14px;
+  flex-wrap: wrap; font-size: 13px; color: {SECONDARY}; }}
+.db-health {{ white-space: nowrap; color: {SECONDARY}; }}
+.db-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 8px; vertical-align: 1px; }}
+.db-dot-ok {{ background: {UP}; }} .db-dot-warn, .db-dot-fail {{ background: {AMBER}; }}
+.db-dot-unknown {{ background: {META}; }}
+.db-mode, .db-note {{ color: {META}; font-size: {SIZE_META}px; }}
+.db-rule {{ border: 0; border-top: 1px solid {DIVIDER}; margin: 8px 0 16px 0; }}
+div[data-testid="stTextInput"] input {{ font-family: {SANS}; font-size: 13px;
+  background: {PANEL}; border: 0; border-radius: 10px; }}
+div[data-testid="stTextInput"] > div {{ border: 0; }}
 
-/* ---- page navigation (top bar) ---- */
-.db-nav {{ display: flex; gap: .2rem; flex-wrap: wrap; justify-content: flex-end;
-  font-size: .8rem; margin-bottom: .25rem; }}
-.stMarkdown a.db-nav-link {{ color: {MUTED} !important; padding: .2rem .55rem;
-  border-radius: 6px; white-space: nowrap; }}
-.stMarkdown a.db-nav-link:hover {{ color: {INK} !important; background: {RAISED}; }}
-.db-nav-link.is-here {{ color: {INK}; background: {RAISED}; }}
+/* ---- selectable items: the markup draws, a transparent button on top does the click ---- */
+{_PICK} {{ position: relative; gap: 0 !important; cursor: pointer; }}
+{_PICK} [data-testid="stElementContainer"]:has([data-testid="stButton"]) {{
+  position: absolute; inset: 0; z-index: 1; margin: 0; width: 100% !important; }}
+{_PICK} [data-testid="stButton"], {_PICK} [data-testid="stButton"] button {{
+  width: 100%; height: 100%; min-height: 0; padding: 0; margin: 0; }}
+{_PICK} [data-testid="stButton"] button {{ opacity: 0; cursor: pointer; border: 0; }}
+{_PICK}:has(button:focus-visible) {{ outline: 2px solid {ACCENT}; outline-offset: 2px;
+  border-radius: {RADIUS}px; }}
 
 /* ---- market strip ---- */
-.db-tiles {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .6rem;
-  margin-bottom: .6rem; }}
-@media (max-width: 900px) {{ .db-tiles {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
-@media (max-width: 520px) {{ .db-tile-value {{ font-size: 1.1rem; }}
-  .db-tile {{ padding: .55rem .6rem 1.5rem .6rem; }} .db-tile .db-tagline {{ left: .6rem; }} }}
-.db-tile {{ position: relative; display: block; background: {PANEL}; border: 1px solid {RULE};
-  border-radius: 8px; padding: .65rem .85rem 1.6rem .85rem; color: {INK}; }}
-.db-tile:hover, .db-tile.is-sel {{ border-color: {ACCENT}; }}
-.db-tile-label {{ color: {MUTED}; font-size: .74rem; font-weight: 600; letter-spacing: .04em;
-  text-transform: uppercase; }}
-.db-tile-value {{ font-size: 1.45rem; font-weight: 600; letter-spacing: -.015em;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums; line-height: 1.25; margin-top: .1rem; }}
-.db-tile-row {{ display: flex; align-items: center; justify-content: space-between; gap: .5rem; }}
-.db-tile-chg {{ font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.st-key-db-tiles {{ gap: {GAP}px !important; margin-bottom: 4px; }}
+.st-key-db-tiles > div {{ flex: 1 1 0; min-width: 150px; }}
+.db-tile {{ position: relative; display: block; background: {PANEL}; border-radius: {RADIUS}px;
+  padding: 18px 20px 16px 20px; color: {TEXT}; }}
+{_PICK}:hover .db-tile, .db-tile.is-sel {{ background: {RAISED}; }}
+.db-tile.is-sel {{ box-shadow: inset 0 0 0 1px rgba(91, 157, 255, .35); }}
+.db-tile-label {{ color: {SECONDARY}; font-size: 12.5px; font-weight: 500; }}
+.db-tile-value {{ font-size: {SIZE_FIGURE}px; font-weight: 500; letter-spacing: -.02em;
+  white-space: nowrap; line-height: 1.25; margin-top: 2px; }}
+.db-tile-row {{ display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 6px; }}
+.db-tile-chg {{ font-size: 12.5px; }}
 .db-tile .db-fig {{ display: block; text-align: left; }}
-.db-tile .db-tagline {{ position: absolute; left: .85rem; bottom: .55rem; }}
+@media (max-width: 640px) {{ .st-key-db-tiles > div {{ min-width: 140px; }}
+  .db-tile {{ padding: 14px 16px; }} .db-tile-value {{ font-size: 20px; }} }}
 
 /* ---- biggest moves ---- */
-.db-moves {{ display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
-  font-size: .88rem; color: {INK}; padding: .1rem 0 .7rem 0; }}
-.db-moves-label, .db-sec-title, .db-wl-grp, .db-kicker {{ color: {MUTED}; font-size: .7rem;
-  font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }}
-.db-moves-label {{ margin-right: .2rem; }}
-.db-move {{ white-space: nowrap; }}
-.db-move b {{ font-weight: 600; }}
-.db-move + .db-move::before {{ content: "·"; color: {MUTED}; margin-right: .6rem; }}
-
-/* ---- panels: keyed Streamlit containers ---- */
-.st-key-db-watch, .st-key-db-chart, .st-key-db-detail, .st-key-db-overview, .st-key-db-values {{
-  background: {PANEL}; border: 1px solid {RULE}; border-radius: 10px; padding: .8rem .9rem; }}
+.st-key-db-moves {{ gap: 6px 18px !important; align-items: baseline; margin-bottom: 8px; }}
+.st-key-db-moves > div {{ flex: 0 0 auto !important; width: auto !important; }}
+.db-moves-label, .db-sec-title, .db-wl-grp, .db-kicker {{ color: {META}; font-size: 11.5px;
+  font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }}
+.db-move {{ white-space: nowrap; font-size: 13px; color: {TEXT}; padding: 2px 0; }}
+.db-move b {{ font-weight: 500; margin-right: 6px; }}
+.db-move .db-fig {{ text-align: left; }}
 
 /* ---- watchlist ---- */
-.db-wl-grp {{ padding: .7rem .25rem .3rem .25rem; border-bottom: 1px solid {RULE}; }}
-.db-wl-grp:first-child {{ padding-top: .1rem; }}
-.db-wl-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto 4.4rem; gap: .5rem;
-  align-items: start; padding: .45rem .35rem; border-bottom: 1px solid {RULE};
-  border-left: 2px solid transparent; color: {INK}; font-size: .86rem; }}
-.db-wl-row:hover {{ background: {RAISED}; }}
-.db-wl-row.is-sel {{ background: {RAISED}; border-left-color: {ACCENT}; }}
-.db-wl-name b {{ display: block; font-weight: 600; }}
-.db-wl-name small {{ display: block; color: {MUTED}; font-size: .72rem; line-height: 1.3;
+.st-key-db-watch [data-testid="stVerticalBlock"] {{ gap: 0; }}
+.st-key-db-watch {{ padding: 12px 0; }}
+.db-wl-grp {{ padding: 16px {PAD}px 6px {PAD}px; }}
+.db-wl-row {{ position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto 76px;
+  gap: 10px; align-items: center; padding: 9px {PAD}px; color: {TEXT}; font-size: 13.5px; }}
+{_PICK}:hover .db-wl-row {{ background: {RAISED}; }}
+.db-wl-row.is-sel {{ background: {RAISED}; }}
+.db-wl-row.is-sel::before {{ content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 2px; background: {ACCENT}; }}
+.db-wl-name b {{ display: block; font-weight: 500; }}
+.db-wl-name small {{ display: block; color: {META}; font-size: {SIZE_META}px; line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-.db-wl-val, .db-wl-chg {{ text-align: right; font-variant-numeric: tabular-nums;
-  white-space: nowrap; }}
-.db-wl-chg {{ font-weight: 600; }}
-.db-wl .db-val {{ font-weight: 500; }}
+.db-wl-val, .db-wl-chg {{ text-align: right; white-space: nowrap; }}
+.db-wl-chg {{ font-size: 12px; }}
 .db-wl-gap {{ grid-column: 2 / 4; text-align: right; }}
-details.db-more summary {{ color: {MUTED}; font-size: .76rem; cursor: pointer; list-style: none;
-  padding: .45rem .3rem; }}
-details.db-more summary::-webkit-details-marker {{ display: none; }}
-details.db-more summary::before {{ content: "+ "; }}
-details.db-more[open] summary::before {{ content: "\\2212  "; }}
+.st-key-db-watch [data-testid="stExpander"] details {{ border: 0; background: transparent; }}
+.st-key-db-watch [data-testid="stExpander"] summary {{ color: {META}; font-size: 12.5px;
+  padding: 8px {PAD}px; }}
 
-/* ---- chart header ---- */
-.db-ch {{ display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }}
-.db-ch-name {{ font-size: 1.05rem; font-weight: 600; color: {INK}; }}
-.db-ch-sub {{ color: {MUTED}; font-size: .8rem; }}
-.db-ch-value {{ font-size: 2rem; font-weight: 600; letter-spacing: -.02em;
-  font-variant-numeric: tabular-nums; line-height: 1.15; color: {INK}; }}
-.db-ch-chg {{ font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+/* ---- chart card ---- */
+.db-ch {{ display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }}
+.db-ch-name {{ font-size: 15px; font-weight: 500; color: {TEXT}; }}
+.db-ch-sub {{ color: {META}; font-size: 13px; }}
+.db-ch-value {{ font-size: {SIZE_HERO}px; font-weight: 500; letter-spacing: -.025em;
+  line-height: 1.1; color: {TEXT}; }}
+.db-ch-chg {{ font-size: 15px; font-weight: 500; }}
 .db-ch .db-fig {{ display: inline-block; text-align: left; }}
-.db-ch .db-meta {{ display: block; margin-top: .15rem; }}
-.db-ch-foot {{ color: {MUTED}; font-size: .76rem; margin-top: .2rem; }}
+.db-ch .db-meta {{ display: block; margin-top: 4px; }}
+.db-ch-foot {{ color: {META}; font-size: 12.5px; margin-top: 4px; }}
 div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
 
 /* ---- performance over horizons ---- */
-.db-hzs {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .4rem;
-  margin: .55rem 0 .65rem 0; }}
-.db-hz {{ background: {CANVAS}; border: 1px solid {RULE}; border-radius: 6px;
-  padding: .35rem .5rem; font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
-.db-hz-label {{ display: block; color: {MUTED}; font-size: .66rem; font-weight: 600;
-  letter-spacing: .07em; }}
+.db-hzs {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 16px 0;
+  border-top: 1px solid {DIVIDER}; border-bottom: 1px solid {DIVIDER}; }}
+.db-hz {{ padding: 12px 14px; font-size: {SIZE_BODY}px; font-weight: 500;
+  font-variant-numeric: tabular-nums; border-right: 1px solid {DIVIDER}; }}
+.db-hz:last-child {{ border-right: 0; }}
+.db-hz-label {{ display: block; color: {META}; font-size: 11.5px; font-weight: 500; }}
 .db-hz .db-fig {{ display: block; text-align: left; }}
-.db-hz .db-unavailable {{ font-size: .78rem; font-weight: 400; }}
+.db-hz .db-unavailable {{ font-size: {SIZE_META}px; font-weight: 400; }}
 @media (max-width: 900px) {{ .db-hzs {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }} }}
 
 /* ---- every value we hold ---- */
-.db-values td {{ font-size: .84rem; }}
+.db-values td {{ font-size: 13px; }}
 .db-values .db-fig {{ text-align: right; }}
-.db-marks {{ letter-spacing: .15rem; font-weight: 600; }}
-.db-gapline {{ border-bottom: 1px solid {RULE}; padding: 0 0 .3rem 0; margin-top: -.15rem; }}
+.db-marks {{ letter-spacing: .15rem; font-weight: 500; }}
+.db-gapline {{ border-bottom: 1px solid {DIVIDER}; padding: 0 0 6px 0; }}
 .db-checks .db-gapline {{ display: block; }}
 
 /* ---- overview: small multiples ---- */
-.db-ov {{ display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; }}
-.db-ov-sec {{ flex: 0 1 auto; margin: .2rem 0 .5rem 0; max-width: 100%; }}
-.db-ov-grid {{ display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .45rem; }}
-.db-ov-grid .db-card {{ width: 172px; }}
-.db-card {{ display: block; background: {CANVAS}; border: 1px solid {RULE}; border-radius: 8px;
-  padding: .55rem .65rem .45rem .65rem; color: {INK}; }}
-.db-card:hover, .db-card.is-sel {{ border-color: {ACCENT}; }}
-.db-card-top {{ display: flex; justify-content: space-between; align-items: baseline; gap: .4rem;
-  font-size: .8rem; }}
-.db-card-top b {{ font-weight: 600; }}
-.db-card-val {{ font-size: 1.02rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.db-ov-sec {{ margin: 4px 0 12px 0; }}
+.st-key-db-overview [data-testid="stVerticalBlock"] {{ gap: 8px; }}
+div[class*="st-key-db-ovgrid-"] {{ gap: 10px !important; }}
+div[class*="st-key-db-ovgrid-"] > div {{ flex: 0 0 172px; }}
+.db-card {{ display: block; background: {RAISED}; border-radius: 10px; padding: 10px 12px 8px;
+  color: {TEXT}; }}
+{_PICK}:hover .db-card, .db-card.is-sel {{ background: #1D2229; }}
+.db-card.is-sel {{ box-shadow: inset 0 0 0 1px rgba(91, 157, 255, .35); }}
+.db-card-top {{ display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+  font-size: 13px; }}
+.db-card-top b {{ font-weight: 500; }}
+.db-card-val {{ font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }}
 .db-card .db-fig {{ display: block; text-align: left; }}
-.db-card .db-spark {{ margin-top: .3rem; width: 100%; height: 34px; }}
+.db-card .db-spark {{ margin-top: 4px; width: 100%; height: 34px; }}
 .db-card .db-spark-area {{ fill: currentColor; opacity: .09; stroke: none; }}
-.db-card .db-up, .db-card .db-down, .db-card .db-flat {{ white-space: nowrap; }}
 
-/* ---- details panel ---- */
-.db-dl {{ width: 100%; border-collapse: collapse; font-size: .84rem; color: {INK}; }}
-.db-dl th {{ text-align: left; font-weight: 400; color: {MUTED}; padding: .38rem 0;
-  border-bottom: 1px solid {RULE}; white-space: nowrap; vertical-align: top; }}
-.db-dl td {{ text-align: right; padding: .38rem 0 .38rem .6rem; border-bottom: 1px solid {RULE};
+/* ---- details ---- */
+.db-dl {{ width: 100%; border-collapse: collapse; font-size: 13px; color: {TEXT}; }}
+.db-dl th {{ text-align: left; font-weight: 400; color: {SECONDARY}; padding: 10px 0;
+  border-bottom: 1px solid {DIVIDER}; white-space: nowrap; vertical-align: top; }}
+.db-dl td {{ text-align: right; padding: 10px 0 10px 10px; border-bottom: 1px solid {DIVIDER};
   font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }}
 .db-dl .db-fig {{ text-align: right; }}
-.db-dl .db-meta {{ white-space: normal; line-height: 1.35; margin-top: .1rem; }}
-.db-dl .db-tagline {{ white-space: normal; }}
-.db-range {{ position: relative; height: 4px; background: {RULE}; border-radius: 2px;
-  margin: .55rem 0 .2rem 0; }}
-.db-range span {{ position: absolute; top: -3px; width: 2px; height: 10px; background: {INK}; }}
-.db-range-ends {{ display: flex; justify-content: space-between; color: {MUTED};
-  font-size: .72rem; font-variant-numeric: tabular-nums; }}
-.db-kicker {{ margin: 1.1rem 0 .35rem 0; }}
-.st-key-db-detail .db-kicker, .st-key-db-values .db-kicker {{ color: {INK}; font-size: .74rem;
-  padding-top: .7rem; border-top: 1px solid {RULE}; }}
-.st-key-db-detail .db-kicker:first-child {{ border-top: 0; padding-top: 0; }}
-.db-verdict {{ display: flex; gap: .45rem; align-items: baseline; flex-wrap: wrap;
-  margin-top: .55rem; padding: .45rem .7rem; border-radius: 6px; font-size: .84rem;
-  color: {INK}; background: {CANVAS}; border: 1px solid {RULE}; border-left-width: 3px; }}
-.db-verdict b {{ font-weight: 600; }}
-.db-verdict-ok {{ border-left-color: {UP}; }} .db-verdict-warn {{ border-left-color: {WARN}; }}
-.db-verdict-fail {{ border-left-color: {FAIL}; }}
-.db-verdict-muted {{ border-left-color: {MUTED}; }}
+.db-dl .db-meta {{ white-space: normal; line-height: 1.35; margin-top: 2px; }}
+.db-range {{ position: relative; height: 4px; background: {RAISED}; border-radius: 2px;
+  margin: 12px 0 8px 0; }}
+.db-range span {{ position: absolute; top: -4px; width: 2px; height: 12px; background: {TEXT};
+  border-radius: 1px; }}
+.db-range-ends {{ display: flex; justify-content: space-between; color: {META};
+  font-size: {SIZE_META}px; font-variant-numeric: tabular-nums; }}
+.db-kicker {{ margin: 20px 0 8px 0; }}
 .db-kicker:first-child {{ margin-top: 0; }}
-.db-checks {{ font-size: .8rem; color: {INK}; }}
-.db-checks div {{ display: flex; justify-content: space-between; gap: .5rem;
-  padding: .28rem 0; border-bottom: 1px solid {RULE}; }}
-.db-st-pass {{ color: {UP}; }} .db-st-warn {{ color: {WARN}; }}
-.db-st-fail {{ color: {FAIL}; }} .db-st-skip {{ color: {MUTED}; }}
+.db-verdict {{ display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; color: {TEXT};
+  background: {RAISED}; }}
+.db-verdict b {{ font-weight: 500; }}
+.db-verdict-ok b {{ color: {UP}; }} .db-verdict-warn b, .db-verdict-fail b {{ color: {AMBER}; }}
+.db-verdict-fail {{ background: {AMBER_TINT}; }}
+.db-verdict-muted b {{ color: {SECONDARY}; }}
+.db-checks {{ font-size: 13px; color: {TEXT}; }}
+.db-checks div {{ display: flex; justify-content: space-between; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid {DIVIDER}; }}
 
-/* ---- tables (other pages, drawer) ---- */
-.db-table {{ width: 100%; border-collapse: collapse; font-size: .88rem; color: {INK}; }}
-.db-table th {{ text-align: left; font-weight: 500; color: {MUTED}; font-size: .75rem;
-  border-bottom: 1px solid {RULE}; padding: .3rem .5rem; }}
-.db-table td {{ padding: .45rem .5rem; border-bottom: 1px solid {RULE}; vertical-align: top; }}
+/* ---- tables ---- */
+.db-table {{ width: 100%; border-collapse: collapse; font-size: 13px; color: {TEXT}; }}
+.db-table th {{ text-align: left; font-weight: 500; color: {META}; font-size: {SIZE_META}px;
+  border-bottom: 1px solid {DIVIDER}; padding: 10px 8px; }}
+.db-table td {{ padding: 10px 8px; border-bottom: 1px solid {DIVIDER}; vertical-align: top; }}
 .stMarkdown table.db-table, .stMarkdown .db-table th, .stMarkdown .db-table td,
 .stMarkdown table.db-dl, .stMarkdown .db-dl th, .stMarkdown .db-dl td {{
   border-left: 0 !important; border-right: 0 !important; border-top: 0 !important; }}
 .stMarkdown table.db-table, .stMarkdown table.db-dl {{ border: 0 !important; }}
 .stMarkdown .db-table tr, .stMarkdown .db-dl tr {{ background: transparent !important; }}
-.db-table .num, .db-fig {{ text-align: right; font-variant-numeric: tabular-nums; }}
-.db-fig {{ display: inline-block; }}
-.db-val {{ display: block; font-weight: 500; }}
-.db-meta {{ display: block; white-space: nowrap; }}
-.db-up {{ color: {UP}; }} .db-down {{ color: {DOWN}; }} .db-flat {{ color: {MUTED}; }}
-.db-unavailable {{ color: {MUTED}; font-style: italic; }}
-.db-spark {{ display: block; stroke: {MUTED}; fill: none; stroke-width: 1.3; color: {MUTED}; }}
+.db-table .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+.db-spark {{ display: block; stroke: {SECONDARY}; fill: none; stroke-width: 1.4;
+  color: {SECONDARY}; }}
 .db-spark.db-up {{ stroke: {UP}; color: {UP}; }}
 .db-spark.db-down {{ stroke: {DOWN}; color: {DOWN}; }}
-.db-empty {{ color: {MUTED}; font-size: .86rem; padding: .6rem 0; }}
-.db-tag {{ border: 1px solid {RULE}; border-radius: 3px; padding: 0 .3rem; margin-left: .3rem;
-  font-size: .68rem; font-style: normal; font-weight: 400; }}
-
-/* ---- compact source tag: glyph + time visible; field and source on hover and for readers */
-.db-tagline {{ display: block; color: {MUTED}; font-size: .72rem; white-space: nowrap;
-  font-variant-numeric: tabular-nums; font-weight: 400; }}
-.db-sr {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
+.db-empty {{ color: {SECONDARY}; font-size: 13px; padding: 10px 0; }}
 
 /* ---- yield curve ---- */
-.db-curve text {{ font-size: 11px; fill: {MUTED}; font-family: {SANS}; }}
-.db-curve .db-curve-grid {{ stroke: {GRID}; }}
+.db-curve {{ color: {ACCENT}; }}
+.db-curve text {{ font-size: 11px; fill: {META}; font-family: {SANS}; }}
+.db-curve .db-curve-grid {{ stroke: {DIVIDER}; }}
 .db-curve .db-curve-now {{ stroke: {ACCENT}; stroke-width: 1.8; fill: none; }}
-.db-curve .db-curve-then {{ stroke: {MUTED}; stroke-width: 1.2; fill: none;
-  stroke-dasharray: 4 3; }}
-.db-tenors {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .3rem;
-  margin-top: .5rem; }}
-.db-tenor {{ font-size: .84rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.db-curve .db-curve-then, .db-curve .db-curve-old {{ stroke: {SECONDARY}; stroke-width: 1.2;
+  fill: none; stroke-dasharray: 4 3; }}
+.db-curve .db-curve-old {{ stroke-dasharray: 1.5 3; opacity: .8; }}
+.db-tenors {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px;
+  margin-top: 8px; }}
+.db-tenor {{ font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }}
 .db-tenor .db-fig {{ display: block; text-align: left; }}
-.db-curve-legend {{ display: flex; gap: 1rem; color: {MUTED}; font-size: .76rem; }}
-/* ---- Macro page (T54) ---- */
-.st-key-db-mx-vix, .st-key-db-mx-curve, .st-key-db-mx-2s10s, .st-key-db-mx-gold,
-.st-key-db-mx-corr, .st-key-db-mx-cot {{
-  background: {PANEL}; border: 1px solid {RULE}; border-radius: 10px; padding: .8rem .9rem; }}
-.db-curve .db-curve-old {{ stroke: {MUTED}; stroke-width: 1.2; fill: none;
-  stroke-dasharray: 1.5 3; opacity: .8; }}
-.db-mx-words {{ color: {INK}; font-size: .88rem; margin: .2rem 0 .5rem 0; }}
+.db-curve-legend {{ display: flex; gap: 16px; color: {META}; font-size: {SIZE_META}px; }}
+
+/* ---- Macro page (T54; restyled by T59) ---- */
+.db-mx-words {{ color: {TEXT}; font-size: 13.5px; margin: 4px 0 8px 0; }}
 .db-mx-strip {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  gap: .5rem; margin: .4rem 0 .5rem 0; }}
-.db-mx-cell {{ font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; }}
+  gap: 8px; margin: 6px 0 8px 0; }}
+.db-mx-cell {{ font-size: {SIZE_BODY}px; font-weight: 500; font-variant-numeric: tabular-nums; }}
 .db-mx-cell .db-fig {{ display: block; text-align: left; }}
 .db-mx-table td, .db-mx-heat td, .db-mx-heat th {{ white-space: nowrap; }}
 .db-mx-scroll {{ overflow-x: auto; }}
-.db-mx-heat {{ font-size: .82rem; }}
+.db-mx-heat {{ font-size: 12.5px; }}
 .db-mx-heat td {{ text-align: center; }}
 .db-mx-heat .db-fig {{ text-align: center; }}
-.db-mx-diag {{ color: {MUTED}; }}
-.db-mx-cot-name {{ color: {INK}; font-weight: 600; font-size: .95rem; }}
-.db-short {{ border: 1px dashed {RULE}; border-radius: 8px; padding: .6rem .8rem;
-  margin: .3rem 0; }}
+.db-mx-diag {{ color: {META}; }}
+.db-mx-cot-name {{ color: {TEXT}; font-weight: 500; font-size: 15px; }}
+.db-short {{ background: {RAISED}; border-radius: 8px; padding: 10px 12px; margin: 4px 0; }}
 </style>
 """
 

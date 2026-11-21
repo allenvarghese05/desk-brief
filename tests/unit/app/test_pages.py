@@ -277,10 +277,15 @@ def test_data_health_quarantine_hosted_withholds_tier1_source(run_page: RunPage)
 
 
 def test_every_system_page_has_top_bar_navigation(run_page: RunPage) -> None:
+    # T57: the page list is st.navigation(position="top") in app/Home.py, which marks the
+    # current page itself (aria-current); test_navigation.py drives it
+    from app.Home import PAGES as ROUTES
+
+    routed = {file.rsplit("/", 1)[-1] for file, _, _ in ROUTES}
     for page in PAGE_FILES:
         t = text(run_page(page, "hosted"))
-        assert 'aria-label="Pages"' in t, page
-        assert 'aria-current="page"' in t, page
+        assert PAGE_FILES[page] in routed, page
+        assert '<span class="db-brand">' in t, page
 
 
 def test_crosschecks_put_problems_first_and_fold_skipped(run_page: RunPage) -> None:
