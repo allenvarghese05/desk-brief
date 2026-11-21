@@ -1,15 +1,21 @@
-# Dark terminal look (spec 10.2, T36). Layout and number styling live in app/theme.py.
+# Refined dark (P-022, T57). The same tokens, and the CSS that uses them, live in app/theme.py.
 [theme]
 base = "dark"
-primaryColor = "#6ea8ff"
-backgroundColor = "#0b0e13"
-secondaryBackgroundColor = "#11161d"
-textColor = "#e7eaf0"
-font = "sans serif"
+primaryColor = "#5B9DFF"
+backgroundColor = "#0B0D10"
+secondaryBackgroundColor = "#13161B"
+textColor = "#E8EAED"
+borderColor = "#22262E"
+showWidgetBorder = false
+baseRadius = "12px"
+font = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
+codeFont = "'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace"
 
 [client]
 toolbarMode = "viewer"
 showErrorDetails = false
+# pages are registered by st.navigation in app/Home.py and shown in the top bar
+showSidebarNavigation = false
 
 [server]
 runOnSave = false

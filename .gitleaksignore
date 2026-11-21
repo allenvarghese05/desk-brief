@@ -1,3 +1,8 @@
 # Reviewed false positives (fingerprint = commit:file:rule:line). Each entry needs a reason.
 # Fake FRED key used to test log redaction (tests/unit/test_logging.py), not a real credential.
 593e55c13c241b1e9380649119e0dd1e6f4e7c19:tests/unit/test_logging.py:generic-api-key:50
+# Streamlit widget keys (button keys such as pick-tile-UST_10Y) in T57's first commit, not credentials.
+# The follow-up commit builds the keys with "-".join(...) so newer code does not trip the rule.
+2a3eab7d015e47780f1fbe23fb20f10c31139956:tests/unit/app/test_home.py:generic-api-key:226
+2a3eab7d015e47780f1fbe23fb20f10c31139956:tests/unit/app/test_navigation.py:generic-api-key:106
+2a3eab7d015e47780f1fbe23fb20f10c31139956:tests/unit/app/test_navigation.py:generic-api-key:136

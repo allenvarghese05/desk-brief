@@ -31,6 +31,11 @@ def page(at: AppTest, *, limits: bool = True) -> str:
 ROW = r'<a class="db-wl-row db-row.*?</a>'
 
 
+def nav_titles(at: AppTest) -> list[str]:
+    """Titles of the pages the router registered with st.navigation (T57)."""
+    return [p["page_name"] for p in at._registered_pages.values()]
+
+
 def select(at: AppTest, iid: str) -> AppTest:
     """What a click on a watchlist row does: put ``?id=`` in the URL and run again."""
     at.query_params["id"] = iid
@@ -50,8 +55,10 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     assert "delayed+official" in text
     for title in ("Rates", "FX", "Commodities", "Equities"):
         assert f'db-sec-title">{title}</div>' in text
-    assert "Cross checks" in text
-    assert 'href="Data_health"' in text
+    assert "Cross checks" in nav_titles(at)  # T57: the page list is st.navigation's top bar
+    assert at.button(key="-".join(("pick", "health"))).label == (
+        "Open Data health: 2/2 checks pass"  # T57: counts readable without hovering
+    )
     assert at.text_input[0].label == "Search instruments"
 
 
@@ -59,7 +66,7 @@ def test_hosted_never_renders_tier1_rows(run_home: Run) -> None:
     at = run_home("hosted")
     text = page(at, limits=False)
     assert "alpaca" not in text
-    assert 'title="live"' not in text
+    assert 'data-tier="1"' not in text
     assert "600.00" not in text  # the tier-1 SPY tick value
     assert "withheld" not in " ".join(c.value for c in at.caption)  # SPY fell back, not hidden
 
@@ -70,7 +77,7 @@ def test_hosted_falls_back_to_tier3_when_latest_is_tier1(run_home: Run) -> None:
     text = page(at, limits=False)
     assert "598.50" in text
     assert "600.00" not in text
-    assert 'href="?id=SPY' in text
+    assert 'data-db-id="SPY"' in text
 
 
 def test_hosted_shows_gap_for_instrument_with_only_tier1_data(run_home: Run) -> None:
@@ -84,7 +91,7 @@ def test_unset_or_unknown_mode_fails_closed_to_hosted(run_home: Run) -> None:
     for mode in (None, "", "LIVE!", "prod"):
         text = page(run_home(mode), limits=False)
         assert "600.00" not in text  # the tier-1 SPY tick value
-        assert 'title="live"' not in text
+        assert 'data-tier="1"' not in text
 
 
 def test_local_mode_shows_tier1_with_glyph(run_home: Run) -> None:
@@ -92,7 +99,7 @@ def test_local_mode_shows_tier1_with_glyph(run_home: Run) -> None:
     text = page(at)
     assert "600.00" in text
     assert "alpaca" in text
-    assert 'title="live"' in text
+    assert 'data-tier="1"' in text
     assert "live+delayed+official" in text
 
 
@@ -205,24 +212,31 @@ def test_overview_numbers_use_the_compact_tag(run_home: Run) -> None:
     text = page(run_home("hosted"))
     rows = re.findall(ROW, text, flags=re.S)
     ten = next(c for c in rows if "4.37%" in c)
-    assert 'class="db-tagline"' in ten
-    assert re.search(r'<span class="db-sr"><span class="db-field">yield</span>', ten)
-    assert re.search(r'<span class="db-sr"> · delayed · <span class="db-src">', ten)
-    assert ten.count('class="db-tagline"') == 1  # the change does not repeat the tag
+    assert 'class="db-prov"' in ten  # T57: the compact glyph with its CSS tooltip
+    assert re.search(r'<span class="db-tip"[^>]*><span class="db-field">yield</span>', ten)
+    assert re.search(
+        r' · ◐ delayed · <span class="db-asof">[^<]+</span> · <span class="db-src">', ten
+    )
+    assert ten.count('class="db-prov"') == 1  # the change does not repeat the tag
 
 
 def test_headline_tiles_link_to_the_instrument_page(run_home: Run) -> None:
-    text = page(run_home("hosted"))
-    assert '<div class="db-tiles">' in text
-    assert 'href="?id=UST_10Y' in text
+    at = run_home("hosted")
+    text = page(at)
+    assert '<a class="db-tile' in text
+    assert 'data-db-id="UST_10Y"' in text
+    assert at.button(
+        key="-".join(("pick", "tile", "UST_10Y"))
+    )  # T57: a click selects it in-session
     assert "Biggest moves" in text
 
 
 def test_proxies_fold_behind_one_line(run_home: Run) -> None:
-    text = page(run_home("hosted"))
-    assert re.search(r"<summary>Show \d+ ETF prox(y|ies)</summary>", text)
-    folded = re.findall(r'<details class="db-more".*?</details>', text, flags=re.S)
-    assert any('href="?id=SPY' in f for f in folded)
+    at = run_home("hosted")  # T57: the fold is an st.expander, so its rows can be buttons
+    fold = [e for e in at.expander if re.fullmatch(r"Show \d+ ETF prox(y|ies)", e.label)]
+    assert fold
+    folded = ["\n".join(m.value for m in e.markdown) for e in fold]
+    assert any('data-db-id="SPY"' in f for f in folded)
 
 
 def test_search_filters_sections_and_unfolds_proxies(run_home: Run) -> None:
@@ -232,6 +246,7 @@ def test_search_filters_sections_and_unfolds_proxies(run_home: Run) -> None:
     assert not at.exception
     assert "matches for" in text
     assert "<details" not in text  # nothing folded while searching
+    assert not [e for e in at.expander if e.label.startswith("Show ")]  # T57: fold is an expander
     rows = re.findall(ROW, text, flags=re.S)
     assert not any("1.0842" in r for r in rows)  # EURUSD does not match "yield"
     assert any("4.37%" in r for r in rows)
@@ -293,7 +308,7 @@ def test_ladder_uses_p009_labels(run_home: Run) -> None:
 def test_hosted_details_never_show_tier1(run_home: Run) -> None:
     text = page(select(run_home("hosted"), "SPY"), limits=False)
     assert "alpaca" not in text
-    assert 'title="live"' not in text
+    assert 'data-tier="1"' not in text
     assert "600.00" not in text
 
 

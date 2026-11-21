@@ -105,7 +105,7 @@ def test_every_view_is_present(run_macro: RunMacro) -> None:
     text = page(at)
     for kicker in KICKERS:
         assert kicker in text
-    assert 'aria-current="page">Macro</a>' in text  # the nav marks this page
+    assert '<span class="db-brand">Macro</span>' in text  # T57: the router's nav marks the page
     assert re.search(r"Contango|Backwardation|Flat", text)  # the VIX shape in words
     assert "Over the month the curve" in text
     assert 'href="./?id=VIX3M"' in text  # names open the instrument on Markets
@@ -177,7 +177,7 @@ def _tier1_only_spy() -> list[dict[str, Any]]:
 def test_local_mode_shows_tier1_spy_in_the_heatmap(run_macro: RunMacro) -> None:
     text = page(run_macro("local", rows=_tier1_only_spy()))
     assert "alpaca" in text
-    assert 'title="live"' in text
+    assert 'data-tier="1"' in text
     assert '<th class="num"><a href="./?id=SPY"' in text
 
 
@@ -187,7 +187,7 @@ def test_hosted_and_unknown_modes_never_read_tier1(run_macro: RunMacro, mode: st
     assert not at.exception
     text = page(at)
     assert "alpaca" not in text
-    assert 'title="live"' not in text
+    assert 'data-tier="1"' not in text
     spy = re.search(r'<tr><th><a href="./\?id=SPY".*?</tr>', text, flags=re.S)
     assert spy is not None  # SPY's one tier-3 close (brief_synth) keeps its row ...
     assert "db-fig" not in spy.group(0)  # ... but one day gives no correlation to print
