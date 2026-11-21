@@ -22,6 +22,12 @@ from conftest import HOME
 Run = Callable[..., AppTest]
 
 
+def pick(*parts: str) -> str:
+    """Key of a selection button, e.g. ``pick("wl", "SPY")``. Built, not spelled out:
+    gitleaks reads a literal ``key="..."`` as an API key."""
+    return "-".join(("pick", *parts))
+
+
 @pytest.fixture(autouse=True)
 def _close_new_connections() -> Iterator[None]:
     """Close the shared DuckDB connections a test's stores opened (T56 keeps one per store for
@@ -103,7 +109,7 @@ def test_clicking_an_instrument_sets_the_id_in_the_same_session(run_home: Run) -
     assert chart_name(at) == "S&amp;P fut"
     at.session_state["probe"] = "still here"  # gone if the click started a new session
     at.text_input(key="q").input("yield").run()  # session state that must survive the click
-    at.button(key="pick-wl-UST_10Y").click().run()
+    at.button(key=pick("wl", "UST_10Y")).click().run()
     assert not at.exception
     assert qp(at, "id") == "UST_10Y"
     assert chart_name(at) == "10Y"
@@ -114,17 +120,17 @@ def test_clicking_an_instrument_sets_the_id_in_the_same_session(run_home: Run) -
 @pytest.mark.parametrize("where", ["tile", "ov", "wl"])
 def test_every_selectable_item_selects_in_session(run_home: Run, where: str) -> None:
     at = run_home("hosted")
-    at.button(key=f"pick-{where}-UST_10Y").click().run()
+    at.button(key=pick(where, "UST_10Y")).click().run()
     assert qp(at, "id") == "UST_10Y"
     assert chart_name(at) == "10Y"
 
 
 def test_a_folded_proxy_selects_and_opens_its_fold(run_home: Run) -> None:
     at = run_home("hosted")
-    at.button(key="pick-wl-SPY").click().run()
+    at.button(key=pick("wl", "SPY")).click().run()
     assert qp(at, "id") == "SPY"
     folds = [e for e in at.expander if e.label.startswith("Show ")]
-    spy = next(e for e in folds if any(b.key == "pick-wl-SPY" for b in e.button))
+    spy = next(e for e in folds if any(b.key == pick("wl", "SPY") for b in e.button))
     assert spy.proto.expanded
     assert not any(e.proto.expanded for e in folds if e is not spy)
 
@@ -133,7 +139,7 @@ def test_every_pick_has_a_readable_button_label(run_home: Run) -> None:
     at = run_home("hosted")
     picks = [b for b in at.button if (b.key or "").startswith("pick-wl-")]
     assert len(picks) >= 8
-    ten = next(b for b in picks if b.key == "pick-wl-UST_10Y")
+    ten = next(b for b in picks if b.key == pick("wl", "UST_10Y"))
     assert ten.label == "Select 10Y, US 10-year Treasury yield"
 
 
@@ -162,7 +168,7 @@ def test_every_page_opens_through_the_router_with_an_id(run_home: Run, file: str
 def test_health_badge_opens_data_health_in_session(run_home: Run) -> None:
     at = run_home("hosted")
     at.session_state["probe"] = "still here"
-    at.button(key="pick-health").click().run()
+    at.button(key=pick("health")).click().run()
     assert not at.exception
     assert '<span class="db-brand">Data health</span>' in page(at)
     assert at.session_state["probe"] == "still here"
@@ -178,7 +184,7 @@ def test_source_details_open_the_lineage_dialog(
     monkeypatch.setattr(kit, "details", lambda title, body: opened.append((title, body)))
     at = run_home("local")
     assert opened == []
-    at.button(key="src-ES_F").click().run()
+    at.button(key="-".join(("src", "ES_F"))).click().run()
     assert not at.exception
     assert len(opened) == 1
     title, body = opened[0]

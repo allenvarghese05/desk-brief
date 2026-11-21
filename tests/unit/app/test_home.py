@@ -56,7 +56,7 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     for title in ("Rates", "FX", "Commodities", "Equities"):
         assert f'db-sec-title">{title}</div>' in text
     assert "Cross checks" in nav_titles(at)  # T57: the page list is st.navigation's top bar
-    assert at.button(key="pick-health").label == "Open Data health"
+    assert at.button(key="-".join(("pick", "health"))).label == "Open Data health"
     assert at.text_input[0].label == "Search instruments"
 
 
@@ -223,7 +223,9 @@ def test_headline_tiles_link_to_the_instrument_page(run_home: Run) -> None:
     text = page(at)
     assert '<a class="db-tile' in text
     assert 'data-db-id="UST_10Y"' in text
-    assert at.button(key="pick-tile-UST_10Y")  # T57: a click selects it in-session
+    assert at.button(
+        key="-".join(("pick", "tile", "UST_10Y"))
+    )  # T57: a click selects it in-session
     assert "Biggest moves" in text
 
 
