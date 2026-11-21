@@ -74,7 +74,20 @@ def test_hosted_never_renders_tier1_rows(run_home: Run) -> None:
     assert "alpaca" not in text
     assert 'data-tier="1"' not in text
     assert "600.00" not in text  # the tier-1 SPY tick value
-    assert "withheld" not in " ".join(c.value for c in at.caption)  # SPY fell back, not hidden
+    foot = text.split('<div class="db-foot">', 1)[1]
+    assert "withheld" not in foot  # SPY fell back to tier 3: nothing is withheld (T58: footer)
+
+
+def test_footer_names_withheld_instruments() -> None:
+    """The withheld caption moved to the page footer (T58)."""
+    from types import SimpleNamespace
+
+    from app.components import panels
+
+    ov = SimpleNamespace(withheld=2, mode="hosted", mode_label="hosted · delayed+official")
+    foot = panels.footer(ov, "")  # type: ignore[arg-type]
+    assert "2 instrument(s) withheld in hosted mode" in foot
+    assert "withheld" not in panels.footer(SimpleNamespace(**{**vars(ov), "withheld": 0}), "")  # type: ignore[arg-type]
 
 
 def test_hosted_falls_back_to_tier3_when_latest_is_tier1(run_home: Run) -> None:
@@ -234,7 +247,6 @@ def test_headline_tiles_link_to_the_instrument_page(run_home: Run) -> None:
     assert at.button(
         key="-".join(("pick", "tile", "UST_10Y"))
     )  # T57: a click selects it in-session
-    assert "Biggest moves" in text
 
 
 def test_proxies_fold_behind_one_line(run_home: Run) -> None:
@@ -524,10 +536,11 @@ def test_sigma_tags_mark_unusual_moves_on_watchlist_rows() -> None:
     from deskbrief.report.model import Notable
 
     ov = SimpleNamespace(
+        sections=[],
         moves=(
             Notable("move", "10Y fell 12bp; the move is 3.4σ of its 60-day moves", "UST_10Y"),
             Notable("move", "no sigma here", "SPY"),
-        )
+        ),
     )
     sigs = panels.sigmas(ov)  # type: ignore[arg-type]
     assert sigs == {"UST_10Y": ("3.4σ", ov.moves[0].text)}
@@ -761,3 +774,143 @@ def test_health_tooltip_shows_on_hover_through_the_button() -> None:
     assert ".st-key-db-pick-health:hover .db-tip" in theme.CSS
     rule = theme.CSS.split(".st-key-db-pick-health:hover .db-tip", 1)[1].split("}", 1)[0]
     assert "display: block" in rule
+
+
+# --- T58 round 1: caveat words beside every figure, sigma tags on Home ----------------------
+
+#: SYNTHETIC: a delayed SPY tick from an IEX dataset served by a fallback source, so hosted
+#: mode (no tier 1) still shows a proxy figure with IEX and fallback caveats
+SPY_IEX_FALLBACK = dict(tier=2, source="yahoo", dataset="iex_delayed", is_fallback=True)
+
+
+def _caveat_rows() -> list:  # type: ignore[type-arg]
+    from brief_synth import MON, et, tick
+
+    return [*monday_rows(), tick("SPY", et(MON, "06:59"), 599.10, **SPY_IEX_FALLBACK)]
+
+
+def _aria(html: str) -> list[str]:
+    return re.findall(r'class="db-prov"[^>]*aria-label="([^"]*)"', html)
+
+
+@pytest.mark.parametrize("mode", ["hosted", "local"])
+def test_range_head_figure_keeps_its_caveat_words(run_home: Run, mode: str) -> None:
+    """Review round 1, blocking: the latest value in the 52-week head showed no proxy, IEX or
+    fallback. They are visible beside it and in its accessible label."""
+    text = page(select(run_home(mode, rows=_caveat_rows()), "SPY"))
+    head = text.split('<div class="db-range-head">', 1)[1].split("</div>", 1)[0]
+    shown = visible(head)
+    want = ("proxy", "IEX", "fallback") if mode == "hosted" else ("proxy", "IEX")
+    for word in want:
+        assert re.search(rf"\b{word}\b", shown), (word, shown)
+    (label,) = _aria(head)
+    for word in want:
+        assert word in label
+    ends = text.split('<div class="db-range-ends">', 1)[1].split("</div>", 1)[0]
+    assert visible(ends).count("proxy") == 2  # low and high: closes of the proxy
+
+
+@pytest.mark.parametrize("mode", ["hosted", "local"])
+def test_every_verdict_row_keeps_its_caveat_words(run_home: Run, mode: str) -> None:
+    """Review round 1, blocking: the verdict card's source rows had no caveat words."""
+    card = verdict_card(page(select(run_home(mode, rows=_caveat_rows()), "SPY")))
+    rows = re.findall(r'<div class="db-src-row">.*?</b></div>', card, flags=re.S)
+    assert len(rows) >= 2
+    for r in rows:
+        assert re.search(r"\bproxy\b", visible(r)), r  # SPY is an ETF proxy: every row
+        (label,) = _aria(r)
+        assert "proxy" in label
+    iex = [r for r in rows if "iex" in r.lower() and ("yahoo" in r or "alpaca" in r)]
+    assert iex
+    for r in iex:
+        assert re.search(r"\bIEX\b", visible(r))
+    fallback = [r for r in rows if "yahoo" in r]
+    for r in fallback:
+        assert re.search(r"\bfallback\b", visible(r))
+        assert "fallback" in _aria(r)[0]
+
+
+@pytest.mark.parametrize("mode", ["hosted", "local"])
+def test_every_figure_of_a_proxy_shows_proxy(run_home: Run, mode: str) -> None:
+    """The sweep: every compact figure on a proxy's page (strip, header, horizons, risk, range,
+    verdict, all values, corrections) carries "proxy" visibly and in its label."""
+    at = select(run_home(mode, rows=_caveat_rows()), "SPY")
+    card = page(at).split('<div class="db-ch">', 1)[1].split('<div class="db-foot">', 1)[0]
+    card += "\n".join(m.value for t in at.tabs for m in t.markdown if not m.value.startswith("- "))
+    figs = re.findall(r'<span class="db-fig">(?:(?!<span class="db-fig">).)*', card, flags=re.S)
+    figs = [f for f in figs if 'class="db-prov' in f]  # with a visible glyph
+    assert len(figs) >= 8
+    for f in figs:
+        assert 'class="db-flag">proxy<' in f, f
+        assert "proxy" in _aria(f)[0]
+
+
+def _with_move(monkeypatch: pytest.MonkeyPatch, iid: str, text: str) -> None:
+    """Inject one notable move into the overview (the synthetic store is too short for the
+    report's own anomaly scoring)."""
+    import dataclasses
+
+    from app.components import data
+
+    from deskbrief.report.model import Notable
+
+    real = data.overview
+
+    def overview(*args: object, **kw: object) -> object:
+        ov = real(*args, **kw)  # type: ignore[arg-type]
+        return dataclasses.replace(ov, moves=(Notable("move", text, iid), *ov.moves))
+
+    monkeypatch.setattr(data, "overview", overview)
+
+
+def test_home_shows_a_sigma_tag_on_the_watchlist_row(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_move(monkeypatch, "UST_10Y", "UST_10Y fell 3bp; the move is 3.4σ of its usual moves")
+    text = page(run_home("hosted"))
+    row = next(r for r in re.findall(ROW, text, flags=re.S) if 'data-db-id="UST_10Y"' in r)
+    assert '<span class="db-sig">3.4σ' in row
+    sr = row.split('class="db-sig"', 1)[1]
+    assert "10Y fell 3bp" in sr
+    assert "UST_10Y" not in sr  # the display name, never the raw id
+    others = [r for r in re.findall(ROW, text, flags=re.S) if 'data-db-id="UST_10Y"' not in r]
+    assert not any("db-sig" in r for r in others)
+
+
+def test_no_sigma_tag_for_a_move_across_a_gap() -> None:
+    """Review round 1: the tag must not contradict the risk card's "no data" (same rule)."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.components import panels
+
+    from deskbrief.report.model import Notable
+
+    def row(iid: str, prev: datetime) -> SimpleNamespace:
+        last = SimpleNamespace(as_of=datetime(2026, 11, 16, 15, tzinfo=UTC))
+        return SimpleNamespace(
+            instrument_id=iid, change=SimpleNamespace(last=last, previous=SimpleNamespace(
+                as_of=prev))
+        )  # fmt: skip
+
+    gapped = row("UST_10Y", datetime(2026, 10, 1, 15, tzinfo=UTC))  # 32 business days earlier
+    normal = row("UST_2Y", datetime(2026, 11, 13, 15, tzinfo=UTC))  # the Friday before
+    ov = SimpleNamespace(
+        sections=[SimpleNamespace(rows=(gapped, normal))],
+        moves=(
+            Notable("move", "UST_10Y is 4.0σ", "UST_10Y"),
+            Notable("move", "UST_2Y is 3.1σ", "UST_2Y"),
+        ),
+    )
+    sigs = panels.sigmas(ov)  # type: ignore[arg-type]
+    assert "UST_10Y" not in sigs
+    assert sigs["UST_2Y"] == ("3.1σ", "2Y is 3.1σ")
+
+
+def test_known_limits_describe_the_v2_layout() -> None:
+    from app.components.data import DASHBOARD_LIMITS
+
+    text = " ".join(DASHBOARD_LIMITS)
+    assert "Biggest moves" not in text
+    assert "sigma tag on their watchlist row" in text
+    assert "yield curve (on Macro)" in text

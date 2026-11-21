@@ -491,8 +491,8 @@ def load_series(
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
 DASHBOARD_LIMITS = (
     "Dashboard: no stale greying; the as-of text and health badge carry data age.",
-    "Dashboard: no 30-day z-score column; unusual moves are listed under Biggest moves.",
-    "Dashboard: the yield curve uses official Treasury values only (no intraday curve).",
+    "Dashboard: no 30-day z-score column; unusual moves are a sigma tag on their watchlist row.",
+    "Dashboard: the yield curve (on Macro) uses official Treasury values only (no intraday curve).",
     "Dashboard: no live polling; new data shows on a page load about a minute after it is written.",
     f"Dashboard: sparklines cover {SPARK_DAYS} days, not the spec's 1-day sparkline.",
 )

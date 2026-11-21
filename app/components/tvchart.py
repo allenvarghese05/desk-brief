@@ -322,9 +322,11 @@ def chart(
     state = st.session_state.get(key)
     # the component keeps returning its last value on every rerun, so an error report arms the
     # fallback only the first time it is seen; otherwise a stale report would re-arm it when
-    # the user comes back to that payload, and the chart would never be retried (T58)
+    # the user comes back to that payload, and the chart would never be retried (T58). Each
+    # report carries a unique ``n`` from the frontend, so a new failure of the same payload
+    # after a retry is a new report and brings the fallback back.
     if isinstance(state, dict) and state.get("status") == "error" and state.get("sig"):
-        report = (state["sig"], str(state.get("message", "")))
+        report = (state["sig"], str(state.get("n", state.get("message", ""))))
         if st.session_state.get(_seen_key(key)) != report:
             st.session_state[_seen_key(key)] = report
             st.session_state[_fail_key(key)] = state["sig"]

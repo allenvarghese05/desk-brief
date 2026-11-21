@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from app.components import data
-from app.components.instrument import exposed_sources
+from app.components.instrument import caveats, exposed_sources
 from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell
 
 from deskbrief.config import Config
@@ -105,8 +105,27 @@ def _latest(row: Row, bars: pd.DataFrame) -> tuple[float, date] | None:
     return float(bars["close"].iloc[-1]), bars["d"].iloc[-1].date()
 
 
+def _flags(row: Row, *, latest: bool) -> tuple[str, ...]:
+    """Caveat words for a figure about ``row`` (P-022: always visible beside it). Every figure
+    of a proxy says "proxy"; a figure that uses the latest value (an intraday tick) also says
+    IEX or fallback when that tick is."""
+    out = ["proxy"] if row.is_proxy else []
+    if latest and row.change is not None:
+        out += [f for f in caveats(row.change.last) if f != "proxy"]
+    return tuple(out)
+
+
+def _proxy_ids(config: Config) -> frozenset[str]:
+    return frozenset(i.id for i in config.instruments if i.is_proxy)
+
+
 def _bar_prov(
-    bars: pd.DataFrame, what: str, since: date | None = None, latest: Row | None = None
+    bars: pd.DataFrame,
+    what: str,
+    since: date | None = None,
+    latest: Row | None = None,
+    *,
+    flags: tuple[str, ...] = (),
 ) -> Provenance:
     """Provenance of a statistic over daily bars (plus the report's latest value, if used).
 
@@ -122,7 +141,7 @@ def _bar_prov(
     span = date_span(used["d"].iloc[0], used["d"].iloc[-1])
     if len(tiers) > 1:
         what += "; mixed tiers: " + ", ".join(TIER_NAME[t] for t in sorted(tiers, reverse=True))
-    return Provenance(", ".join(sorted(sources)), min(tiers), span, what)
+    return Provenance(", ".join(sorted(sources)), min(tiers), span, what, flags=flags)
 
 
 def _move(now: float, then: float, mode: str) -> tuple[float, str]:
@@ -220,8 +239,9 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
     if row.change is not None and row.change.change is not None and row.change_text:
         last = row.change.last
         p = Provenance(
-            last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", f"change vs {row.basis}"
-        )
+            last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", f"change vs {row.basis}",
+            flags=_flags(row, latest=True),
+        )  # fmt: skip
         text = row.change_text
         cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
         first = "WoW" if last.interval == "1w" else "1D"  # a weekly change is week-on-week
@@ -261,7 +281,7 @@ def horizons(row: Row, bars: pd.DataFrame) -> list[Horizon]:
         else:
             what = f"change since the {base['field']} of {base['d']:%d %b %Y}"
             src, tier = base_src, base_tier
-        p = Provenance(src, tier, f"{base['d']:%d %b %Y}", what)
+        p = Provenance(src, tier, f"{base['d']:%d %b %Y}", what, flags=_flags(row, latest=True))
         text = _signed(chg, unit)
         cls = "db-up" if text.startswith("+") else "db-down" if text.startswith(_MINUS) else ""
         out.append(
@@ -369,7 +389,9 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
         gone = _skipped(bars, window["d"].iloc[0])
         skipped += gone
         what = f"{VOL_DAYS}-day realised volatility, annualised"
-        p = _bar_prov(window, what + (f"; {_gap_note(gone)}" if gone else ""))
+        p = _bar_prov(
+            window, what + (f"; {_gap_note(gone)}" if gone else ""), flags=_flags(row, latest=False)
+        )
         facts.append((vol_label, value_cell(text, p, compact=True, show_as_of=False)))
     else:
         facts.append((vol_label, _need(VOL_DAYS + 1, n + 1)))
@@ -401,6 +423,7 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
                 window,
                 what + (f"; {_gap_note(gone)}" if gone else ""),
                 latest=row if intraday else None,
+                flags=_flags(row, latest=intraday),
             )
             text = f"{today / sd:+.1f}σ".replace("-", _MINUS)
             facts.append(("Latest move", value_cell(text, p, compact=True, show_as_of=False)))
@@ -415,7 +438,9 @@ def risk_html(row: Row, bars: pd.DataFrame) -> str:
         gone = _skipped(recent, recent["d"].iloc[0])
         skipped += gone
         what = "largest fall from a high, daily closes"
-        p = _bar_prov(recent, what + (f"; {_gap_note(gone)}" if gone else ""))
+        p = _bar_prov(
+            recent, what + (f"; {_gap_note(gone)}" if gone else ""), flags=_flags(row, latest=False)
+        )
         span = (recent["d"].iloc[-1] - recent["d"].iloc[0]).days
         label = "Max drawdown, 1Y" if span >= 360 else f"Max drawdown, {len(recent)} days"
         facts.append((label, value_cell(_signed(dd, "%"), p, compact=True, show_as_of=False)))
@@ -440,18 +465,24 @@ def range_html(row: Row, bars: pd.DataFrame) -> str:
     field = year["field"].iloc[-1]
     lo_row = year.loc[year["close"].astype(float).idxmin()]
     hi_row = year.loc[year["close"].astype(float).idxmax()]
-    p_lo = _bar_prov(year[year["d"] == lo_row["d"]], f"lowest {span} {field} of the range")
-    p_hi = _bar_prov(year[year["d"] == hi_row["d"]], f"highest {span} {field} of the range")
+    closes_only = _flags(row, latest=False)
+    p_lo = _bar_prov(
+        year[year["d"] == lo_row["d"]], f"lowest {span} {field} of the range", flags=closes_only
+    )
+    p_hi = _bar_prov(
+        year[year["d"] == hi_row["d"]], f"highest {span} {field} of the range", flags=closes_only
+    )
     latest = _latest(row, bars)
     head = f'<span class="db-range-label">{escape(label)}</span>'
     if latest is not None:
         if row.change is not None:
             last = row.change.last
             p_now = Provenance(
-                last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", "latest value"
-            )
+                last.source, last.tier, f"{to_et(last.as_of):%d %b %H:%M}", "latest value",
+                flags=_flags(row, latest=True),
+            )  # fmt: skip
         else:
-            p_now = _bar_prov(bars.tail(1), f"latest {span} {field}")
+            p_now = _bar_prov(bars.tail(1), f"latest {span} {field}", flags=closes_only)
         head += f"<b>{value_cell(_num(latest[0], unit), p_now, compact=True, show_as_of=False)}</b>"
     bar = ""
     if latest is not None and hi > lo:
@@ -534,19 +565,25 @@ def all_values_html(
     if df.empty:
         return '<div class="db-empty">No values stored for this instrument.</div>', 0
     rows = []
+    proxy = iid in _proxy_ids(config)
     for r in _records(df):
         as_of = to_et(_utc(r.as_of))
         fetched = _utc(r.ingested_at)
+        caveat = (
+            (("proxy",) if proxy else ())
+            + (("IEX",) if str(r.dataset).startswith("iex") else ())
+            + (("fallback",) if r.is_fallback else ())
+        )
         field = _FIELD_TEXT.get(str(r.field), str(r.field))
         daily = str(r.interval) in _DATED  # a day's value has a date, not a time
         when = f"{as_of:%d %b %Y}" if daily else f"{as_of:%d %b %H:%M}"
         p = Provenance(
             str(r.source), int(r.tier), when, field,
             f"as of {when}{'' if daily else ' ET'}; fetched {to_et(fetched):%d %b %H:%M} ET",
+            caveat,
         )  # fmt: skip
         text = _value_text(float(r.value), str(r.unit), str(r.field))
-        flags = " · fallback" if r.is_fallback else ""
-        flags += " · derived" if r.is_derived else ""
+        flags = " · derived" if r.is_derived else ""  # fallback is a visible tag on the value
         rows.append(
             f"<tr><td>{escape(field)}<span class='db-tagline'>"
             f"{escape(_INTERVAL_TEXT.get(str(r.interval), str(r.interval)))}{flags}</span></td>"
@@ -644,9 +681,10 @@ def _revisions(
 ) -> pd.DataFrame:
     with data.shared_connection(_config) as conn:
         return conn.execute(
-            "SELECT source, field, interval, as_of, count(*) AS versions, "  # noqa: S608 (tiers are ints)
+            "SELECT source, dataset, field, interval, as_of, count(*) AS versions, "  # noqa: S608 (tiers are ints)
             "arg_min(value, ingested_at) AS first_value, arg_max(value, ingested_at) AS "
-            "last_value, max(ingested_at) AS revised_at, max(unit) AS unit, max(tier) AS tier "
+            "last_value, max(ingested_at) AS revised_at, max(unit) AS unit, max(tier) AS tier, "
+            "bool_or(is_fallback) AS is_fallback "
             "FROM obs_all "
             f"WHERE instrument_id = ? AND tier IN ({_tiers_sql(hidden)}) AND as_of > ? "
             "AND ingested_at <= ? GROUP BY source, dataset, field, interval, as_of "
@@ -660,14 +698,23 @@ def revisions_html(config: Config, iid: str, hidden: frozenset[int], now: dateti
     if df.empty:
         return f'<div class="db-empty">No corrections in the last {REVISION_DAYS} days.</div>'
     lines = []
+    proxy = iid in _proxy_ids(config)
     for r in _records(df):
         as_of = to_et(_utc(r.as_of))
         at = to_et(_utc(r.revised_at))
         unit, field = str(r.unit), str(r.field)
-        p_old = Provenance(str(r.source), int(r.tier), f"{as_of:%d %b}", f"first reported {field}")
-        p_new = Provenance(
-            str(r.source), int(r.tier), f"{as_of:%d %b}", f"{field} as revised {at:%d %b %H:%M}"
+        caveat = (
+            (("proxy",) if proxy else ())
+            + (("IEX",) if str(r.dataset).startswith("iex") else ())
+            + (("fallback",) if r.is_fallback else ())
         )
+        p_old = Provenance(
+            str(r.source), int(r.tier), f"{as_of:%d %b}", f"first reported {field}", flags=caveat
+        )
+        p_new = Provenance(
+            str(r.source), int(r.tier), f"{as_of:%d %b}", f"{field} as revised {at:%d %b %H:%M}",
+            flags=caveat,
+        )  # fmt: skip
         old = value_cell(_value_text(float(r.first_value), unit, field), p_old, compact=True)
         new = value_cell(_value_text(float(r.last_value), unit, field), p_new, compact=True)
         lines.append(

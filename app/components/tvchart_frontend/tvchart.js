@@ -5,7 +5,7 @@
  *   -> streamlit:componentReady   once, when this script has loaded
  *   <- streamlit:render           args.spec: theme tokens, series and their provenance
  *   -> streamlit:setFrameHeight   the iframe height
- *   -> streamlit:setComponentValue {status: "error", sig} only when the chart cannot be
+ *   -> streamlit:setComponentValue {status: "error", sig, n} only when the chart cannot be
  *                                 drawn, so Python can fall back for that payload
  *
  * Times arrive as business-day strings ("YYYY-MM-DD"). Lightweight Charts lays bars out by
@@ -29,6 +29,8 @@
   var lastSpec = "";
   var lastWidth = 0;
   var reportedSig = null;
+  var reports = 0; // n: tells a new failure from the last one Streamlit keeps returning;
+  // it carries the time too, because a new iframe starts counting again
   var currentSig = "";
 
   function send(type, data) {
@@ -52,7 +54,11 @@
     if (reportedSig !== currentSig) {
       reportedSig = currentSig;
       send("streamlit:setComponentValue", {
-        value: { status: "error", message: String(text), sig: currentSig }, dataType: "json"
+        value: {
+          status: "error", message: String(text), sig: currentSig,
+          n: Date.now() + "-" + (++reports)
+        },
+        dataType: "json"
       });
     }
   }

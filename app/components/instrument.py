@@ -76,8 +76,22 @@ def ladder(config: Config, iid: str, hidden: frozenset[int], now: datetime) -> l
     return sorted(rows, key=lambda r: -r.tier)
 
 
+def caveats(r: ValueRow) -> tuple[str, ...]:
+    """The caveat words that stay visible beside a stored value (P-022): the same rule as the
+    report's per-row qualifiers (``panels.flags``): a proxy instrument, an IEX (single-exchange)
+    dataset, a fallback source."""
+    out = ["proxy"] if r.is_proxy else []
+    if r.dataset.startswith("iex"):
+        out.append("IEX")
+    if r.is_fallback:
+        out.append("fallback")
+    return tuple(out)
+
+
 def _prov(r: ValueRow) -> Provenance:
-    return Provenance(r.source, r.tier, f"{to_et(r.as_of):%d %b %H:%M}", field_label(r))
+    return Provenance(
+        r.source, r.tier, f"{to_et(r.as_of):%d %b %H:%M}", field_label(r), flags=caveats(r)
+    )
 
 
 _PLAIN_UNITS = {"USD", "index_pts", "shares"}

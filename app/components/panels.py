@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 
+import numpy as np
 from app.components.data import Overview
 from app.components.values import (
     TIER_NAME,
@@ -218,16 +219,36 @@ def tile_items(ov: Overview, sel: str = "") -> list[Item]:
 _SIGMA = re.compile(r"is (\d+(?:\.\d+)?)σ")
 
 
+def _across_gap(row: Row) -> bool:
+    """The latest move spans a gap in the data (the tearsheet's rule: more than
+    ``GAP_BDAYS`` business days between the two values), so no sigma is shown for it."""
+    from app.components.tearsheet import GAP_BDAYS
+
+    if row.change is None or row.change.previous is None:
+        return False
+    a, b = to_et(row.change.previous.as_of).date(), to_et(row.change.last.as_of).date()
+    return int(np.busday_count(a, b)) > GAP_BDAYS
+
+
 def sigmas(ov: Overview) -> dict[str, tuple[str, str]]:
-    """The day's unusual moves as ``{instrument id: (sigma text, the report's sentence)}``.
+    """The day's unusual moves as ``{instrument id: (sigma text, sentence for screen readers)}``.
 
     These are the report's own notable moves (at least the anomaly threshold away from each
-    instrument's recent daily moves); P-022 shows them as a tag on the watchlist row."""
+    instrument's recent daily moves); P-022 shows them as a tag on the watchlist row. A move
+    across a gap in the data gets no tag (the risk card says "no data" for it). The sentence
+    names the instrument by its display name, never by its raw id."""
+    rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
     out: dict[str, tuple[str, str]] = {}
     for n in ov.moves:
         m = _SIGMA.search(n.text)
-        if n.instrument_id and m and n.instrument_id not in out:
-            out[n.instrument_id] = (f"{m.group(1)}σ", n.text)
+        iid = n.instrument_id
+        if not iid or not m or iid in out:
+            continue
+        row = rows.get(iid)
+        if row is not None and _across_gap(row):
+            continue
+        text = n.text.replace(iid, short(row)) if row is not None else n.text
+        out[iid] = (f"{m.group(1)}σ", text)
     return out
 
 

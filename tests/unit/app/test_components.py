@@ -319,7 +319,7 @@ def test_biggest_moves_show_proxy_and_caveats_visibly(monkeypatch: pytest.Monkey
     last = SimpleNamespace(source="alpaca", as_of=now)
     spy = SimpleNamespace(
         instrument_id="SPY", name="SPDR S&P 500 ETF", tier=2, as_of_text="10:27",
-        is_proxy=True, available=True, change=SimpleNamespace(last=last),
+        is_proxy=True, available=True, change=SimpleNamespace(last=last, previous=None),
         change_text="+1.2%", basis="previous close",
         qualifiers=("fallback source: alpaca", "IEX: single exchange, not the consolidated tape"),
         label="SPDR S&P 500 ETF — proxy for the S&P 500", value_text="$600.00",  # T58 row

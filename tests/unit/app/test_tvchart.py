@@ -386,6 +386,44 @@ def test_a_failed_payload_is_retried_when_the_user_comes_back_to_it(
     assert tvchart._fail_key("t-chart") not in at.session_state
 
 
+def test_a_payload_that_fails_again_after_a_retry_falls_back_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, item 5: fail, another range, back (retried), fail again. The frontend's
+    second report carries a new ``n``, so it is a new report and the fallback comes back;
+    reruns that only see the stale first report never re-arm it."""
+    from app.components import tvchart
+
+    sent: list[str] = []
+    monkeypatch.setattr(tvchart, "_component", lambda: lambda **kw: sent.append(kw["spec"]["sig"]))
+    at = _run()
+    failed = sent[0]
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": failed, "n": "1-1"}
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+    at.session_state["t-rng"] = "1M"
+    at.run()
+    at.session_state["t-rng"] = "3M"  # back: the stale report is not re-armed, the chart retries
+    at.run()
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    assert sent[-1] == failed
+    at.run()  # another rerun with only the stale report: still the chart
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    # the retry fails too: the browser sends a second report for the same payload
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": failed, "n": "2-1"}
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+
+
+def test_the_frontend_numbers_each_error_report() -> None:
+    js = (FRONT / "tvchart.js").read_text(encoding="utf-8")
+    assert re.search(
+        r'status: "error",[^}]*sig: currentSig,\s*n: Date\.now\(\) \+ "-" \+ \(\+\+reports\)', js
+    )
+    assert "if (event.source !== window.parent) { return; }" in js  # unchanged guards
+    assert re.search(r"attributionLogo:\s*false\b", js)
+
+
 def test_an_error_for_another_payload_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.components import tvchart
 
