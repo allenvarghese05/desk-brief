@@ -4,12 +4,12 @@
 as-of and the field label; building one without them raises, so a bare number cannot be
 rendered through these helpers. Two renderings:
 
-* the full line (default): field label, tier glyph and name, as-of and source printed under
-  the figure;
-* ``compact=True`` (P-022, opt-in until T59): a focusable tier glyph beside the figure whose
-  CSS tooltip (hover, keyboard focus, tap) and accessible label give field, tier, source and
-  as-of. The four facts stay in the markup (``db-field``, ``db-src``, ``db-asof``,
-  ``data-tier``).
+* ``compact=True`` (P-022; the default since T59, once every page used it): a focusable
+  tier glyph beside the figure whose CSS tooltip (hover, keyboard focus, tap) and accessible
+  label give field, tier, source and as-of. The four facts stay in the markup
+  (``db-field``, ``db-src``, ``db-asof``, ``data-tier``);
+* ``compact=False``: the full line, with field label, tier glyph and name, as-of and source
+  printed under the figure.
 
 Either way the words proxy, IEX, fallback and HYPOTHETICAL (``Provenance.flags``) are printed
 as visible text next to the figure, never only in a tooltip. No markup here uses a ``title``
@@ -122,8 +122,9 @@ def _hidden(p: Provenance, extra: str = "", *, cls: str = "db-sr") -> str:
     )
 
 
-def value_cell(text: str, p: Provenance, *, compact: bool = False, show_as_of: bool = True) -> str:
-    """A value with its provenance: the full line by default, the glyph when ``compact``.
+def value_cell(text: str, p: Provenance, *, compact: bool = True, show_as_of: bool = True) -> str:
+    """A value with its provenance: the compact glyph by default, the full line when
+    ``compact=False``.
 
     A compact value also prints its as-of under the figure, as the T36 compact tag did, so a
     table (Macro, the tear sheet) still shows how old each figure is. ``show_as_of=False``
@@ -154,7 +155,7 @@ def change_cell(
     p: Provenance,
     basis: str | None = None,
     *,
-    compact: bool = False,
+    compact: bool = True,
     glyph: bool = True,
 ) -> str:
     """A change; ``basis`` says what it is measured against ("previous NYSE close (13 Nov)").

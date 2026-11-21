@@ -1,9 +1,10 @@
-"""The workspace price chart: the T36 Altair charts and the TradingView payload (T57B).
+"""The workspace price chart's data: the TradingView payload (T57B) and its helpers.
 
-:func:`price_panel` is the TradingView version (P-022): range and style controls and a
+:func:`price_panel` draws range and style controls and a
 :func:`app.components.tvchart.chart` in one ``st.fragment``. :func:`tv_series` and
-:func:`tv_compare_series` turn bars into its payload. The Altair functions stay until T58
-moves Home onto the new panel.
+:func:`tv_compare_series` turn bars into its payload. The T36 Altair ``price_chart`` and
+``compare_chart`` were retired by T59 once no page drew them; the Altair fallback of a
+TradingView chart is :func:`app.components.tvchart.fallback_chart`.
 
 Data are completed daily bars from :func:`app.components.data.load_bars` (hidden tiers never
 read). Candles need a real open, high and low on most days; otherwise the close is drawn as a
@@ -14,10 +15,8 @@ source; the caption under the chart carries the same facts for the series as a w
 
 from __future__ import annotations
 
-import math
 from datetime import timedelta
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 from app import theme
@@ -60,24 +59,6 @@ def has_volume(bars: pd.DataFrame) -> bool:
     return bool(not bars.empty and bars["volume"].notna().mean() >= 0.8 and bars["volume"].sum())
 
 
-def _fmt(unit: str) -> str:
-    return ".2f" if unit in _PCT_UNITS else ",.4~f"
-
-
-def prov_tips(*values: alt.Tooltip) -> list[alt.Tooltip]:
-    """A tooltip that shows figures carries the full provenance set of ``value_cell``
-    (spec 10.2, P-009): as-of date, what the value is (field), tier and source.
-
-    The frame needs ``d``, ``field_text``, ``tier_text`` and ``source`` columns."""
-    return [
-        alt.Tooltip("d:T", title="As of", format="%a %d %b %Y"),
-        *values,
-        alt.Tooltip("field_text:N", title="Field"),
-        alt.Tooltip("tier_text:N", title="Tier"),
-        alt.Tooltip("source:N", title="Source"),
-    ]
-
-
 def tier_text(tier: object) -> str:
     t = int(tier)  # type: ignore[call-overload]
     return f"{TIER_GLYPH[t]} {TIER_NAME[t]}"
@@ -91,120 +72,6 @@ def _label(bars: pd.DataFrame) -> pd.DataFrame:
     df["field_text"] = df["field"].astype(str)
     df["volume_text"] = "volume (" + df["field_text"] + " bar)"
     return df
-
-
-def price_chart(
-    bars: pd.DataFrame, *, style: str, last: float | None, height: int = 380
-) -> alt.TopLevelMixin:
-    """The main chart; ``style`` is :data:`CANDLES` or :data:`LINE` (line when no OHLC)."""
-    df = _label(bars)
-    unit = str(df["unit"].iloc[-1])
-    fmt = _fmt(unit)
-    candles = style == CANDLES and has_ohlc(bars)
-    lo_col, hi_col = ("low", "high") if candles else ("close", "close")
-    extra = df["close"].tolist() + ([last] if last is not None else [])
-    lows = [v for v in df[lo_col].tolist() + extra if v == v]
-    highs = [v for v in df[hi_col].tolist() + extra if v == v]
-    lo, hi = min(lows), max(highs)
-    pad = (hi - lo) * 0.06 or abs(hi) * 0.01 or 1.0
-    y_scale = alt.Scale(domain=[lo - pad, hi + pad], zero=False, nice=False)
-    x = alt.X(
-        "d:T",
-        title=None,
-        axis=alt.Axis(format="%d %b", labelAngle=0, grid=False, tickCount=6),
-    )
-    base = alt.Chart(df).encode(x=x)
-    colour = alt.condition("datum.up == 'up'", alt.value(theme.UP), alt.value(theme.DOWN))
-    y_axis = alt.Axis(orient="right", format=fmt, tickCount=6, title=None)
-    if candles:
-        width = max(1.5, min(9.0, 640 / max(len(df), 1) * 0.6))
-        # a candle only when open, high and low exist and agree with the close
-        full = "datum.ok"
-        wick = (
-            base.transform_filter(full)
-            .mark_rule(strokeWidth=1)
-            .encode(y=alt.Y("low:Q", scale=y_scale, axis=y_axis), y2="high:Q", color=colour)
-        )
-        body = (
-            base.transform_filter(full)
-            .mark_bar(size=width)
-            .encode(y="open:Q", y2="close:Q", color=colour)
-        )
-        # any other day is a tick at the close, never an invented candle
-        bare = (
-            base.transform_filter(f"!({full})")
-            .mark_tick(color=theme.MUTED, thickness=2, size=width + 4)
-            .encode(y=alt.Y("close:Q", scale=y_scale))
-        )
-        marks: alt.TopLevelMixin = wick + body + bare
-    else:
-        area = base.mark_area(color=theme.ACCENT, opacity=0.08).encode(
-            y=alt.Y("close:Q", scale=y_scale, axis=y_axis)
-        )
-        line = base.mark_line(color=theme.ACCENT, strokeWidth=1.8).encode(y="close:Q")
-        marks = area + line
-    hover = alt.selection_point(
-        fields=["d"], nearest=True, on="pointerover", clear="pointerout", empty=False
-    )
-    tips = prov_tips(
-        *(
-            [
-                alt.Tooltip("open:Q", title="Open", format=fmt),
-                alt.Tooltip("high:Q", title="High", format=fmt),
-                alt.Tooltip("low:Q", title="Low", format=fmt),
-            ]
-            if candles
-            else []
-        ),
-        alt.Tooltip("close:Q", title=str(df["field"].iloc[-1]).capitalize(), format=fmt),
-    )
-    catcher = base.mark_rule(strokeWidth=12, opacity=0).encode(tooltip=tips).add_params(hover)
-    cross = base.mark_rule(color=theme.MUTED, strokeDash=[3, 3]).encode(
-        opacity=alt.condition(hover, alt.value(0.9), alt.value(0.0))
-    )
-    layers = [marks, cross, catcher]
-    if last is not None and not math.isnan(last):
-        ref = pd.DataFrame({"y": [last]})
-        layers.append(
-            alt.Chart(ref)
-            .mark_rule(color=theme.INK, strokeDash=[2, 3], opacity=0.55)
-            .encode(y=alt.Y("y:Q", scale=y_scale))
-        )
-    price = alt.layer(*layers).properties(height=height)
-    chart: alt.TopLevelMixin = price
-    if has_volume(bars):
-        vol = (
-            base.mark_bar(opacity=0.45, size=max(1.5, min(9.0, 640 / max(len(df), 1) * 0.6)))
-            .encode(
-                y=alt.Y(
-                    "volume:Q",
-                    axis=alt.Axis(orient="right", format="~s", tickCount=2, title=None),
-                ),
-                color=colour,
-                tooltip=[
-                    alt.Tooltip("d:T", title="As of", format="%a %d %b %Y"),
-                    alt.Tooltip("volume:Q", title="Volume", format=","),
-                    alt.Tooltip("volume_text:N", title="Field"),
-                    alt.Tooltip("tier_text:N", title="Tier"),
-                    alt.Tooltip("source:N", title="Source"),
-                ],
-            )
-            .properties(height=70)
-        )
-        chart = alt.vconcat(price, vol, spacing=4).resolve_scale(x="shared")
-    styled: alt.TopLevelMixin = (
-        chart.configure(background="transparent", font=theme.SANS)
-        .configure_view(stroke=None)
-        .configure_axis(
-            labelColor=theme.MUTED,
-            labelFontSize=11,
-            gridColor=theme.GRID,
-            domainColor=theme.RULE,
-            tickColor=theme.RULE,
-            labelPadding=6,
-        )
-    )
-    return styled
 
 
 def rebased(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -> pd.DataFrame:
@@ -231,69 +98,6 @@ def rebased(a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str) -> pd.Da
         )
 
     return pd.concat([leg(name_a, "a"), leg(name_b, "b")], ignore_index=True)
-
-
-def compare_chart(
-    long: pd.DataFrame, name_a: str, name_b: str, height: int = 380
-) -> alt.TopLevelMixin:
-    """Two series rebased to 100: relative performance at a glance (second series dashed)."""
-    hover = alt.selection_point(
-        fields=["d"], nearest=True, on="pointerover", clear="pointerout", empty=False
-    )
-    base = alt.Chart(long).encode(
-        x=alt.X(
-            "d:T",
-            title=None,
-            axis=alt.Axis(format="%d %b", labelAngle=0, grid=False, tickCount=6),
-        ),
-    )
-    lines = base.mark_line(strokeWidth=1.8).encode(
-        y=alt.Y(
-            "index:Q",
-            scale=alt.Scale(zero=False),
-            title=None,
-            axis=alt.Axis(orient="right", format=".1f"),
-        ),
-        color=alt.Color(
-            "series:N",
-            scale=alt.Scale(domain=[name_a, name_b], range=[theme.ACCENT, theme.WARN]),
-            legend=alt.Legend(orient="top-left", title=None, labelColor=theme.MUTED),
-        ),
-        strokeDash=alt.StrokeDash(
-            "series:N",
-            scale=alt.Scale(domain=[name_a, name_b], range=[[1, 0], [5, 3]]),
-            legend=None,
-        ),
-    )
-    catcher = (
-        base.mark_rule(strokeWidth=12, opacity=0)
-        .encode(
-            tooltip=prov_tips(
-                alt.Tooltip("series:N", title="Series"),
-                alt.Tooltip("index:Q", title="Rebased (start = 100)", format=".2f"),
-            )
-        )
-        .add_params(hover)
-    )
-    cross = base.mark_rule(color=theme.MUTED, strokeDash=[3, 3]).encode(
-        opacity=alt.condition(hover, alt.value(0.9), alt.value(0.0))
-    )
-    ref = alt.Chart(pd.DataFrame({"y": [100.0]})).mark_rule(color=theme.RULE).encode(y="y:Q")
-    styled: alt.TopLevelMixin = (
-        alt.layer(ref, lines, cross, catcher)
-        .properties(height=height)
-        .configure(background="transparent", font=theme.SANS)
-        .configure_view(stroke=None)
-        .configure_axis(
-            labelColor=theme.MUTED,
-            labelFontSize=11,
-            gridColor=theme.GRID,
-            domainColor=theme.RULE,
-            tickColor=theme.RULE,
-            labelPadding=6,
-        )
-    )
-    return styled
 
 
 def caption(bars: pd.DataFrame, *, latest_line: bool = True) -> str:

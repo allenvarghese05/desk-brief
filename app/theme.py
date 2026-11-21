@@ -9,8 +9,8 @@ warning is "warn" in the same amber family, and stale data is grey with a "stale
 and 12 px), Inter with tabular figures.
 
 The tokens are mirrored in ``.streamlit/config.toml``. The older names (``CANVAS``, ``INK``,
-``MUTED``, ``RULE``, ``GRID``, ``FAIL``, ``WARN``) stay as aliases for the pages that later
-cards (T58, T59) restyle.
+``MUTED``, ``RULE``, ``GRID``, ``FAIL``, ``WARN``) stay as aliases used by the page helpers in
+``app/components/kit.py``.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ SIZE_HERO, SIZE_FIGURE, SIZE_BODY, SIZE_META = 40, 26, 14, 12  # px
 SANS = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 MONO = '"JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace'
 
-# ---- aliases for pages not yet on v2 (T58/T59 retire them) --------------------------------
+# ---- aliases kept for kit's helpers (older names of the tokens above) ---------------------
 CANVAS = PAGE
 SURFACE = PANEL
 RULE = DIVIDER
@@ -58,11 +58,9 @@ FAIL = AMBER  # a failure is amber + ✕ + "failed"; red means "down" only (P-02
 WARN = AMBER
 STALE = META
 
-#: keyed Streamlit containers drawn as cards
-CARDS = (
-    "db-watch", "db-chart", "db-detail", "db-overview", "db-values",
-    "db-mx-vix", "db-mx-curve", "db-mx-2s10s", "db-mx-gold", "db-mx-corr", "db-mx-cot",
-)  # fmt: skip
+#: keyed Streamlit containers drawn as cards on Markets; the other pages' cards are
+#: ``kit.card`` containers, keyed ``db-card-*`` (T59)
+CARDS = ("db-watch", "db-chart", "db-detail", "db-overview", "db-values")
 
 _CARD_SEL = ", ".join(f".st-key-{k}" for k in CARDS)
 _PICK = 'div[class*="st-key-db-pick-"]'
@@ -317,17 +315,12 @@ div[class*="st-key-db-ovgrid-"] > div {{ flex: 0 0 172px; }}
 .db-tenor .db-fig {{ display: block; text-align: left; }}
 .db-curve-legend {{ display: flex; gap: 16px; color: {META}; font-size: {SIZE_META}px; }}
 
-/* ---- Macro page (T54; restyled by T59) ---- */
+/* ---- Macro page (T54; its table grid is ``macro.MACRO_CSS`` since T59) ---- */
 .db-mx-words {{ color: {TEXT}; font-size: 13.5px; margin: 4px 0 8px 0; }}
 .db-mx-strip {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 8px; margin: 6px 0 8px 0; }}
 .db-mx-cell {{ font-size: {SIZE_BODY}px; font-weight: 500; font-variant-numeric: tabular-nums; }}
 .db-mx-cell .db-fig {{ display: block; text-align: left; }}
-.db-mx-table td, .db-mx-heat td, .db-mx-heat th {{ white-space: nowrap; }}
-.db-mx-scroll {{ overflow-x: auto; }}
-.db-mx-heat {{ font-size: 12.5px; }}
-.db-mx-heat td {{ text-align: center; }}
-.db-mx-heat .db-fig {{ text-align: center; }}
 .db-mx-diag {{ color: {META}; }}
 .db-mx-cot-name {{ color: {TEXT}; font-weight: 500; font-size: 15px; }}
 .db-short {{ background: {RAISED}; border-radius: 8px; padding: 10px 12px; margin: 4px 0; }}

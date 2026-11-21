@@ -1,5 +1,7 @@
-"""Dashboard pages 3-6 (T35): AppTest smoke per page, hosted rule, P-009 labels, ref_date labels.
-The Instrument page moved into Home in T36; its tests are in test_home.
+"""Dashboard pages 2-6 (T35; the P-022 template since T59): AppTest smoke per page, hosted
+rule, P-009 labels, ref_date labels, and the T59 template, markup and cache rules. The
+Instrument page moved into Home in T36; its tests are in test_home. Macro's own views are in
+test_macro.
 
 SYNTHETIC FIXTURE: a store built from ``brief_synth`` (made-up values, Monday 16 Nov 2026 07:00
 ET) plus serving files built by ``deskbrief.pipeline.serving``. SPY is the only tier-1 instrument
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -28,6 +31,7 @@ from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, monday_rows
 REPO = Path(__file__).resolve().parents[3]
 PAGES = REPO / "app" / "pages"
 PAGE_FILES = {
+    "macro": "2_Macro.py",
     "xchecks": "3_Cross_checks.py",
     "health": "4_Data_health.py",
     "sources": "5_Sources.py",
@@ -289,9 +293,13 @@ def test_every_system_page_has_top_bar_navigation(run_page: RunPage) -> None:
 
 
 def test_crosschecks_put_problems_first_and_fold_skipped(run_page: RunPage) -> None:
-    t = text(run_page("xchecks", "local"))
+    at = run_page("xchecks", "local")
+    t = text(at)
     assert "SPY vs ES" in t  # readable name, raw id kept beside it
-    assert "Show 1 skipped check" in t
+    # T59: skipped checks are one tab away (depth in tabs), not a <details> fold
+    assert [tab.label for tab in at.tabs][:2] == ["Compared (2)", "Skipped (1)"]
+    assert "1 skipped check: nothing to compare all week" in t
+    assert "<details" not in t
     assert t.index("spy_vs_es") < t.index("es_vs_yahoo")  # warn sorts before pass
 
 
@@ -307,3 +315,150 @@ def test_sources_leave_out_switched_off_sources(run_page: RunPage) -> None:
     df = at.dataframe[0].value
     assert "stooq" not in set(df["Source"])
     assert "Median data age" in df.columns
+
+
+# --- T59: the P-022 template on every page -------------------------------------------------
+
+T59_FILES = sorted((REPO / "app" / "pages").glob("*.py")) + [
+    REPO / "app" / "components" / name for name in ("macro.py", "incidents.py", "kit.py")
+]
+#: kit's serving-file caches keep a 60 s TTL: the serving files are not covered by
+#: data_version(), so a 15-minute TTL would show them stale (planner ruling for T59)
+SERVING_CACHES = {"_serving_frame", "_serving_json"}
+_TITLE_ATTR = re.compile(r"""<[^>]*\stitle\s*=""", flags=re.I)
+
+
+def markup(at: AppTest) -> str:
+    """Every markdown block the page generated (the stylesheets left out)."""
+    return "\n".join(m.value for m in at.markdown if "<style>" not in m.value)
+
+
+def blocks(path: Path) -> int:
+    """Content blocks of a page: the headline row, each top-level card, and the footer."""
+    src = path.read_text(encoding="utf-8")
+    cards = re.findall(r"^\s*with (?:left, |right, )?_kit\.card\(", src, flags=re.M)
+    return len(cards) + ("_kit.kpis(" in src) + ("_kit.page_footer(ctx" in src)
+
+
+@pytest.mark.parametrize("page", list(PAGE_FILES))
+def test_every_page_follows_the_card_template(run_page: RunPage, page: str) -> None:
+    at = run_page(page, "local")
+    assert not at.exception
+    t = markup(at)
+    # title on the left of the heading, cards keyed db-card-*, the footer last
+    assert t.index('<span class="db-brand">') < t.index('class="db-ct"')
+    assert t.rindex('class="db-ct"') < t.index('<div class="db-pfoot">')
+    footer = t.split('<div class="db-pfoot">', 1)[1]
+    assert 'class="db-glyphs"' in footer  # the glyph legend on every page (P-022)
+    assert "delayed" in footer
+    assert 4 <= blocks(PAGES / PAGE_FILES[page]) <= 6, page
+
+
+@pytest.mark.parametrize("page", list(PAGE_FILES))
+def test_no_full_reload_link_and_no_title_attribute(run_page: RunPage, page: str) -> None:
+    """Acceptance: no ``<a target="_self">`` and no ``title`` attribute in generated markup
+    (Streamlit's own component iframe ``title`` is not markdown, so it is not in here)."""
+    for mode in ("hosted", "local"):
+        t = markup(run_page(page, mode))
+        assert 'target="_self"' not in t, (page, mode)
+        assert not _TITLE_ATTR.search(t), (page, mode, _TITLE_ATTR.search(t))
+
+
+@pytest.mark.parametrize("path", T59_FILES, ids=lambda p: p.name)
+def test_no_title_attribute_or_self_target_in_t59_sources(path: Path) -> None:
+    """Every string literal that is not a docstring (docstrings may name the rule)."""
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docs = {
+        id(n.body[0].value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Module | ast.FunctionDef | ast.ClassDef)
+        and n.body
+        and isinstance(n.body[0], ast.Expr)
+        and isinstance(n.body[0].value, ast.Constant)
+    }
+    strings = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
+    ]
+    assert strings
+    for text in strings:
+        assert not re.search(r"""\btitle\s*=\s*["'\\{]""", text), text
+        assert "_self" not in text, text
+
+
+@pytest.mark.parametrize("page", list(PAGE_FILES))
+def test_hosted_never_shows_tier1_on_any_page(run_page: RunPage, page: str) -> None:
+    hosted, local = markup(run_page(page, "hosted")), markup(run_page(page, "local"))
+    assert 'data-tier="1"' not in hosted
+    legend = hosted.split('class="db-glyphs"', 1)[1].split("</div>", 1)[0]
+    assert ">live<" not in legend
+    assert ">live<" in local.split('class="db-glyphs"', 1)[1].split("</div>", 1)[0]
+    assert "live (tier 1)" not in hosted.split('<div class="db-pfoot">', 1)[1].split("<span>")[1]
+
+
+@pytest.mark.parametrize("path", T59_FILES, ids=lambda p: p.name)
+def test_every_store_cache_is_keyed_on_the_data_version(path: Path) -> None:
+    src = path.read_text(encoding="utf-8")
+    assert "ttl=60" not in src
+    found = re.findall(r"@st\.cache_data\(([^)]*)\)\ndef (\w+)\(([^)]*)\)", src, flags=re.S)
+    for ttl, name, args in found:
+        assert re.search(r"\bver: str\b", args), (name, args)  # data.data_version()
+        if name in SERVING_CACHES:  # the one narrow exemption, by name
+            assert path.name == "kit.py"
+            assert "data.CACHE_TTL_SECONDS" in ttl
+            continue
+        assert "DATA_CACHE_TTL_SECONDS" in ttl, (name, ttl)
+    if path.name == "4_Data_health.py":
+        assert [n for _, n, _ in found] == ["_dq"]
+        assert "open_connection" not in src  # the shared connection (T56)
+
+
+def test_corrected_values_carry_compact_provenance(run_page: RunPage) -> None:
+    from app.components.values import VISIBLE_FLAGS  # noqa: F401  (the words rule's home)
+
+    local = markup(run_page("health", "local"))
+    hosted = markup(run_page("health", "hosted"))
+    rev = local.split("Instrument, field and source", 1)[1].split("</table>", 1)[0]
+    figs = re.findall(r'<span class="db-fig">.*?</span></span>', rev, flags=re.S)
+    assert len(figs) == 4  # was and now, for UST_10Y and SPY
+    for f in figs:
+        assert 'class="db-prov"' in f  # compact: the glyph with its tooltip and label
+        for part in ("db-src", "db-asof", "db-field"):
+            assert part in f
+    assert '<span class="db-val">4.39</span>' in rev
+    assert 'data-tier="1"' in rev  # SPY's tier-1 feed, local only
+    assert "598.5" not in hosted  # hosted withholds the row naming a tier-1 source
+    assert "4.39" in hosted
+
+
+def test_crosscheck_gap_is_a_compact_figure(run_page: RunPage) -> None:
+    t = markup(run_page("xchecks", "local"))
+    gap = next(c for c in re.findall(r'<span class="db-fig">.*?</span></span>', t, flags=re.S)
+               if "+6.5 bp" in c)  # fmt: skip
+    assert "alpaca vs yahoo" in gap
+    assert 'data-tier="1"' in gap  # the most live tier of the two sources compared
+    assert "13 Nov" in gap  # the date compared, not the run date
+
+
+def test_runs_job_filter_narrows_the_table(run_page: RunPage) -> None:
+    at = run_page("runs", "hosted")
+    assert set(at.dataframe[0].value["Job"]) >= {"morning", "intraday"}
+    at = at.segmented_control(key="job").set_value("intraday").run()
+    assert not at.exception
+    assert set(at.dataframe[0].value["Job"]) == {"intraday"}
+    assert "Runs, 14 days" in text(at)  # the headline counts still cover every job
+
+
+def test_compact_is_the_default_and_keeps_caveat_words() -> None:
+    from app.components.values import Provenance, change_cell, value_cell
+
+    p = Provenance("alpaca", 2, "10:27", "last", flags=("proxy", "IEX", "fallback"))
+    for html in (value_cell("1.00", p), change_cell("+1.0%", p, "previous close")):
+        assert 'class="db-prov' in html  # compact without asking (T59)
+        shown = re.sub(r'<span class="db-tip".*?</span></span>', "", html, flags=re.S)
+        for word in ("proxy", "IEX", "fallback"):
+            assert f'class="db-flag">{word}<' in shown
+    assert "db-meta" in value_cell("1.00", p, compact=False)

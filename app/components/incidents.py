@@ -1,4 +1,5 @@
-"""Parse ``INCIDENTS.md`` for the Runs page: one entry per ``## YYYY-MM-DD — title`` heading.
+"""Parse ``INCIDENTS.md`` for the Runs page's Incidents card: one entry per
+``## YYYY-MM-DD — title`` heading.
 
 Headings inside a fenced code block (the template at the top of the file) are not incidents.
 """
@@ -29,6 +30,6 @@ def parse(markdown: str) -> list[Incident]:
         m = None if fenced else _HEADING.match(line)
         if m:
             out.append((m.group(1), m.group(2), []))
-        elif (out and not fenced) or (out and fenced):
+        elif out:  # body lines, fenced or not, belong to the incident above them
             out[-1][2].append(line)
     return [Incident(d, t, "\n".join(b).strip()) for d, t, b in out]
