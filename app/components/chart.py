@@ -1,4 +1,9 @@
-"""The workspace price chart (T36): candles or a line, a volume pane, a crosshair tooltip.
+"""The workspace price chart: the T36 Altair charts and the TradingView payload (T57B).
+
+:func:`price_panel` is the TradingView version (P-022): range and style controls and a
+:func:`app.components.tvchart.chart` in one ``st.fragment``. :func:`tv_series` and
+:func:`tv_compare_series` turn bars into its payload. The Altair functions stay until T58
+moves Home onto the new panel.
 
 Data are completed daily bars from :func:`app.components.data.load_bars` (hidden tiers never
 read). Candles need a real open, high and low on most days; otherwise the close is drawn as a
@@ -14,7 +19,9 @@ from datetime import timedelta
 
 import altair as alt
 import pandas as pd
+import streamlit as st
 from app import theme
+from app.components import tvchart
 from app.components.values import TIER_GLYPH, TIER_NAME
 
 #: range buttons and how many calendar days each shows (None: everything the store has)
@@ -303,3 +310,122 @@ def caption(bars: pd.DataFrame, *, latest_line: bool = True) -> str:
         f"Daily {field}s · {tiers} · {sources} · {a.day} {a:%b %Y} to {b.day} {b:%b %Y} "
         f"({len(bars)} days)." + (" Dashed line: latest value." if latest_line else "")
     )
+
+
+# ---- TradingView chart (T57B, P-022) ------------------------------------------------------
+#: chart styles of the TradingView chart (candles only when the bars carry real OHLC)
+AREA = "Area"
+TV_STYLES = (CANDLES, LINE, AREA)
+
+
+def tv_precision(bars: pd.DataFrame) -> int:
+    """Decimals on the price axis: 2 for percentages and prices of 10 or more, else 4."""
+    if bars.empty:
+        return 2
+    if str(bars["unit"].iloc[-1]) in _PCT_UNITS:
+        return 2
+    level = bars["close"].abs().median()
+    return 2 if level == level and level >= 10 else 4
+
+
+def tv_series(bars: pd.DataFrame, *, style: str) -> list[tvchart.Series]:
+    """The TradingView payload for one instrument.
+
+    Candles only when :func:`has_ohlc`. A day without a consistent open, high and low is drawn
+    as a flat grey mark at the close (``ohlc`` false), never a made-up candle. Otherwise the
+    close is a line or an area. Volume is added as a bottom histogram when :func:`has_volume`.
+    Every point names its field, tier and source."""
+    if bars.empty:
+        return []
+    df = _label(bars)
+    out: list[tvchart.Series] = []
+    if style == CANDLES and has_ohlc(bars):
+        ok = df["ok"]
+        c = df.assign(
+            open=df["open"].where(ok, df["close"]),
+            high=df["high"].where(ok, df["close"]),
+            low=df["low"].where(ok, df["close"]),
+            ohlc=ok,
+        )
+        pts, meta = tvchart.points(c, "candles", meta=("field_text", "tier_text", "source"),
+                                   extra=("ohlc",))  # fmt: skip
+        for p in pts:
+            if not p["ohlc"]:
+                p["color"] = theme.STALE
+        out.append({"kind": "candles", "name": "", "points": pts, "meta": meta})
+    else:
+        line = df.assign(value=df["close"])
+        pts, meta = tvchart.points(line, "line", meta=("field_text", "tier_text", "source"))
+        kind: tvchart.Kind = "area" if style == AREA else "line"
+        out.append({"kind": kind, "name": "", "points": pts, "meta": meta})
+    if has_volume(bars):
+        vol = df.assign(value=df["volume"], up=df["up"] == "up")
+        pts, meta = tvchart.points(vol, "volume", meta=("volume_text", "tier_text", "source"),
+                                   extra=("up",))  # fmt: skip
+        out.append({"kind": "volume", "name": "Volume", "points": pts, "meta": meta})
+    return out
+
+
+def tv_compare_series(
+    a: pd.DataFrame, b: pd.DataFrame, name_a: str, name_b: str
+) -> list[tvchart.Series]:
+    """Two series rebased to 100 on their first common date (second one dashed, amber)."""
+    long = rebased(a, b, name_a, name_b)
+    out: list[tvchart.Series] = []
+    for name, colour, dashed in ((name_a, theme.ACCENT, False), (name_b, theme.AMBER, True)):
+        leg = long[long["series"] == name].assign(value=lambda f: f["index"])
+        pts, meta = tvchart.points(leg, "line", meta=("field_text", "tier_text", "source"))
+        out.append({"kind": "line", "name": name, "color": colour, "dashed": dashed,
+                    "points": pts, "meta": meta})  # fmt: skip
+    return out
+
+
+@st.fragment
+def price_panel(
+    bars: pd.DataFrame,
+    *,
+    name: str,
+    last: float | None,
+    key: str = "tv",
+    compare: tuple[str, pd.DataFrame] | None = None,
+    height: int = 380,
+) -> None:
+    """Range and style controls with the TradingView chart under them, as one fragment: a
+    range or style change reruns only this panel."""
+    c1, c2 = st.columns([3, 2])
+    rng = (
+        c1.segmented_control(
+            "Range", list(RANGES), key=f"{key}-rng", default=DEFAULT_RANGE,
+            label_visibility="collapsed",
+        )
+        or DEFAULT_RANGE
+    )  # fmt: skip
+    styles = list(TV_STYLES) if has_ohlc(bars) else [LINE, AREA]
+    style = styles[0]
+    if compare is None:  # a comparison is always two rebased lines
+        style = (
+            c2.segmented_control(
+                "Chart style", styles, key=f"{key}-style", default=styles[0],
+                label_visibility="collapsed",
+            )
+            or styles[0]
+        )  # fmt: skip
+    view = window(bars, rng)
+    if view.empty:
+        st.caption("No data in this range.")
+        return
+    if compare is not None:
+        other_name, other = compare
+        series = tv_compare_series(view, window(other, rng), name, other_name)
+        if series and series[0]["points"]:
+            tvchart.chart(series, key=f"{key}-chart", height=height, precision=2,
+                          label=f"{name} and {other_name} rebased to 100")  # fmt: skip
+            st.caption(f"{caption(view, latest_line=False)} {other_name}: "
+                       f"{caption(window(other, rng), latest_line=False)}")  # fmt: skip
+            return
+        st.caption(f"No common dates with {other_name}; showing {name} alone.")
+    tvchart.chart(
+        tv_series(view, style=style), key=f"{key}-chart", height=height,
+        precision=tv_precision(view), last=last, label=f"{name} price chart",
+    )  # fmt: skip
+    st.caption(caption(view, latest_line=last is not None))
