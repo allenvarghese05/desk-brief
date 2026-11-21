@@ -23,7 +23,9 @@ Data contract (:func:`points`): one point per business day, as a ``"YYYY-MM-DD"`
 sorted, without duplicates, NaN or infinities. Lightweight Charts places bars by index, so
 weekends and holidays leave no gaps. Every point carries a provenance index into its series'
 ``meta`` table (field, tier, source). The chart's tooltip shows those facts with the as-of
-date. Every chart is followed by :func:`attribution`.
+date. Every chart is followed by :func:`attribution`: a visible "Charts by TradingView"
+link and the library's attribution notice (the library's own logo is off: it carries a
+``title`` attribute).
 
 If the component cannot be used (the bundle is missing or fails its checksum, or the browser
 reports that it could not draw), :func:`chart` draws an Altair line of the same data with a
@@ -33,6 +35,7 @@ visible note instead of leaving a blank space.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Callable, Iterable, Sequence
 from functools import cache
@@ -49,6 +52,9 @@ LIBRARY = "lightweight-charts.standalone.production.js"
 LIBRARY_VERSION = "5.3.0"
 ATTRIBUTION_URL = "https://www.tradingview.com/"
 ATTRIBUTION_TEXT = "Charts by TradingView"
+#: the attribution notice of the library's NOTICE file (v5.3.0), which its README asks every
+#: page using the library to show, with a link to tradingview.com
+ATTRIBUTION_NOTICE = "TradingView Lightweight Charts™ © 2025 TradingView, Inc."
 NOTE_FALLBACK = "Interactive chart unavailable; showing a simple line of the same data."
 
 Kind = Literal["candles", "line", "area", "volume"]
@@ -186,6 +192,15 @@ def theme_tokens() -> dict[str, str]:
     }
 
 
+def signature(payload: dict[str, Any]) -> str:
+    """A short fingerprint of a payload (without its ``sig``). The frontend echoes it in an
+    error report, so a failure disables only the payload that failed: a new range, style or
+    data set tries the chart again."""
+    body = {k: v for k, v in payload.items() if k != "sig"}
+    text = json.dumps(body, sort_keys=True, allow_nan=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def spec(
     series: Sequence[Series],
     *,
@@ -194,8 +209,8 @@ def spec(
     last: float | None = None,
     label: str = "Price chart",
 ) -> dict[str, Any]:
-    """The JSON the frontend receives: theme tokens, series and options."""
-    return {
+    """The JSON the frontend receives: theme tokens, series, options and a ``sig``."""
+    out: dict[str, Any] = {
         "height": int(height),
         "precision": int(precision),
         "last": float(last) if last is not None and _finite(float(last)) else None,
@@ -203,40 +218,65 @@ def spec(
         "theme": theme_tokens(),
         "series": [dict(s) for s in series],
     }
+    out["sig"] = signature(out)
+    return out
 
 
 # ---- rendering ---------------------------------------------------------------------------
-def attribution() -> None:
-    """The "Charts by TradingView" link that every TradingView chart carries (P-022)."""
-    st.markdown(
+def attribution_html() -> str:
+    """The attribution line: a visible, keyboard-focusable "Charts by TradingView" link to
+    tradingview.com and the attribution notice of the library's NOTICE file, in the meta
+    colour. The library's own logo is switched off (``attributionLogo: false`` in
+    ``tvchart.js``) because it carries a ``title`` attribute (P-022: no ``title``)."""
+    return (
         f'<div class="db-tv-attr" style="font-size:{theme.SIZE_META}px;color:{theme.META};'
         f'margin-top:-6px">Charts by <a href="{ATTRIBUTION_URL}" target="_blank" '
-        f'rel="noopener noreferrer" aria-label="{ATTRIBUTION_TEXT} (opens tradingview.com)">'
-        "TradingView</a></div>",
-        unsafe_allow_html=True,
+        f'rel="noopener noreferrer" style="color:{theme.META} !important;'
+        f'text-decoration:underline" aria-label="{ATTRIBUTION_TEXT} (opens tradingview.com)">'
+        f"TradingView</a> · {ATTRIBUTION_NOTICE}</div>"
     )
 
 
+def attribution() -> None:
+    """The attribution that every TradingView chart carries (P-022, library README)."""
+    st.markdown(attribution_html(), unsafe_allow_html=True)
+
+
 def fallback_chart(series: Sequence[Series], *, height: int = 380) -> alt.Chart:
-    """A plain Altair line of the first price series (close for candles), with the same
-    provenance in its tooltip."""
-    main = next((s for s in series if s.get("kind") != "volume"), None)
+    """Plain Altair lines of every price series (close for candles; volume left out), with
+    the same provenance in the tooltip. A comparison keeps both lines and their colours."""
     rows: list[dict[str, Any]] = []
-    if main is not None:
-        col = "close" if main.get("kind") == "candles" else "value"
-        meta = main.get("meta", [])
-        for p in main.get("points", []):
+    names: list[str] = []
+    colours: list[str] = []
+    for i, s in enumerate(x for x in series if x.get("kind") != "volume"):
+        name = s.get("name") or ("Close" if s.get("kind") == "candles" else f"Series {i + 1}")
+        names.append(name)
+        colours.append(s.get("color") or (theme.ACCENT if i == 0 else theme.AMBER))
+        col = "close" if s.get("kind") == "candles" else "value"
+        meta = s.get("meta", [])
+        for p in s.get("points", []):
             m = meta[p["m"]] if p["m"] < len(meta) else ["", "", ""]
-            rows.append({"d": p["time"], "y": p[col], "field": m[0], "tier": m[1], "source": m[2]})
-    df = pd.DataFrame(rows, columns=["d", "y", "field", "tier", "source"])
+            rows.append(
+                {"d": p["time"], "y": p[col], "series": name, "field": m[0], "tier": m[1],
+                 "source": m[2]}
+            )  # fmt: skip
+    df = pd.DataFrame(rows, columns=["d", "y", "series", "field", "tier", "source"])
     out: alt.Chart = (
         alt.Chart(df)
-        .mark_line(color=theme.ACCENT, strokeWidth=1.6)
+        .mark_line(strokeWidth=1.6)
         .encode(
             x=alt.X("d:T", title=None, axis=alt.Axis(format="%d %b %Y", labelAngle=0)),
             y=alt.Y("y:Q", title=None, scale=alt.Scale(zero=False)),
+            color=alt.Color(
+                "series:N",
+                scale=alt.Scale(domain=names, range=colours),
+                legend=alt.Legend(orient="top-left", title=None, labelColor=theme.META)
+                if len(names) > 1
+                else None,
+            ),
             tooltip=[
                 alt.Tooltip("d:T", title="As of", format="%a %d %b %Y"),
+                alt.Tooltip("series:N", title="Series"),
                 alt.Tooltip("y:Q", title="Value", format=",.4~f"),
                 alt.Tooltip("field:N", title="Field"),
                 alt.Tooltip("tier:N", title="Tier"),
@@ -263,20 +303,24 @@ def chart(
     precision: int = 2,
     last: float | None = None,
     label: str = "Price chart",
-) -> None:
-    """Draw one TradingView chart, then its attribution.
+) -> bool:
+    """Draw one TradingView chart, then its attribution. Returns True when the TradingView
+    chart was drawn, False when the Altair fallback was (it has no ``last`` price line).
 
     The first series is the main one (``last`` draws a dashed price line on it). Width fits
-    the container. Falls back to an Altair line with a visible note when the component cannot
-    be used. Call it inside ``st.fragment`` so range and style changes rerun only the chart."""
+    the container. Falls back to Altair lines with a visible note when the component cannot
+    be used, or when the browser reported that it could not draw this same payload (a new
+    payload, e.g. another range or style, tries the chart again). Call it inside
+    ``st.fragment`` so range and style changes rerun only the chart."""
     payload = spec(series, height=height, precision=precision, last=last, label=label)
     state = st.session_state.get(key)
-    if isinstance(state, dict) and state.get("status") == "error":
-        st.session_state[_fail_key(key)] = True
+    if isinstance(state, dict) and state.get("status") == "error" and state.get("sig"):
+        st.session_state[_fail_key(key)] = state["sig"]
     component = _component()
-    if component is None or st.session_state.get(_fail_key(key)):
+    if component is None or st.session_state.get(_fail_key(key)) == payload["sig"]:
         st.caption(NOTE_FALLBACK)
         st.altair_chart(fallback_chart(series, height=height), theme=None)
-        return
+        return False
     component(spec=payload, key=key, default=None)
     attribution()
+    return True

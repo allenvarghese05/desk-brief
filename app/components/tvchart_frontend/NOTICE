@@ -14,8 +14,13 @@ Vendored:   2026-11-20
 
 Upstream notices
 ----------------
-The npm package ships no NOTICE file. Its notices are the LICENSE file (copied here) and
-the header the bundle itself carries, reproduced verbatim:
+The npm package ships no NOTICE file. The library's NOTICE file in its source repository
+(tag v5.3.0) reads, verbatim:
+
+  TradingView Lightweight Charts™
+  Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/
+
+The bundle itself carries this header, reproduced verbatim:
 
   TradingView Lightweight Charts(TM) v5.3.0
   Copyright (c) 2026 TradingView, Inc.
@@ -23,9 +28,17 @@ the header the bundle itself carries, reproduced verbatim:
 
 LICENSE: Copyright 2023 TradingView, Inc. Licensed under the Apache License, Version 2.0.
 
-Attribution: every chart drawn with this library in Desk Brief shows a "Charts by
-TradingView" link to https://www.tradingview.com/ (app/components/tvchart.py), and the
-library's own TradingView logo stays enabled.
+Attribution
+-----------
+The library's README asks every page that uses it to show the attribution notice above and a
+link to https://www.tradingview.com/. It names the chart's attributionLogo option as one way
+to show the link, not a requirement.
+
+Desk Brief turns the logo off (attributionLogo: false in tvchart.js), because the logo's
+link carries a title attribute and P-022 allows none. Instead, under every chart,
+app/components/tvchart.py (attribution) draws a visible, keyboard-focusable text link
+"Charts by TradingView" to https://www.tradingview.com/ followed by the attribution notice
+("TradingView Lightweight Charts™ © 2025 TradingView, Inc."), in the theme's meta colour.
 
 Upgrading: Dependabot does not track this file. Follow the steps in the docstring of
 app/components/tvchart.py and update this NOTICE, SHA256SUMS and LIBRARY_VERSION together.

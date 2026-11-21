@@ -424,8 +424,9 @@ def price_panel(
                        f"{caption(window(other, rng), latest_line=False)}")  # fmt: skip
             return
         st.caption(f"No common dates with {other_name}; showing {name} alone.")
-    tvchart.chart(
+    drawn = tvchart.chart(
         tv_series(view, style=style), key=f"{key}-chart", height=height,
         precision=tv_precision(view), last=last, label=f"{name} price chart",
     )  # fmt: skip
-    st.caption(caption(view, latest_line=last is not None))
+    # the Altair fallback draws no latest-value line, so its caption does not mention one
+    st.caption(caption(view, latest_line=drawn and last is not None))

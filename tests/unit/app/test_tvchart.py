@@ -305,6 +305,10 @@ def _run() -> AppTest:
     return at
 
 
+def _captions(at: AppTest) -> str:
+    return "\n".join(c.value for c in at.caption)
+
+
 def _markdown(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown)
 
@@ -326,18 +330,96 @@ def test_fallback_draws_an_altair_line_with_a_note(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(tvchart, "_component", lambda: None)  # e.g. the bundle failed its checksum
     at = _run()
-    captions = "\n".join(c.value for c in at.caption)
+    captions = _captions(at)
     assert tvchart.NOTE_FALLBACK in captions
+    assert "Dashed line" not in captions  # the fallback draws no latest-value line
     assert at.get("vega_lite_chart"), "no Altair fallback chart drawn"
 
 
-def test_a_frontend_error_switches_to_the_fallback() -> None:
+def test_a_frontend_error_falls_back_for_that_payload_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser's error report names the payload (``sig``). The fallback holds while the
+    payload is the same, and a new range or style tries the TradingView chart again."""
     from app.components import tvchart
 
+    sent: list[str] = []
+    monkeypatch.setattr(tvchart, "_component", lambda: lambda **kw: sent.append(kw["spec"]["sig"]))
     at = _run()
-    at.session_state["t-chart"] = {"status": "error", "message": "boom"}
+    assert len(sent) == 1
+    at.session_state["t-chart"] = {"status": "error", "message": "boom", "sig": sent[0]}
     at.run()
-    assert tvchart.NOTE_FALLBACK in "\n".join(c.value for c in at.caption)
+    assert tvchart.NOTE_FALLBACK in _captions(at)
+    assert len(sent) == 1  # not drawn again
+    at.run()
+    assert tvchart.NOTE_FALLBACK in _captions(at)  # same payload: still the fallback
+    at.session_state["t-rng"] = "1M"
+    at.run()
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+    assert len(sent) == 2
+    assert sent[1] != sent[0]
+
+
+def test_an_error_for_another_payload_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.components import tvchart
+
+    monkeypatch.setattr(tvchart, "_component", lambda: lambda **kw: None)
+    at = _run()
+    at.session_state["t-chart"] = {"status": "error", "sig": "not-this-one"}
+    at.run()
+    assert tvchart.NOTE_FALLBACK not in _captions(at)
+
+
+def test_signature_follows_the_payload() -> None:
+    from app.components import chart, tvchart
+
+    a = tvchart.spec(chart.tv_series(bars(DAYS), style=chart.LINE))
+    b = tvchart.spec(chart.tv_series(bars(DAYS), style=chart.LINE))
+    c = tvchart.spec(chart.tv_series(bars(DAYS), style=chart.AREA))
+    assert a["sig"] == b["sig"] == tvchart.signature(a)
+    assert a["sig"] != c["sig"]
+
+
+def test_fallback_keeps_both_compare_series() -> None:
+    from app import theme
+    from app.components import chart, tvchart
+
+    a = bars(DAYS)
+    b = bars(DAYS, close=[50.0, 55.0, 60.0, 61.0])
+    spec = tvchart.fallback_chart(chart.tv_compare_series(a, b, "SPY", "QQQ")).to_dict()
+    rows = next(iter(spec["datasets"].values()))
+    assert {r["series"] for r in rows} == {"SPY", "QQQ"}
+    colour = spec["encoding"]["color"]["scale"]
+    assert colour == {"domain": ["SPY", "QQQ"], "range": [theme.ACCENT, theme.AMBER]}
+
+
+def test_library_logo_is_off() -> None:
+    """The logo's link carries a ``title`` attribute (P-022: none), so it is switched off and
+    the attribution is the visible link under every chart."""
+    js = (FRONT / "tvchart.js").read_text(encoding="utf-8")
+    assert re.search(r"attributionLogo:\s*false\b", js)
+    assert not re.search(r"attributionLogo:\s*true\b", js)
+
+
+def test_attribution_is_a_visible_focusable_link_with_the_notice() -> None:
+    from app import theme
+    from app.components import tvchart
+
+    html = tvchart.attribution_html()
+    m = re.search(r"<a ([^>]*)>([^<]*)</a>", html)
+    assert m is not None
+    attrs, text = m.groups()
+    assert 'href="https://www.tradingview.com/"' in attrs
+    assert text == "TradingView"
+    assert "Charts by <a " in html
+    assert "title" not in attrs
+    assert "tabindex" not in attrs  # an <a href> is in the tab order by default
+    assert theme.META in attrs  # the link itself is in the meta colour
+    assert tvchart.ATTRIBUTION_NOTICE in html
+    assert "TradingView Lightweight Charts™" in tvchart.ATTRIBUTION_NOTICE
+    assert "2025 TradingView, Inc." in tvchart.ATTRIBUTION_NOTICE  # the library's NOTICE
+    notice = (FRONT / "NOTICE").read_text(encoding="utf-8")
+    assert "attributionLogo: false" in notice
 
 
 def test_tvchart_chart_is_the_only_way_to_draw_the_component() -> None:

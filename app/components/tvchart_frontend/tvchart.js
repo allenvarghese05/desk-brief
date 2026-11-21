@@ -5,8 +5,8 @@
  *   -> streamlit:componentReady   once, when this script has loaded
  *   <- streamlit:render           args.spec: theme tokens, series and their provenance
  *   -> streamlit:setFrameHeight   the iframe height
- *   -> streamlit:setComponentValue {status: "error"} only when the chart cannot be drawn,
- *                                 so Python can switch to its Altair fallback
+ *   -> streamlit:setComponentValue {status: "error", sig} only when the chart cannot be
+ *                                 drawn, so Python can fall back for that payload
  *
  * Times arrive as business-day strings ("YYYY-MM-DD"). Lightweight Charts lays bars out by
  * index, so weekends and holidays leave no gaps. Every tooltip line names the field, tier,
@@ -28,7 +28,8 @@
   var chart = null;
   var lastSpec = "";
   var lastWidth = 0;
-  var reported = false;
+  var reportedSig = null;
+  var currentSig = "";
 
   function send(type, data) {
     var msg = { isStreamlitMessage: true, type: type };
@@ -46,9 +47,13 @@
     note.style.display = "block";
     note.textContent = "Chart unavailable: " + text;
     setHeight(wrap.getBoundingClientRect().height || 60);
-    if (!reported) {
-      reported = true;
-      send("streamlit:setComponentValue", { value: { status: "error", message: String(text) }, dataType: "json" });
+    // one report per payload: Python falls back for this payload only (sig), and a new range,
+    // style or data set tries the chart again
+    if (reportedSig !== currentSig) {
+      reportedSig = currentSig;
+      send("streamlit:setComponentValue", {
+        value: { status: "error", message: String(text), sig: currentSig }, dataType: "json"
+      });
     }
   }
 
@@ -73,16 +78,16 @@
     if (!d) { return ""; }
     return DAYS[d.getUTCDay()] + " " + d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear();
   }
-  /** Axis labels: years are spelled out, and month ticks carry the year when the data span
-   *  more than one calendar year, so a two-year range never shows an ambiguous "Mar". */
-  function tickFormatter(spansYears) {
+  /** Axis labels: years are spelled out, and month and day ticks carry the year when the data
+   *  span more than one calendar year or lie in a past year, so no tick is an ambiguous "Mar". */
+  function tickFormatter(withYear) {
     return function (t, type) {
       var d = toDate(t);
       if (!d) { return ""; }
       var yy = "'" + pad(d.getUTCFullYear() % 100);
       if (type === 0) { return "" + d.getUTCFullYear(); }               // TickMarkType.Year
-      if (type === 1) { return MONTHS[d.getUTCMonth()] + (spansYears ? " " + yy : ""); } // Month
-      return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + (spansYears ? " " + yy : "");
+      if (type === 1) { return MONTHS[d.getUTCMonth()] + (withYear ? " " + yy : ""); } // Month
+      return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + (withYear ? " " + yy : "");
     };
   }
 
@@ -132,7 +137,10 @@
     var th = spec.theme;
     var first = spec.series[0] && spec.series[0].points;
     if (!first || !first.length) { fail("no data to draw."); return; }
-    var spansYears = toDate(first[0].time).getUTCFullYear() !== toDate(first[first.length - 1].time).getUTCFullYear();
+    var firstYear = toDate(first[0].time).getUTCFullYear();
+    var lastYear = toDate(first[first.length - 1].time).getUTCFullYear();
+    // month and day ticks carry the year when the data span years or sit in a past year
+    var needYear = firstYear !== lastYear || lastYear !== new Date().getUTCFullYear();
     var hasVolume = spec.series.some(function (s) { return s.kind === "volume"; });
 
     if (chart) { chart.remove(); chart = null; }
@@ -147,7 +155,10 @@
       autoSize: true,
       layout: {
         background: { type: "solid", color: th.panel }, textColor: th.meta,
-        fontFamily: th.sans, fontSize: 11, attributionLogo: true
+        fontFamily: th.sans, fontSize: 11,
+        // the library's logo link carries a title attribute (P-022: none); the attribution is
+        // the visible "Charts by TradingView" link Python draws under every chart
+        attributionLogo: false
       },
       grid: { vertLines: { visible: false }, horzLines: { color: th.divider } },
       rightPriceScale: {
@@ -155,8 +166,8 @@
         scaleMargins: { top: 0.08, bottom: hasVolume ? 0.26 : 0.08 }
       },
       timeScale: {
-        borderVisible: false, rightOffset: 2, minBarSpacing: 0.05, fixLeftEdge: true,
-        fixRightEdge: true, tickMarkFormatter: tickFormatter(spansYears)
+        borderVisible: false, minBarSpacing: 0.05, fixLeftEdge: true,
+        fixRightEdge: true, tickMarkFormatter: tickFormatter(needYear)
       },
       crosshair: {
         vertLine: { color: th.meta, labelBackgroundColor: th.raised },
@@ -276,9 +287,11 @@
 
   // ---- protocol ---------------------------------------------------------------------------
   window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) { return; }  // only Streamlit, the parent frame
     var data = event.data;
     if (!data || data.type !== "streamlit:render") { return; }
     var spec = data.args && data.args.spec;
+    currentSig = (spec && spec.sig) || "";
     if (!spec) { fail("no chart data was sent."); return; }
     var text = JSON.stringify(spec);
     if (text === lastSpec && chart) { return; }
