@@ -79,8 +79,11 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
         if not empty:
             w.observations(monday_rows())
             w.observations(
-                [daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest")]
-            )
+                [daily("SPY", THU, 590.25, tier=1, source="alpaca", dataset="iex_latest"),
+                 # T59 review: the fetch behind the fallback correction below
+                 daily("SPY", THU, 590.10, tier=2, source="yahoo", dataset="iex_delayed",
+                       is_fallback=True, fetch_id="F6")]
+            )  # fmt: skip
             w.dq(MON, [("fresh_a", "pass", "treasury", None), ("fresh_b", "warn", "ecb", None)])
             w.dq(MON, [("range_spy", "fail", "alpaca", "SPY")], check_type="validity")
             w.dq(FRI, [("fresh_a", "pass", "treasury", None)])
@@ -116,6 +119,11 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
                 "field": "close", "interval": "1d", "as_of": et(FRI), "old_value": 598.0,
                 "new_value": 598.5, "old_fetch_id": "F3", "new_fetch_id": "F4",
                 "detected_at": et(MON, "06:31"), "run_id": "RUN1",
+            }, {
+                "instrument_id": "SPY", "source": "yahoo", "dataset": "iex_delayed",
+                "field": "close", "interval": "1d", "as_of": et(THU), "old_value": 590.05,
+                "new_value": 590.10, "old_fetch_id": "F5", "new_fetch_id": "F6",
+                "detected_at": et(MON, "06:32"), "run_id": "RUN1",
             }], lambda r: MON)  # fmt: skip
             w._append("quarantine", [{
                 "fetch_id": "F9", "run_id": "RUN1", "source": "yahoo", "dataset": "quote",
@@ -333,11 +341,15 @@ def markup(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown if "<style>" not in m.value)
 
 
-def blocks(path: Path) -> int:
-    """Content blocks of a page: the headline row, each top-level card, and the footer."""
-    src = path.read_text(encoding="utf-8")
-    cards = re.findall(r"^\s*with (?:left, |right, )?_kit\.card\(", src, flags=re.M)
-    return len(cards) + ("_kit.kpis(" in src) + ("_kit.page_footer(ctx" in src)
+def rendered_blocks(markup_text: str) -> int:
+    """Blocks the page rendered: the headline row (``db-kpis``), each card (its ``db-ct``
+    title; a card's tab notes are ``db-ct-note``), and the page footer (``db-pfoot``)."""
+    cards = len(re.findall(r'<div class="db-ct">', markup_text))
+    return (
+        cards
+        + markup_text.count('<div class="db-kpis">')
+        + markup_text.count('<div class="db-pfoot">')
+    )
 
 
 @pytest.mark.parametrize("page", list(PAGE_FILES))
@@ -351,7 +363,7 @@ def test_every_page_follows_the_card_template(run_page: RunPage, page: str) -> N
     footer = t.split('<div class="db-pfoot">', 1)[1]
     assert 'class="db-glyphs"' in footer  # the glyph legend on every page (P-022)
     assert "delayed" in footer
-    assert 4 <= blocks(PAGES / PAGE_FILES[page]) <= 6, page
+    assert 4 <= rendered_blocks(t) <= 6, (page, rendered_blocks(t))
 
 
 @pytest.mark.parametrize("page", list(PAGE_FILES))
@@ -396,7 +408,15 @@ def test_hosted_never_shows_tier1_on_any_page(run_page: RunPage, page: str) -> N
     legend = hosted.split('class="db-glyphs"', 1)[1].split("</div>", 1)[0]
     assert ">live<" not in legend
     assert ">live<" in local.split('class="db-glyphs"', 1)[1].split("</div>", 1)[0]
-    assert "live (tier 1)" not in hosted.split('<div class="db-pfoot">', 1)[1].split("<span>")[1]
+    # the footer's mode line names the tiers the page shows (review round 1, blocking 2)
+    mode_line = re.compile(r'<div class="db-pfoot"><span class="db-mode">([^<]*)</span>')
+    hosted_mode, local_mode = mode_line.search(hosted), mode_line.search(local)
+    assert hosted_mode is not None
+    assert local_mode is not None
+    assert hosted_mode.group(1).startswith("hosted mode · shows ")
+    assert "live (tier 1)" not in hosted_mode.group(1)
+    assert "delayed (tier 2)" in hosted_mode.group(1)
+    assert "live (tier 1)" in local_mode.group(1)
 
 
 @pytest.mark.parametrize("path", T59_FILES, ids=lambda p: p.name)
@@ -412,26 +432,54 @@ def test_every_store_cache_is_keyed_on_the_data_version(path: Path) -> None:
             continue
         assert "DATA_CACHE_TTL_SECONDS" in ttl, (name, ttl)
     if path.name == "4_Data_health.py":
-        assert [n for _, n, _ in found] == ["_dq"]
+        assert [n for _, n, _ in found] == ["_dq", "_fallback_fetches"]
         assert "open_connection" not in src  # the shared connection (T56)
 
 
-def test_corrected_values_carry_compact_provenance(run_page: RunPage) -> None:
-    from app.components.values import VISIBLE_FLAGS  # noqa: F401  (the words rule's home)
+def _visible(html: str) -> str:
+    html = re.sub(r'<span class="db-sr[^"]*"[^>]*>.*?</span>', "", html, flags=re.S)
+    html = re.sub(r'<span class="db-tip"[^>]*>.*?</span></span>', "</span>", html, flags=re.S)
+    return re.sub(r"<[^>]+>", " ", html)
 
-    local = markup(run_page("health", "local"))
-    hosted = markup(run_page("health", "hosted"))
-    rev = local.split("Instrument, field and source", 1)[1].split("</table>", 1)[0]
-    figs = re.findall(r'<span class="db-fig">.*?</span></span>', rev, flags=re.S)
-    assert len(figs) == 4  # was and now, for UST_10Y and SPY
-    for f in figs:
-        assert 'class="db-prov"' in f  # compact: the glyph with its tooltip and label
-        for part in ("db-src", "db-asof", "db-field"):
-            assert part in f
-    assert '<span class="db-val">4.39</span>' in rev
-    assert 'data-tier="1"' in rev  # SPY's tier-1 feed, local only
-    assert "598.5" not in hosted  # hosted withholds the row naming a tier-1 source
-    assert "4.39" in hosted
+
+def _correction_rows(markup_text: str) -> dict[str, str]:
+    """Corrections table rows keyed ``instrument · source``."""
+    table = markup_text.split("Instrument, field and source", 1)[1].split("</table>", 1)[0]
+    out = {}
+    for row in re.findall(r"<tr>.*?</tr>", table, flags=re.S):
+        m = re.search(r"<b>([^<]+)</b><span class='db-note'> · [^·]+ · ([^<]+)</span>", row)
+        assert m, row
+        out[f"{m.group(1)} · {m.group(2)}"] = row
+    return out
+
+
+def test_corrected_values_carry_compact_provenance(run_page: RunPage) -> None:
+    """Every corrected value is a compact figure with source, tier, as-of and field, and the
+    caveat words by the tear sheet's rule (T59 review round 1, blocking 1)."""
+    local = _correction_rows(markup(run_page("health", "local")))
+    hosted = _correction_rows(markup(run_page("health", "hosted")))
+    assert set(local) == {"UST_10Y · treasury", "SPY · alpaca", "SPY · yahoo"}
+    assert set(hosted) == {"UST_10Y · treasury", "SPY · yahoo"}  # tier-1 alpaca withheld
+    want = {
+        "UST_10Y · treasury": (),
+        "SPY · alpaca": ("proxy", "IEX"),  # iex_latest, tier 1 (local only)
+        "SPY · yahoo": ("proxy", "IEX", "fallback"),  # iex_delayed from a fallback fetch
+    }
+    for rows in (local, hosted):
+        for key, row in rows.items():
+            figs = re.findall(r"<td class='num'>(.*?)</td>", row, flags=re.S)
+            assert len(figs) == 2, key  # was and now, each cell one whole figure
+            for f in figs:
+                assert 'class="db-prov"' in f  # compact: glyph, tooltip and label
+                for part in ("db-src", "db-asof", "db-field"):
+                    assert part in f
+                label = re.search(r'aria-label="([^"]*)"', f).group(1)  # type: ignore[union-attr]
+                for word in ("proxy", "IEX", "fallback"):
+                    on = word in want[key]
+                    assert (re.search(rf"\b{word}\b", _visible(f)) is not None) == on, (key, word)
+                    assert (word in label) == on, (key, word, label)
+    assert '<span class="db-val">4.39</span>' in local["UST_10Y · treasury"]
+    assert 'data-tier="1"' in local["SPY · alpaca"]
 
 
 def test_crosscheck_gap_is_a_compact_figure(run_page: RunPage) -> None:

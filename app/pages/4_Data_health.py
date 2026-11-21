@@ -222,7 +222,37 @@ with _kit.card(
         )
 
 
-def _revised(r: pd.Series, which: str) -> str:
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _fallback_fetches(_config: Config, where: str, ids: tuple[str, ...], ver: str) -> set[str]:
+    """Which of the revisions' fetches stored their observations from a fallback source (the
+    revisions table does not carry ``is_fallback``; the observations behind it do)."""
+    if not ids:
+        return set()
+    marks = ", ".join("?" for _ in ids)
+    with data.shared_connection(_config) as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT fetch_id FROM obs_all WHERE is_fallback AND fetch_id IN ({marks})",  # noqa: S608 (placeholders only)
+            list(ids),
+        ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+PROXIES = frozenset(i.id for i in ctx.config.instruments if i.is_proxy)
+
+
+def caveats(r: pd.Series, fallback: set[str]) -> tuple[str, ...]:
+    """The words that stay visible beside a corrected value, by the same rule as the tear
+    sheet's corrections (``tearsheet.revisions_html``): a proxy instrument, an IEX dataset, a
+    fallback source (either version's fetch)."""
+    fetches = {str(r.get("old_fetch_id")), str(r.get("new_fetch_id"))}
+    return (
+        (("proxy",) if str(r["instrument_id"]) in PROXIES else ())
+        + (("IEX",) if str(r["dataset"]).startswith("iex") else ())
+        + (("fallback",) if fetches & fallback else ())
+    )
+
+
+def _revised(r: pd.Series, which: str, fallback: set[str]) -> str:
     """A revised value with its provenance; plain text when config lists no such feed."""
     v = r[f"{which}_value"]
     text = "n/a" if pd.isna(v) else f"{float(v):,.6g}"
@@ -234,16 +264,22 @@ def _revised(r: pd.Series, which: str) -> str:
         tier,
         _kit.et_text(r["as_of"]),
         f"{r['field']} as {'first published' if which == 'old' else 'revised'}",
+        flags=caveats(r, fallback),
     )
     return value_cell(text, p)
 
 
 def _corrections(rev: pd.DataFrame) -> str:
+    ids = sorted({str(i) for c in ("old_fetch_id", "new_fetch_id") for i in rev[c].dropna()})
+    fallback = _fallback_fetches(
+        ctx.config, _kit.where_key(ctx.config), tuple(ids), _kit.version(ctx.config)
+    )
     rows = "".join(
         f"<tr><td>{_kit.escape(_kit.et_text(r['detected_at']))}</td>"
         f"<td><b>{_kit.escape(str(r['instrument_id']))}</b><span class='db-note'> · "
         f"{_kit.escape(str(r['field']))} · {_kit.escape(str(r['source']))}</span></td>"
-        f"<td class='num'>{_revised(r, 'old')}</td><td class='num'>{_revised(r, 'new')}</td></tr>"
+        f"<td class='num'>{_revised(r, 'old', fallback)}</td>"
+        f"<td class='num'>{_revised(r, 'new', fallback)}</td></tr>"
         for _, r in rev.sort_values("detected_at", ascending=False).iterrows()
     )
     return _kit.scroll(

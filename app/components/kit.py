@@ -253,6 +253,8 @@ def feed_tier(
         for f in i.feeds
         if f.source == source and (dataset is None or f.dataset == dataset)
     ]
+    if not feeds and dataset is not None:  # a dataset config no longer lists: its source's
+        return feed_tier(config, source, instrument, None)  # most live tier for the instrument
     if not feeds and instrument is not None:  # e.g. a source checked against a proxy's feed
         return feed_tier(config, source, None, dataset)
     return min(feeds) if feeds else None
@@ -314,7 +316,8 @@ def serving_json(ctx: Ctx, name: str) -> dict[str, object]:
     return _serving_json(ctx.store, where_key(ctx.config), name, version(ctx.config))
 
 
-# table partitions are covered by data_version(), so the 15-minute TTL of a store cache
+# the 15-minute TTL of a store cache: data_version() does not list revisions or quarantine,
+# but they are written in the same runs as the tables it does list, so it changes with them
 @st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _recent_table(
     _store: StorageBackend, where: str, table: str, since: date, ver: str

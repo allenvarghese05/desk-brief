@@ -133,6 +133,7 @@ class Point:
     tier: int
     source: str
     field: str
+    proxy: bool = False  # the instrument is a proxy (e.g. SPY for the S&P 500, GLD for gold)
 
 
 def point(bars: pd.DataFrame, on_or_before: date | None = None) -> Point | None:
@@ -146,20 +147,46 @@ def point(bars: pd.DataFrame, on_or_before: date | None = None) -> Point | None:
         if sel.empty:  # the store starts after that date
             return None
     r = sel.iloc[-1]
-    p = Point(r["d"].date(), float(r["close"]), int(r["tier"]), str(r["source"]), str(r["field"]))
+    p = Point(
+        r["d"].date(), float(r["close"]), int(r["tier"]), str(r["source"]), str(r["field"]),
+        _is_proxy(bars),
+    )  # fmt: skip
     if on_or_before is not None and (on_or_before - p.d).days > MAX_GAP_DAYS:
         return None
     return p
 
 
+def mark_proxies(bars: Bars, proxies: frozenset[str]) -> dict[str, pd.DataFrame]:
+    """``bars`` with a ``proxy`` column on each proxy instrument's frame (copies; the cached
+    frames are not changed), so every figure built from them says "proxy" (P-022)."""
+    return {
+        iid: f.assign(proxy=True) if iid in proxies and not f.empty else f
+        for iid, f in bars.items()
+    }
+
+
+def _is_proxy(frame: pd.DataFrame) -> bool:
+    return "proxy" in frame and not frame.empty and bool(frame["proxy"].any())
+
+
+def _flags(proxy: bool) -> tuple[str, ...]:
+    return ("proxy",) if proxy else ()
+
+
 def _prov(p: Point, what: str | None = None) -> Provenance:
-    return Provenance(p.source, p.tier, f"{p.d:%d %b %Y}", what or _WHAT.get(p.field, p.field))
+    return Provenance(
+        p.source, p.tier, f"{p.d:%d %b %Y}", what or _WHAT.get(p.field, p.field),
+        flags=_flags(p.proxy),
+    )  # fmt: skip
 
 
 def _pair_prov(now: Point, then: Point, what: str) -> Provenance:
     """A change between two stored values: both sources, the more live tier."""
     src = now.source if now.source == then.source else f"{now.source} vs {then.source}"
-    return Provenance(src, min(now.tier, then.tier), f"{now.d:%d %b %Y}", what)
+    return Provenance(
+        src, min(now.tier, then.tier), f"{now.d:%d %b %Y}", what,
+        flags=_flags(now.proxy or then.proxy),
+    )  # fmt: skip
 
 
 def _frames_prov(
@@ -177,9 +204,12 @@ def _frames_prov(
     if len(tiers) > 1:
         what += "; mixed tiers: " + ", ".join(TIER_NAME[t] for t in sorted(tiers, reverse=True))
     span = f"{a:%d %b} – {b:%d %b %Y}"
+    flags = _flags(any(_is_proxy(f) for f in used))
     if end_only:
-        return Provenance(", ".join(sources), min(tiers), f"{b:%d %b}", f"{what}, {span}")
-    return Provenance(", ".join(sources), min(tiers), span, what)
+        return Provenance(
+            ", ".join(sources), min(tiers), f"{b:%d %b}", f"{what}, {span}", flags=flags
+        )
+    return Provenance(", ".join(sources), min(tiers), span, what, flags=flags)
 
 
 def _since(p: Point, q: Point, text: str, noun: str, unit: str) -> str:
@@ -272,6 +302,9 @@ MACRO_CSS = f"""
 .db-mx-name b {{ font-weight: 500; }}
 .db-mx-c .db-fig {{ text-align: right; }}
 .db-mx-heatc {{ display: block; border-radius: 4px; padding: 2px 4px; text-align: center; }}
+/* a proxy's caveat word sits on its own line inside the tinted cell, never spilling out */
+.db-mx-heatc .db-flags {{ display: block; line-height: 1.2; }}
+.db-mx-heatc .db-flag {{ margin-left: 0; }}
 div[class*="st-key-db-pick-mx"]:hover .db-mx-row {{ background: {theme.RAISED}; }}
 div[class*="st-key-db-mx-tbl-"] {{ gap: 0 !important; }}
 /* phone: only the heatmap scrolls sideways; the other tables fit, with each figure's as-of
@@ -375,6 +408,8 @@ def _long(df: pd.DataFrame, field: str | None = None) -> pd.DataFrame:
     out = df[["d", "close", "tier", "source", "field"]].rename(columns={"close": "value"}).copy()
     out["tier_text"] = out["tier"].map(tier_text)
     out["field_text"] = field or out["field"].map(lambda f: _WHAT.get(str(f), str(f)))
+    if _is_proxy(df):  # the chart tooltip names the caveat too
+        out["field_text"] = out["field_text"] + " (proxy)"
     return out
 
 
@@ -705,7 +740,7 @@ def gold_real(bars: Bars) -> tuple[str, pd.DataFrame, pd.DataFrame]:
     """(figures html, gold bars, real-yield bars) of the gold vs real-yield panel."""
     gid, gold = gold_series(bars)
     real = bars.get(REAL_ID, pd.DataFrame())
-    gname = "Gold futures" if gid == "GOLD_F" else "GLD (gold ETF)"
+    gname = "Gold futures" if gid == "GOLD_F" else "GLD (gold ETF, proxy)"
     items: list[tuple[str, str]] = []
     pg, pr = point(gold), point(real)
     if pg is not None:
@@ -770,7 +805,7 @@ def _corr_frames(bars: Bars) -> list[tuple[str, str, pd.DataFrame]]:
     for iid, name in CORR_SET:
         if iid == "GOLD":
             gid, frame = gold_series(bars)
-            out.append((gid, name, frame))
+            out.append((gid, name if gid == "GOLD_F" else "GLD", frame))  # GLD: say so
         else:
             out.append((iid, name, bars.get(iid, pd.DataFrame())))
     return out

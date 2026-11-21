@@ -2,9 +2,9 @@
 2s10s, gold against real yields, cross-asset correlations and CFTC positioning on one page.
 
 Five blocks under the page heading, whose control is the chart range (3M to All): the VIX term
-structure, the Treasury curve (its change by tenor and 2s10s, one tab each), gold against the
-real yield, the correlation heatmap and CFTC positioning (one tab per market); then the page
-footer with the display mode and the glyph legend.
+structure and the Treasury curve (its change by tenor and 2s10s, one tab each); gold against the
+real yield and CFTC positioning (one tab per market); the correlation heatmap at full width;
+then the page footer with the display mode and the glyph legend.
 
 Every figure goes through ``values.value_cell`` / ``change_cell`` (compact; see
 ``app/components/macro.py``). Time series are TradingView charts with the "Charts by
@@ -91,7 +91,10 @@ ctx = _kit.context("Macro", controls=True)
 _html(macro.MACRO_CSS)
 try:
     snap = data.load_snapshot(ctx.config, ctx.hidden)
-    bars = data.load_series(ctx.config, macro.ALL_IDS, ctx.hidden, macro.HISTORY_DAYS)
+    bars = macro.mark_proxies(
+        data.load_series(ctx.config, macro.ALL_IDS, ctx.hidden, macro.HISTORY_DAYS),
+        frozenset(i.id for i in ctx.config.instruments if i.is_proxy),
+    )
 except StorageError as exc:  # names missing variables, never their values
     st.error(f"Cannot read the data store: {exc}")
     st.stop()
@@ -147,8 +150,10 @@ with left, _kit.card("mx-gold", "Gold vs 10-year real yield"):
     if not _too_short("Gold and real-yield history", [gold, real], macro.MIN_DAILY, "days"):
         gname = str(gold["source"].iloc[-1])
         g, r = macro.window(gold, rng), macro.window(real, rng)
-        tvchart.chart([macro.tv_line(g, "Gold")], key="mx-gold-chart", height=PAIR_H,
-                      precision=2, label="Gold daily closes")  # fmt: skip
+        gid, _ = macro.gold_series(bars)
+        gold_name = "Gold" if gid == "GOLD_F" else "GLD (gold ETF, proxy)"
+        tvchart.chart([macro.tv_line(g, gold_name)], key="mx-gold-chart", height=PAIR_H,
+                      precision=2, label=f"{gold_name} daily closes")  # fmt: skip
         tvchart.chart(
             [macro.tv_line(r, "10Y real yield", field="real yield", color=theme.AMBER)],
             key="mx-real-chart", height=PAIR_H, precision=2,
@@ -156,16 +161,15 @@ with left, _kit.card("mx-gold", "Gold vs 10-year real yield"):
         )  # fmt: skip
         _kit.card_footer(
             macro.caption(
-                f"Daily gold closes (top, from {gname}) and the 10-year TIPS real yield "
-                "(bottom, percent): gold usually rises when the real yield falls",
+                f"Daily {gold_name if gid != 'GOLD_F' else 'gold'} closes (top, from "
+                f"{gname}) and the 10-year TIPS real yield (bottom, percent): gold usually rises "
+                "when the real yield falls",
                 [g, r],
             )
         )
-with right, _kit.card("mx-corr", f"Correlation · {macro.CORR_DAYS} days of daily changes"):
-    _panel("heat", macro.heatmap(bars))
-
-with _kit.card(
-    "mx-cot", "CFTC positioning · net non-commercial (speculative) futures, weekly"
+with (
+    right,
+    _kit.card("mx-cot", "CFTC positioning · net non-commercial (speculative) futures, weekly"),
 ):  # one tab per market: depth in tabs, not down the page
     for tab, (net_id, oi_id, market) in zip(
         st.tabs([m for _, _, m in macro.COT]), macro.COT, strict=True
@@ -187,6 +191,11 @@ with _kit.card(
                     [view],
                 )
             )
+
+# the heatmap needs about 690 px: a full-width card, so it never overflows a half-width one
+# (on a phone it scrolls sideways inside its block, macro.MACRO_CSS)
+with _kit.card("mx-corr", f"Correlation · {macro.CORR_DAYS} days of daily changes"):
+    _panel("heat", macro.heatmap(bars))
 
 _kit.page_footer(
     ctx,

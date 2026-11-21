@@ -599,3 +599,34 @@ def test_cftc_strip_shows_each_caveat_word_once(monkeypatch: pytest.MonkeyPatch)
     labels = re.findall(r'class="db-prov[^"]*"[^>]*aria-label="([^"]*)"', html)
     assert len(labels) == 3  # value, change and open interest each keep their glyph
     assert all("fallback" in label for label in labels)
+
+
+def test_proxy_instruments_say_proxy_and_gld_is_named(run_macro: RunMacro) -> None:
+    """Review round 1, minor 3: SPY (an ETF proxy) shows "proxy" beside its heatmap figures,
+    and when gold comes from GLD the row, the strip and the chart name GLD as a proxy."""
+    rows = [
+        {**r, "instrument_id": "GLD"} if r["instrument_id"] == "GOLD_F" else r
+        for r in macro_rows(120, 12)
+    ]
+    at = run_macro("local", rows=rows)
+    assert not at.exception
+    spy = row(at, "<b>SPY</b>")
+    assert spy.count('class="db-flag">proxy<') >= 5  # every correlation printed for SPY
+    labels = re.findall(r'class="db-prov[^"]*"[^>]*aria-label="([^"]*)"', spy)
+    assert labels
+    assert all("proxy" in label for label in labels)
+    gld = row(at, "<b>GLD</b>")  # not "Gold": the ETF stands in for it
+    assert 'class="db-flag">proxy<' in gld
+    text = page(at)
+    assert "GLD (gold ETF, proxy)" in text
+    assert "<b>Gold</b>" not in text
+    ten = row(at, "<b>10Y</b>")  # not a proxy: no word beside its own figures ...
+    cells = re.findall(
+        r'<span class="db-mx-heatc".*?</span></span>(?:<span class="db-flags">.*?</span></span>)?',
+        ten,
+        flags=re.S,
+    )
+    assert cells
+    plain_pairs = [c for c in cells if "SPY" not in c and "GLD" not in c]
+    assert plain_pairs
+    assert not any("db-flag" in c for c in plain_pairs)  # ... unless the pair has a proxy
