@@ -53,10 +53,11 @@ def test_provenance_requires_source_tier_asof_and_field(kwargs: dict[str, object
 
 
 def test_cells_show_label_tier_asof_source_and_escape_html() -> None:
-    html = value_cell("4.31%", GOOD)
+    html = value_cell("4.31%", GOOD, compact=False)  # T59: the full form is now opt-in
     for part in ("4.31%", "yield", "○", "official", "17 Nov", "treasury"):
         assert part in html
     evil = Provenance("<b>x</b>", 2, "10:27", "close")
+    assert "<b>" not in change_cell("+1.0%", evil, "<i>basis</i>", compact=False)
     assert "<b>" not in change_cell("+1.0%", evil, "<i>basis</i>")
     assert tier_glyph(1).count("●") == 1
 
@@ -297,8 +298,8 @@ def test_flag_words_stay_visible_beside_a_change() -> None:
     """A change printed on its own (biggest moves, the chart header) shows the caveat words."""
     p = Provenance("alpaca", 2, "10:27", "last", flags=("proxy", "IEX", "fallback"))
     for html in (
-        change_cell("+1.2%", p, "previous close", compact=True),
-        change_cell("+1.2%", p, "previous close"),
+        change_cell("+1.2%", p, "previous close"),  # compact, the default since T59
+        change_cell("+1.2%", p, "previous close", compact=False),
     ):
         shown = visible(html)
         for word in ("proxy", "IEX", "fallback"):

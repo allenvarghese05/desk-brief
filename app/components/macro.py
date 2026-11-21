@@ -7,13 +7,18 @@
 * CFTC net speculative positioning with its weekly date and week-on-week change.
 
 Provenance (spec 10.2, P-009, H9): every figure is printed through ``values.value_cell`` or
-``change_cell`` with its source, tier, date and what it is. Charts print no figures on the
-page: inline SVG curves are gridlines, lines and points only (T36's yield-curve rule) and
-Altair charts hide their value axis. An Altair hover tooltip does show a point's value, and
-always with the same provenance set as ``value_cell`` (as-of date, field, tier and source;
-``chart.prov_tips``). Each chart has a caption naming the series' sources, tiers and date span.
+``change_cell`` (compact, P-022) with its source, tier, date and what it is. Inline SVG curves
+are gridlines, lines and points only (T36's yield-curve rule). Time series are TradingView
+charts (T59, P-022) built by :func:`tv_line`: every point carries field, tier and source for
+the chart's tooltip, and each chart has the "Charts by TradingView" attribution and a caption
+naming the series' sources, tiers and date span. The correlation heatmap stays an HTML table.
 Bars come from :func:`app.components.data.load_series`, which never reads a hidden tier, so
 hosted mode stays tier-1 free.
+
+Navigation (T59): a table is one grid row per instrument (:class:`Table`), so the page can put
+each row under an in-session button that opens the instrument on Markets
+(``st.switch_page`` with ``query_params``); there is no ``<a target="_self">`` and no
+``title`` attribute anywhere in this module's markup.
 
 Short history: until the owner runs the two-year history load (T53), the store may hold only
 days or weeks. A line needs :data:`MIN_DAILY` daily points (:data:`MIN_WEEKLY` weekly ones);
@@ -26,15 +31,15 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from html import escape
 from itertools import pairwise
 
-import altair as alt
 import pandas as pd
 from app import theme
-from app.components.chart import prov_tips, tier_text
+from app.components import tvchart
+from app.components.chart import tier_text
 from app.components.data import CURVE_TENORS
 from app.components.panels import SHORT, provenance_of
 from app.components.values import (
@@ -59,6 +64,12 @@ CORR_DAYS = 90
 MAX_GAP_DAYS = 7
 #: calendar days of bars the page reads: the two-year history load (T53) plus a margin
 HISTORY_DAYS = 800
+#: the page's chart range control: calendar days drawn (None: everything stored)
+RANGES: dict[str, int | None] = {"3M": 92, "6M": 183, "1Y": 366, "2Y": 731, "All": None}
+DEFAULT_RANGE = "2Y"
+#: Markets keeps the selected instrument under this plain session-state key (``KEEP_ID`` in
+#: ``app/views/markets.py``), so a name opened from Macro is still selected after a later visit
+MARKETS_KEEP_ID = "db-keep-id"
 
 #: VIX term structure: (instrument, tenor label, calendar days)
 VIX_TERM = (("VIX9D", "9D", 9), ("VIX", "30D", 30), ("VIX3M", "3M", 91), ("VIX6M", "6M", 182))
@@ -122,6 +133,7 @@ class Point:
     tier: int
     source: str
     field: str
+    proxy: bool = False  # the instrument is a proxy (e.g. SPY for the S&P 500, GLD for gold)
 
 
 def point(bars: pd.DataFrame, on_or_before: date | None = None) -> Point | None:
@@ -135,20 +147,46 @@ def point(bars: pd.DataFrame, on_or_before: date | None = None) -> Point | None:
         if sel.empty:  # the store starts after that date
             return None
     r = sel.iloc[-1]
-    p = Point(r["d"].date(), float(r["close"]), int(r["tier"]), str(r["source"]), str(r["field"]))
+    p = Point(
+        r["d"].date(), float(r["close"]), int(r["tier"]), str(r["source"]), str(r["field"]),
+        _is_proxy(bars),
+    )  # fmt: skip
     if on_or_before is not None and (on_or_before - p.d).days > MAX_GAP_DAYS:
         return None
     return p
 
 
+def mark_proxies(bars: Bars, proxies: frozenset[str]) -> dict[str, pd.DataFrame]:
+    """``bars`` with a ``proxy`` column on each proxy instrument's frame (copies; the cached
+    frames are not changed), so every figure built from them says "proxy" (P-022)."""
+    return {
+        iid: f.assign(proxy=True) if iid in proxies and not f.empty else f
+        for iid, f in bars.items()
+    }
+
+
+def _is_proxy(frame: pd.DataFrame) -> bool:
+    return "proxy" in frame and not frame.empty and bool(frame["proxy"].any())
+
+
+def _flags(proxy: bool) -> tuple[str, ...]:
+    return ("proxy",) if proxy else ()
+
+
 def _prov(p: Point, what: str | None = None) -> Provenance:
-    return Provenance(p.source, p.tier, f"{p.d:%d %b %Y}", what or _WHAT.get(p.field, p.field))
+    return Provenance(
+        p.source, p.tier, f"{p.d:%d %b %Y}", what or _WHAT.get(p.field, p.field),
+        flags=_flags(p.proxy),
+    )  # fmt: skip
 
 
 def _pair_prov(now: Point, then: Point, what: str) -> Provenance:
     """A change between two stored values: both sources, the more live tier."""
     src = now.source if now.source == then.source else f"{now.source} vs {then.source}"
-    return Provenance(src, min(now.tier, then.tier), f"{now.d:%d %b %Y}", what)
+    return Provenance(
+        src, min(now.tier, then.tier), f"{now.d:%d %b %Y}", what,
+        flags=_flags(now.proxy or then.proxy),
+    )  # fmt: skip
 
 
 def _frames_prov(
@@ -166,25 +204,28 @@ def _frames_prov(
     if len(tiers) > 1:
         what += "; mixed tiers: " + ", ".join(TIER_NAME[t] for t in sorted(tiers, reverse=True))
     span = f"{a:%d %b} – {b:%d %b %Y}"
+    flags = _flags(any(_is_proxy(f) for f in used))
     if end_only:
-        return Provenance(", ".join(sources), min(tiers), f"{b:%d %b}", f"{what}, {span}")
-    return Provenance(", ".join(sources), min(tiers), span, what)
-
-
-def _td(html: str, style: str = "") -> str:
-    attr = f' style="{style}"' if style else ""
-    return f'<td class="num"{attr}>{html}</td>'
+        return Provenance(
+            ", ".join(sources), min(tiers), f"{b:%d %b}", f"{what}, {span}", flags=flags
+        )
+    return Provenance(", ".join(sources), min(tiers), span, what, flags=flags)
 
 
 def _since(p: Point, q: Point, text: str, noun: str, unit: str) -> str:
     """A compact change cell: ``text`` is ``p`` minus ``q``, measured in ``unit``."""
     basis = f"{noun} of {q.d:%d %b %Y}"
     prov = _pair_prov(p, q, f"change in {unit} since the {basis}")
-    return change_cell(text, prov, basis, compact=True)
+    return change_cell(text, prov, basis)
 
 
 def _gap(text: str, why: str) -> str:
-    return f'<span class="db-unavailable" title="{escape(why)}">{escape(text)}</span>'
+    """A missing figure: the short text on screen, the reason for screen readers (no
+    ``title`` attribute, P-022)."""
+    return (
+        f'<span class="db-unavailable">{escape(text)}'
+        f'<span class="db-sr"> ({escape(why)})</span></span>'
+    )
 
 
 def _need(label: str, days: int, bars: pd.DataFrame) -> str:
@@ -223,9 +264,74 @@ def caption(what: str, frames: Sequence[pd.DataFrame]) -> str:
     return f"{what} · {glyphs} · {sources} · {a.day} {a:%b %Y} to {b.day} {b:%b %Y}."
 
 
-def _link(iid: str, text: str) -> str:
+@dataclass(frozen=True)
+class Table:
+    """A table as grid rows, so each row can sit under its own in-session button.
+
+    ``head`` is the header row's html; each row is ``(instrument id, name, html)``, with an
+    empty id for a row that opens nothing (no data stored). ``cols`` is the number of figure
+    columns after the name, which sets the grid."""
+
+    cols: int
+    head: str
+    rows: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True)
+class Panel:
+    """A Macro block: html above the table (words, curve, legend), the table, html below it
+    (a figure strip or a note) and the chart caption."""
+
+    top: str
+    table: Table | None = None
+    bottom: str = ""
+    caption: str = ""
+
+
+#: the Macro page's own rules (grid rows under in-session buttons, T59); tokens from theme
+MACRO_CSS = f"""
+<style>
+.db-mx-grid {{ display: grid; align-items: center; gap: 8px;
+  grid-template-columns: minmax(96px, 1.3fr) repeat(var(--db-cols), minmax(58px, 1fr));
+  padding: 8px 6px; border-bottom: 1px solid {theme.DIVIDER}; font-size: 13px;
+  color: {theme.TEXT}; }}
+.db-mx-head {{ color: {theme.META}; font-size: {theme.SIZE_META}px; font-weight: 500;
+  padding-top: 14px; }}
+.db-mx-c {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+.db-mx-name {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.db-mx-name b {{ font-weight: 500; }}
+.db-mx-c .db-fig {{ text-align: right; }}
+.db-mx-heatc {{ display: block; border-radius: 4px; padding: 2px 4px; text-align: center; }}
+/* a proxy's caveat word sits on its own line inside the tinted cell, never spilling out */
+.db-mx-heatc .db-flags {{ display: block; line-height: 1.2; }}
+.db-mx-heatc .db-flag {{ margin-left: 0; }}
+div[class*="st-key-db-pick-mx"]:hover .db-mx-row {{ background: {theme.RAISED}; }}
+div[class*="st-key-db-mx-tbl-"] {{ gap: 0 !important; }}
+/* phone: only the heatmap scrolls sideways; the other tables fit, with each figure's as-of
+   in its tooltip (P-022 no longer asks for the full line under every figure) */
+.st-key-db-mx-tbl-heat .db-mx-grid {{ grid-template-columns: minmax(84px, 1.2fr)
+  repeat(var(--db-cols), minmax(58px, 1fr)); }}
+@media (max-width: 900px) {{
+  .st-key-db-mx-tbl-heat {{ overflow-x: auto; }}
+  .st-key-db-mx-tbl-heat > div {{ min-width: 720px; }}
+}}
+@media (max-width: 640px) {{
+  .db-mx-grid {{ grid-template-columns: minmax(64px, 1.1fr) repeat(var(--db-cols),
+    minmax(0, 1fr)); gap: 4px; font-size: 12px; padding: 8px 0; }}
+  .db-mx-c .db-asofline {{ display: none; }}
+  .db-mx-c .db-prov {{ margin-left: 2px; }}
+}}
+</style>
+"""
+
+
+def grid_row(name: str, cells: Sequence[str], cols: int, *, head: bool = False) -> str:
+    """One row: the name, then ``cols`` cells (a cell may be ``""``)."""
+    tag = "db-mx-head" if head else "db-mx-row"
+    body = "".join(f'<span class="db-mx-c">{c}</span>' for c in cells)
     return (
-        f'<a href="./?id={escape(iid)}" target="_self" title="open in Markets">{escape(text)}</a>'
+        f'<div class="db-mx-grid {tag}" style="--db-cols:{cols}">'
+        f'<span class="db-mx-name">{name}</span>{body}</div>'
     )
 
 
@@ -296,122 +402,33 @@ def legend(items: Sequence[tuple[str, str]], tiers: set[int], sources: set[str])
     )
 
 
-def _style(chart: alt.TopLevelMixin) -> alt.TopLevelMixin:
-    styled: alt.TopLevelMixin = (
-        chart.configure(background="transparent", font=theme.SANS)
-        .configure_view(stroke=None)
-        .configure_axis(
-            labelColor=theme.MUTED,
-            labelFontSize=11,
-            gridColor=theme.GRID,
-            domainColor=theme.RULE,
-            tickColor=theme.RULE,
-            labelPadding=6,
-        )
-        .configure_legend(labelColor=theme.MUTED, titleColor=theme.MUTED, orient="top-left")
-    )
-    return styled
-
-
-def _x() -> alt.X:
-    return alt.X(
-        "d:T",
-        title=None,
-        axis=alt.Axis(format="%b %y", labelAngle=0, grid=False, labelOverlap="greedy", tickCount=6),
-    )
-
-
-#: value axes carry gridlines only: every figure is in the strip under the chart
-_Y_AXIS = alt.Axis(labels=False, ticks=False, title=None, domain=False)
-
-
-def _tips(fmt: str) -> list[alt.Tooltip]:
-    """Hover text: the value with as-of date, field, tier and source (P-009)."""
-    return prov_tips(
-        alt.Tooltip("series:N", title="Series"), alt.Tooltip("value:Q", title="Value", format=fmt)
-    )
-
-
-def _long(df: pd.DataFrame, name: str, field: str | None = None) -> pd.DataFrame:
-    """Chart rows with the provenance columns :func:`chart.prov_tips` needs; ``field`` names
-    a derived series (the 2s10s spread), else each row's stored field is used."""
+def _long(df: pd.DataFrame, field: str | None = None) -> pd.DataFrame:
+    """Chart rows with the provenance columns a TradingView point needs; ``field`` names a
+    derived series (the 2s10s spread), else each row's stored field is used."""
     out = df[["d", "close", "tier", "source", "field"]].rename(columns={"close": "value"}).copy()
-    out["series"] = name
     out["tier_text"] = out["tier"].map(tier_text)
     out["field_text"] = field or out["field"].map(lambda f: _WHAT.get(str(f), str(f)))
+    if _is_proxy(df):  # the chart tooltip names the caveat too
+        out["field_text"] = out["field_text"] + " (proxy)"
     return out
 
 
-def line_chart(df: pd.DataFrame, name: str, *, zero: bool = False, fmt: str = ",.2f",
-               height: int = 220) -> alt.TopLevelMixin:  # fmt: skip
-    """One history line; ``zero`` adds the zero rule (an inverted curve sits below it)."""
-    long = _long(df, name)
-    base = alt.Chart(long).encode(x=_x())
-    layers: list[alt.TopLevelMixin] = []
-    if zero:
-        layers.append(
-            alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(color=theme.MUTED).encode(y="y:Q")
-        )
-    layers.append(
-        base.mark_line(color=theme.ACCENT, strokeWidth=1.6).encode(
-            y=alt.Y("value:Q", scale=alt.Scale(zero=False), axis=_Y_AXIS), tooltip=_tips(fmt)
-        )
-    )
-    return _style(alt.layer(*layers).properties(height=height))
+def window(df: pd.DataFrame, rng: str) -> pd.DataFrame:
+    """The bars inside the page's chosen range, counted back from the last bar."""
+    days = RANGES.get(rng)
+    if df.empty or days is None:
+        return df
+    out: pd.DataFrame = df[df["d"] > df["d"].max() - timedelta(days=days)]
+    return out
 
 
-def pair_chart(a: pd.DataFrame, name_a: str, b: pd.DataFrame, name_b: str, *,
-               reverse_b: bool = False, height: int = 220) -> alt.TopLevelMixin:  # fmt: skip
-    """Two series on their own scales (``reverse_b`` flips the second: up = lower)."""
-    la, lb = _long(a, name_a), _long(b, name_b)
-    colour = alt.Color(
-        "series:N",
-        scale=alt.Scale(domain=[name_a, name_b], range=[theme.WARN, theme.ACCENT]),
-        legend=alt.Legend(title=None),
-    )
-    first = (
-        alt.Chart(la)
-        .mark_line(strokeWidth=1.6)
-        .encode(
-            x=_x(),
-            y=alt.Y("value:Q", scale=alt.Scale(zero=False), axis=_Y_AXIS),
-            color=colour,
-            tooltip=_tips(",.2f"),
-        )
-    )
-    second = (
-        alt.Chart(lb)
-        .mark_line(strokeWidth=1.6, strokeDash=[5, 3])
-        .encode(
-            x=_x(),
-            y=alt.Y("value:Q", scale=alt.Scale(zero=False, reverse=reverse_b), axis=_Y_AXIS),
-            color=colour,
-            tooltip=_tips(".2f"),
-        )
-    )
-    return _style(alt.layer(first, second).resolve_scale(y="independent").properties(height=height))
-
-
-def bar_chart(df: pd.DataFrame, name: str, height: int = 150) -> alt.TopLevelMixin:
-    """Weekly net positions as bars around zero (long above, short below)."""
-    long = _long(df, name)
-    long["side"] = long["value"].map(lambda v: "net long" if v >= 0 else "net short")
-    bars = (
-        alt.Chart(long)
-        .mark_bar(size=max(2.0, min(10.0, 420 / max(len(long), 1) * 0.6)))
-        .encode(
-            x=_x(),
-            y=alt.Y("value:Q", axis=_Y_AXIS),
-            color=alt.Color(
-                "side:N",
-                scale=alt.Scale(domain=["net long", "net short"], range=[theme.UP, theme.DOWN]),
-                legend=None,
-            ),
-            tooltip=_tips(",.0f"),
-        )
-    )
-    zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(color=theme.MUTED).encode(y="y:Q")
-    return _style(alt.layer(zero, bars).properties(height=height))
+def tv_line(
+    df: pd.DataFrame, name: str, *, field: str | None = None, color: str | None = None
+) -> tvchart.Series:
+    """One TradingView line: every point names its field, tier and source (P-009)."""
+    pts, meta = tvchart.points(_long(df, field), "line", meta=("field_text", "tier_text", "source"))
+    return {"kind": "line", "name": name, "color": color or theme.ACCENT, "points": pts,
+            "meta": meta}  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -449,16 +466,15 @@ def _shape_word(levels: Mapping[str, float]) -> str | None:
     return "contango" if three > spot else "backwardation" if three < spot else "flat"
 
 
-def vix_term(bars: Bars) -> tuple[str, str]:
-    """(html, caption) of the VIX term-structure panel."""
+def vix_term(bars: Bars) -> Panel:
+    """The VIX term-structure panel."""
     frames = [bars.get(i, pd.DataFrame()) for i, _, _ in VIX_TERM]
     now = {i: point(f) for (i, _, _), f in zip(VIX_TERM, frames, strict=True)}
     have = [i for i, _, _ in VIX_TERM if now[i] is not None]
     if len(have) < 2:
-        return (
+        return Panel(
             '<div class="db-empty">Not enough Cboe volatility indices stored yet to draw the '
-            "term structure (needs at least two of VIX9D, VIX, VIX3M, VIX6M).</div>",
-            "",
+            "term structure (needs at least two of VIX9D, VIX, VIX3M, VIX6M).</div>"
         )
     anchor = max(now[i].d for i in have)  # type: ignore[union-attr]
     then = {
@@ -482,25 +498,22 @@ def vix_term(bars: Bars) -> tuple[str, str]:
         lines,
         "VIX term structure now and earlier; each tenor's level is in the table below",
     )
-    rows = ""
+    rows: list[tuple[str, str, str]] = []
     for (iid, tenor, _), frame in zip(VIX_TERM, frames, strict=True):
         p = now[iid]
+        name = f"{tenor} · {SHORT.get(iid, iid)}"
         if p is None:
-            gap = _gap("no data", "nothing stored")
-            rows += f'<tr><td>{tenor}</td><td colspan="3" class="num">{gap}</td></tr>'
+            rows.append(("", name, grid_row(escape(name), [_gap("no data", "nothing stored")], 3)))
             continue
-        cells = _td(value_cell(f"{p.value:.2f}", _prov(p), compact=True))
+        cells = [value_cell(f"{p.value:.2f}", _prov(p))]
         for lab, days in VIX_BACK:
             q = then[(lab, iid)]
             if q is None:
-                cells += _td(_need(lab, days, frame))
+                cells.append(_need(lab, days, frame))
                 continue
-            cells += _td(_since(p, q, signed(p.value - q.value, 2), "close", "points"))
-        rows += f"<tr><td>{_link(iid, f'{tenor} · {SHORT.get(iid, iid)}')}</td>{cells}</tr>"
-    table = (
-        '<table class="db-table db-mx-table"><tr><th>Tenor</th><th class="num">Level</th>'
-        f'<th class="num">vs 1W</th><th class="num">vs 1M</th></tr>{rows}</table>'
-    )
+            cells.append(_since(p, q, signed(p.value - q.value, 2), "close", "points"))
+        rows.append((iid, name, grid_row(escape(name), cells, 3)))
+    table = Table(3, grid_row("Tenor", ["Level", "vs 1W", "vs 1M"], 3, head=True), tuple(rows))
     levels = {i: now[i].value for i in have}  # type: ignore[union-attr]
     words = vix_shape(levels)
     was = _shape_word({i: then[("1M", i)].value for i in have if then[("1M", i)]})  # type: ignore[union-attr]
@@ -517,18 +530,18 @@ def vix_term(bars: Bars) -> tuple[str, str]:
             f"{min(a.d, b.d):%d %b %Y}",
             what,
         )
-        extra = strip([("3M − 30D", value_cell(signed(a.value - b.value, 2), p, compact=True))])
+        extra = strip([("3M − 30D", value_cell(signed(a.value - b.value, 2), p))])
     used = [f for f in frames if not f.empty]
     leg_html = legend(
         leg, {int(t) for f in used for t in f["tier"]}, {str(s) for f in used for s in f["source"]}
     )
-    html = f'<div class="db-mx-words">{escape(words)}</div>{svg}{leg_html}{table}{extra}'
     cap = caption(
         f"Cboe implied volatility indices (daily closes), latest {anchor:%d %b %Y} against "
         "about 1 week and 1 month earlier",
         used,
     )
-    return html, cap
+    return Panel(f'<div class="db-mx-words">{escape(words)}</div>{svg}{leg_html}', table, extra,
+                 cap)  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -548,13 +561,12 @@ def curve_words(chg: Mapping[str, float]) -> str:
     return f"Over the month the curve {joined}" + (f" ({lead})." if lead else ".")
 
 
-def curve_change(bars: Bars) -> tuple[str, str]:
-    """(html, caption) of the curve-change panel: curve now, 1M and 1Y ago, and bp by tenor."""
+def curve_change(bars: Bars) -> Panel:
+    """The curve-change panel: curve now, 1M and 1Y ago, and bp by tenor."""
     tenors = [t for t in CURVE_TENORS if not bars.get(t, pd.DataFrame()).empty]
     if len(tenors) < 2:
-        return (
-            '<div class="db-empty">Not enough Treasury yields stored yet to draw the curve.</div>',
-            "",
+        return Panel(
+            '<div class="db-empty">Not enough Treasury yields stored yet to draw the curve.</div>'
         )
     now = {t: point(bars[t]) for t in tenors}
     anchor = max(p.d for p in now.values() if p)
@@ -579,41 +591,36 @@ def curve_change(bars: Bars) -> tuple[str, str]:
         lines,
         "Treasury yield curve now and earlier; each tenor's yield and change is in the table",
     )
-    rows = ""
+    rows: list[tuple[str, str, str]] = []
     month: dict[str, float] = {}
     for t in tenors:
         p = now[t]
         assert p is not None  # tenors hold only non-empty frames
-        cells = _td(value_cell(f"{p.value:.2f}%", _prov(p, "yield"), compact=True))
+        cells = [value_cell(f"{p.value:.2f}%", _prov(p, "yield"))]
         for lab, days in CURVE_BACK:
             q = then[(lab, t)]
             if q is None:
-                cells += _td(_need(lab, days, bars[t]))
+                cells.append(_need(lab, days, bars[t]))
                 continue
             bp = (p.value - q.value) * 100
             if lab == "1M":
                 month[t] = bp
-            cells += _td(_since(p, q, signed(bp, 0, "bp"), "yield", "basis points"))
-        rows += f"<tr><td>{_link(t, SHORT[t])}</td>{cells}</tr>"
-    table = (
-        '<table class="db-table db-mx-table"><tr><th>Tenor</th><th class="num">Yield</th>'
-        + "".join(f'<th class="num">vs {lab}</th>' for lab, _ in CURVE_BACK)
-        + f"</tr>{rows}</table>"
-    )
+            cells.append(_since(p, q, signed(bp, 0, "bp"), "yield", "basis points"))
+        rows.append((t, SHORT[t], grid_row(escape(SHORT[t]), cells, 4)))
+    head = grid_row("Tenor", ["Yield", *(f"vs {lab}" for lab, _ in CURVE_BACK)], 4, head=True)
+    table = Table(4, head, tuple(rows))
     used = [bars[t] for t in tenors]
     leg_html = legend(
         leg, {int(x) for f in used for x in f["tier"]}, {str(s) for f in used for s in f["source"]}
     )
     words = curve_words(month)
-    html = (f'<div class="db-mx-words">{escape(words)}</div>' if words else "") + (
-        f"{svg}{leg_html}{table}"
-    )
+    top = (f'<div class="db-mx-words">{escape(words)}</div>' if words else "") + svg + leg_html
     cap = caption(
         f"Treasury yields by tenor (daily), latest {anchor:%d %b %Y} against about 1 week, "
         "1 month and 1 year earlier; changes in basis points",
         used,
     )
-    return html, cap
+    return Panel(top, table, "", cap)
 
 
 def spread_2s10s(bars: Bars) -> pd.DataFrame:
@@ -648,7 +655,7 @@ def spread_figures(spread: pd.DataFrame) -> str:
     if p is None:
         return '<div class="db-empty">No common 2Y and 10Y dates stored yet.</div>'
     what = "10Y minus 2Y yield, bp"
-    items = [("2s10s", value_cell(signed(p.value, 0, "bp"), _prov(p, what), compact=True))]
+    items = [("2s10s", value_cell(signed(p.value, 0, "bp"), _prov(p, what)))]
     for lab, days in (("vs 1M", 30), ("vs 1Y", 365)):
         q = point(spread, p.d - timedelta(days=days))
         if q is None:
@@ -733,11 +740,11 @@ def gold_real(bars: Bars) -> tuple[str, pd.DataFrame, pd.DataFrame]:
     """(figures html, gold bars, real-yield bars) of the gold vs real-yield panel."""
     gid, gold = gold_series(bars)
     real = bars.get(REAL_ID, pd.DataFrame())
-    gname = "Gold futures" if gid == "GOLD_F" else "GLD (gold ETF)"
+    gname = "Gold futures" if gid == "GOLD_F" else "GLD (gold ETF, proxy)"
     items: list[tuple[str, str]] = []
     pg, pr = point(gold), point(real)
     if pg is not None:
-        items.append((gname, value_cell(f"{pg.value:,.2f}", _prov(pg), compact=True)))
+        items.append((gname, value_cell(f"{pg.value:,.2f}", _prov(pg))))
         q = point(gold, pg.d - timedelta(days=30))
         items.append(
             (
@@ -750,9 +757,7 @@ def gold_real(bars: Bars) -> tuple[str, pd.DataFrame, pd.DataFrame]:
     else:
         items.append(("Gold", _gap("no data", "no gold futures or GLD bars stored")))
     if pr is not None:
-        items.append(
-            ("10Y real", value_cell(f"{pr.value:.2f}%", _prov(pr, "real yield"), compact=True))
-        )
+        items.append(("10Y real", value_cell(f"{pr.value:.2f}%", _prov(pr, "real yield"))))
         q = point(real, pr.d - timedelta(days=30))
         items.append(
             (
@@ -777,7 +782,7 @@ def gold_real(bars: Bars) -> tuple[str, pd.DataFrame, pd.DataFrame]:
                 [_window(gold, since), _window(real, since)],
                 f"correlation of daily gold returns and real-yield changes, {n} common days",
             )
-            items.append(("90d corr", value_cell(signed(corr, 2), p, compact=True)))
+            items.append(("90d corr", value_cell(signed(corr, 2), p)))
             words = (
                 "Moving in the usual opposite direction: gold rises when real yields fall."
                 if corr <= -0.3
@@ -800,7 +805,7 @@ def _corr_frames(bars: Bars) -> list[tuple[str, str, pd.DataFrame]]:
     for iid, name in CORR_SET:
         if iid == "GOLD":
             gid, frame = gold_series(bars)
-            out.append((gid, name, frame))
+            out.append((gid, name if gid == "GOLD_F" else "GLD", frame))  # GLD: say so
         else:
             out.append((iid, name, bars.get(iid, pd.DataFrame())))
     return out
@@ -813,33 +818,37 @@ def _corr_bg(c: float) -> str:
     return f"background: rgba({rgb},{min(abs(c), 1.0) * 0.55:.2f})"
 
 
-def heatmap(bars: Bars) -> tuple[str, str]:
-    """(html, caption) of the 90-day correlation matrix of daily changes."""
+def heatmap(bars: Bars) -> Panel:
+    """The 90-day correlation matrix of daily changes, one grid row per instrument."""
     series = [(i, n, f) for i, n, f in _corr_frames(bars) if not f.empty]
     if len(series) < 2:
-        return '<div class="db-empty">Not enough daily series stored for correlations.</div>', ""
+        return Panel('<div class="db-empty">Not enough daily series stored for correlations.</div>')
     end = max(f["d"].max() for _, _, f in series).date()
     since = end - timedelta(days=CORR_DAYS)
     most = max(len(changes(_window(f, since))) for _, _, f in series)
     if most < MIN_CORR:
-        return short_history(
-            f"{CORR_DAYS}-day correlations need {MIN_CORR} common daily changes per pair",
-            [_window(f, since) for _, _, f in series],
-            MIN_CORR + 1,
-            "days",
-            "heatmap",
-        ), ""
-    head = "".join(f'<th class="num">{_link(i, n)}</th>' for i, n, _ in series)
-    rows = ""
+        return Panel(
+            short_history(
+                f"{CORR_DAYS}-day correlations need {MIN_CORR} common daily changes per pair",
+                [_window(f, since) for _, _, f in series],
+                MIN_CORR + 1,
+                "days",
+                "heatmap",
+            )
+        )
+    cols = len(series)
+    rows: list[tuple[str, str, str]] = []
     for ia, na, fa in series:
-        cells = ""
+        cells = []
         for ib, _nb, fb in series:
             if ia == ib:
-                cells += '<td class="num db-mx-diag" title="same series">·</td>'
+                cells.append(
+                    '<span class="db-mx-diag">·<span class="db-sr"> same series</span></span>'
+                )
                 continue
             c = correlation(fa, fb, since)
             if c is None:
-                cells += _td(_gap("—", f"needs {MIN_CORR} common daily changes"))
+                cells.append(_gap("—", f"needs {MIN_CORR} common daily changes"))
                 continue
             corr, n = c
             p = _frames_prov(
@@ -847,20 +856,23 @@ def heatmap(bars: Bars) -> tuple[str, str]:
                 f"{CORR_DAYS}-day correlation of daily changes, {na} vs {_nb}, {n} common days",
                 end_only=True,
             )
-            cells += _td(value_cell(signed(corr, 2), p, compact=True), _corr_bg(corr))
-        rows += f"<tr><th>{_link(ia, na)}</th>{cells}</tr>"
-    html = (
-        '<div class="db-mx-scroll"><table class="db-table db-mx-heat">'
-        f"<tr><th></th>{head}</tr>{rows}</table></div>"
+            cells.append(
+                f'<span class="db-mx-heatc" style="{_corr_bg(corr)}">'
+                # every cell ends on the same day: the as-of is in its tooltip and the caption
+                f"{value_cell(signed(corr, 2), p, show_as_of=False)}</span>"
+            )
+        rows.append((ia, na, grid_row(f"<b>{escape(na)}</b>", cells, cols)))
+    head = grid_row("", [escape(n) for _, n, _ in series], cols, head=True)
+    note = (
         '<div class="db-note">Daily changes: returns for prices and indices, basis-point moves '
-        "for yields and spreads. Blue: move together; red: move opposite. Hover a cell for its "
-        "sources and days.</div>"
+        "for yields and spreads. Blue: move together; red: move opposite. Hover, focus or tap a "
+        "cell's glyph for its sources and days; pick a row to open that instrument.</div>"
     )
     cap = caption(
         f"{CORR_DAYS}-day correlations of daily changes",
         [_window(f, since) for _, _, f in series],
     )
-    return html, cap
+    return Panel("", Table(cols, head, tuple(rows)), note, cap)
 
 
 # ---------------------------------------------------------------------------
@@ -882,14 +894,28 @@ def cot_card(net: Row | None, oi: Row | None, market: str, now: datetime) -> str
             f'<div class="db-note">Positions as of {d:%a %d %b %Y} '
             "(CFTC Commitments of Traders, released the Friday after)</div>"
         )
-    chg = (
-        change_cell(net.change_text, p, net.basis, compact=True)
-        if net.change is not None and net.change_text not in ("", "n/a")
-        else _gap("no earlier week", "only one weekly report stored")
-    )
-    items = [("Net position", value_cell(net.value_text, p, compact=True)), ("Week on week", chg)]
-    if oi is not None and oi.available:
-        items.append(
-            ("Open interest", value_cell(oi.value_text, provenance_of(oi, now), compact=True))
+    # the caveat words (proxy, IEX, fallback) are printed once per strip, beside the first
+    # figure that carries them (T59: they showed twice); a later figure keeps them in its
+    # field text, so its tooltip and accessible label still say so
+    shown: set[str] = set()
+
+    def once(prov: Provenance) -> Provenance:
+        again = [f for f in prov.flags if f in shown]
+        shown.update(prov.flags)
+        if not again:
+            return prov
+        rest = tuple(f for f in prov.flags if f not in again)
+        return replace(prov, flags=rest, field=f"{prov.field} ({', '.join(again)}, as shown)")
+
+    items = [("Net position", value_cell(net.value_text, once(p)))]
+    items.append(
+        (
+            "Week on week",
+            change_cell(net.change_text, once(p), net.basis)
+            if net.change is not None and net.change_text not in ("", "n/a")
+            else _gap("no earlier week", "only one weekly report stored"),
         )
+    )
+    if oi is not None and oi.available:
+        items.append(("Open interest", value_cell(oi.value_text, once(provenance_of(oi, now)))))
     return head + week + strip(items)

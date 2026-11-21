@@ -8,7 +8,6 @@ random walks ending Friday 13 Nov, weekly CFTC rows as of Tuesdays). No R2, no n
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from collections.abc import Callable
@@ -84,7 +83,31 @@ def page(at: AppTest) -> str:
 
 
 def charts(at: AppTest) -> int:
-    return len(at.get("vega_lite_chart"))
+    """TradingView charts drawn: each ``tvchart.chart`` ends with its attribution line."""
+    from app.components import tvchart
+
+    return page(at).count(tvchart.attribution_html())
+
+
+def row(at: AppTest, name: str) -> str:
+    """The markup of one table row (T59: a grid row under its in-session button)."""
+    for m in at.markdown:
+        if m.value.startswith('<div class="db-pickbody">') and (
+            f'<span class="db-mx-name">{name}</span>' in m.value
+        ):
+            return str(m.value)
+    raise AssertionError(f"no row named {name!r}")
+
+
+def mx(where: str, iid: str) -> str:
+    """The key of a Macro row's in-session button (built, so it never reads like a secret)."""
+    return "-".join(("mx", where, iid))
+
+
+def tvchart_href() -> str:
+    from app.components import tvchart
+
+    return f'href="{tvchart.ATTRIBUTION_URL}"'
 
 
 def plain(text: str) -> str:
@@ -108,9 +131,12 @@ def test_every_view_is_present(run_macro: RunMacro) -> None:
     assert '<span class="db-brand">Macro</span>' in text  # T57: the router's nav marks the page
     assert re.search(r"Contango|Backwardation|Flat", text)  # the VIX shape in words
     assert "Over the month the curve" in text
-    assert 'href="./?id=VIX3M"' in text  # names open the instrument on Markets
-    assert 'href="./?id=UST_10Y"' in text
-    assert charts(at) == 5  # 2s10s, gold vs real yield, three CFTC histories
+    # T59: names open the instrument on Markets through in-session buttons, never a link
+    assert at.button(key=mx("vix", "VIX3M")).label == "Open 3M · VIX3M on Markets"
+    assert at.button(key=mx("curve", "UST_10Y")).label == "Open 10Y on Markets"
+    assert at.button(key=mx("heat", "UST_10Y"))
+    assert "href=" not in text.replace(tvchart_href(), "")
+    assert charts(at) == 6  # 2s10s, gold, real yield, three CFTC histories
 
 
 def test_every_figure_goes_through_value_cell(run_macro: RunMacro) -> None:
@@ -144,7 +170,7 @@ def test_chart_captions_state_sources_tiers_and_span(run_macro: RunMacro) -> Non
     joined = "\n".join(caps)
     for source in ("cboe", "treasury", "fred", "yahoo", "cftc"):
         assert source in joined
-    assert "drawn inverted" in joined  # the real yield axis is flipped and says so
+    assert "TIPS real yield (bottom, percent)" in joined  # two charts, each on its own scale
 
 
 def test_cftc_shows_weekly_date_and_week_on_week_contracts(run_macro: RunMacro) -> None:
@@ -175,10 +201,12 @@ def _tier1_only_spy() -> list[dict[str, Any]]:
 
 
 def test_local_mode_shows_tier1_spy_in_the_heatmap(run_macro: RunMacro) -> None:
-    text = page(run_macro("local", rows=_tier1_only_spy()))
+    at = run_macro("local", rows=_tier1_only_spy())
+    text = page(at)
     assert "alpaca" in text
     assert 'data-tier="1"' in text
-    assert '<th class="num"><a href="./?id=SPY"' in text
+    assert 'data-tier="1"' in row(at, "<b>SPY</b>")
+    assert at.button(key=mx("heat", "SPY"))
 
 
 @pytest.mark.parametrize("mode", ["hosted", None, "LIVE!"])
@@ -188,9 +216,8 @@ def test_hosted_and_unknown_modes_never_read_tier1(run_macro: RunMacro, mode: st
     text = page(at)
     assert "alpaca" not in text
     assert 'data-tier="1"' not in text
-    spy = re.search(r'<tr><th><a href="./\?id=SPY".*?</tr>', text, flags=re.S)
-    assert spy is not None  # SPY's one tier-3 close (brief_synth) keeps its row ...
-    assert "db-fig" not in spy.group(0)  # ... but one day gives no correlation to print
+    spy = row(at, "<b>SPY</b>")  # SPY's one tier-3 close (brief_synth) keeps its row ...
+    assert "db-fig" not in spy  # ... but one day gives no correlation to print
 
 
 def test_build_series_hosted_vs_local_on_the_same_store(tmp_path: Path) -> None:
@@ -335,72 +362,70 @@ def test_macro_rows_cover_the_page() -> None:
 
 
 # ---------------------------------------------------------------------------
-# review round 1: tooltip provenance, aligned changes, two-year window, fixed values
+# review round 1: chart provenance, aligned changes, two-year window, fixed values
 # ---------------------------------------------------------------------------
 
-_PROV_TITLES = {"As of", "Field", "Tier", "Source"}
 
+def test_every_chart_point_carries_provenance(
+    run_macro: RunMacro, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T59: every TradingView series names field, tier and source for each point (its
+    tooltip shows them with the as-of date), and hosted mode draws no tier-1 point."""
+    from app.components import tvchart
 
-def _tooltips(node: Any) -> list[list[dict[str, Any]]]:
-    """Every tooltip list anywhere in a Vega-Lite spec."""
-    found: list[list[dict[str, Any]]] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "tooltip" and isinstance(value, list):
-                found.append(value)
-            else:
-                found += _tooltips(value)
-    elif isinstance(node, list):
-        for item in node:
-            found += _tooltips(item)
-    return found
+    real = tvchart.chart
+    drawn: list[list[Any]] = []
 
+    def spy(series: Any, **kw: Any) -> bool:
+        drawn.append(list(series))
+        return real(series, **kw)
 
-def _assert_tooltips_carry_provenance(spec: dict[str, Any]) -> int:
-    """Each tooltip that shows a number also names its as-of date, field, tier and source."""
-    shown = 0
-    for tips in _tooltips(spec):
-        if not any(t.get("type") == "quantitative" for t in tips):
-            continue
-        shown += 1
-        titles = {t.get("title") for t in tips}
-        assert titles >= _PROV_TITLES, titles
-    return shown
-
-
-def test_every_page_tooltip_with_a_value_carries_provenance(run_macro: RunMacro) -> None:
+    monkeypatch.setattr(tvchart, "chart", spy)
     at = run_macro("local")
-    specs = [json.loads(el.proto.spec) for el in at.get("vega_lite_chart")]
-    assert len(specs) == 5
-    assert sum(_assert_tooltips_carry_provenance(s) for s in specs) >= 6
+    assert not at.exception
+    assert len(drawn) == 6
+    for series in drawn:
+        for s in series:
+            assert s["points"]
+            assert all(0 <= p["m"] < len(s["meta"]) for p in s["points"])
+            for field, tier, source in s["meta"]:
+                assert field
+                assert source
+                assert re.match(r"[●◐○] (live|delayed|official)$", tier)
 
 
-def test_home_chart_tooltips_carry_provenance() -> None:
-    """T36's price, volume and compare charts follow the same rule."""
+def test_tv_line_names_derived_fields() -> None:
+    from app.components import macro
+
+    spread = macro.spread_2s10s(
+        {"UST_10Y": _bars([4.3, 4.4], source="treasury", field="yield", unit="pct"),
+         "UST_2Y": _bars([4.0, 4.1], source="treasury", field="yield", unit="pct")}
+    )  # fmt: skip
+    s = macro.tv_line(spread, "2s10s", field="10Y minus 2Y yield spread, bp")
+    assert s["meta"] == [["10Y minus 2Y yield spread, bp", "○ official", "treasury"]]
+    assert [p["value"] for p in s["points"]] == pytest.approx([30.0, 30.0])
+
+
+def test_chart_range_windows_every_series() -> None:
+    from app.components import macro
+
+    bars = _bars([1.0] * 400)
+    assert len(macro.window(bars, "3M")) == 92
+    assert len(macro.window(bars, "All")) == 400
+    assert macro.DEFAULT_RANGE in macro.RANGES
+
+
+def test_rebased_compare_rows_keep_provenance_columns() -> None:
+    """The compare payload of Markets (T36 rule, now TradingView) keeps its provenance."""
     from app.components import chart
 
     days = pd.to_datetime([date(2026, 11, 2) + timedelta(days=i) for i in range(5)])
     bars = pd.DataFrame(
-        {
-            "d": days,
-            "open": [10.0, 11, 12, 13, 14],
-            "high": [11.0, 12, 13, 14, 15],
-            "low": [9.0, 10, 11, 12, 13],
-            "close": [10.5, 11.5, 12.5, 13.5, 14.5],
-            "volume": [100.0, 200, 300, 400, 500],
-            "tier": 2,
-            "source": "yahoo",
-            "field": "close",
-            "unit": "USD",
-            "interval": "1d",
-        }
-    )
-    for style in (chart.CANDLES, chart.LINE):
-        spec = chart.price_chart(bars, style=style, last=14.6).to_dict()
-        assert _assert_tooltips_carry_provenance(spec) == 2  # price and volume
+        {"d": days, "close": [10.5, 11.5, 12.5, 13.5, 14.5], "tier": 2, "source": "yahoo",
+         "field": "close"}
+    )  # fmt: skip
     long = chart.rebased(bars, bars.assign(source="stooq", tier=3), "A", "B")
     assert {"field_text", "tier_text", "source"} <= set(long.columns)
-    assert _assert_tooltips_carry_provenance(chart.compare_chart(long, "A", "B").to_dict()) == 1
     assert "rebased to 100 on 02 Nov 2026" in long["field_text"].iloc[0]
 
 
@@ -465,14 +490,12 @@ def _fixed_rows() -> list[dict[str, Any]]:
 
 
 def test_fixed_values_on_the_page(run_macro: RunMacro) -> None:
-    text = page(run_macro("hosted", rows=_fixed_rows(), base=False))
-    row10 = re.search(r'<tr><td><a href="./\?id=UST_10Y".*?</tr>', text, flags=re.S)
-    row2 = re.search(r'<tr><td><a href="./\?id=UST_2Y".*?</tr>', text, flags=re.S)
-    assert row10 is not None
-    assert row2 is not None
-    assert '<span class="db-val db-up">+5bp</span>' in row10.group(0)  # vs 1W: 5 days x 1bp
-    assert '<span class="db-val db-up">+22bp</span>' in row10.group(0)  # vs 1M: 22 days
-    assert '<span class="db-val db-flat">0bp</span>' in row2.group(0)
+    at = run_macro("hosted", rows=_fixed_rows(), base=False)
+    text = page(at)
+    row10, row2 = row(at, "10Y"), row(at, "2Y")
+    assert '<span class="db-val db-up">+5bp</span>' in row10  # vs 1W: 5 days x 1bp
+    assert '<span class="db-val db-up">+22bp</span>' in row10  # vs 1M: 22 days
+    assert '<span class="db-val db-flat">0bp</span>' in row2
     gold = next(c for c in FIG.findall(text) if "since the close of 14 Oct 2026" in c)
     assert '<span class="db-val db-up">+5.0%</span>' in gold
     cells = FIG.findall(text)
@@ -480,3 +503,130 @@ def test_fixed_values_on_the_page(run_macro: RunMacro) -> None:
     assert '<span class="db-val">+1.00</span>' in spy_qqq
     spy_hy = next(c for c in cells if "SPY vs HY OAS" in c)
     assert re.search(r'<span class="db-val">−0\.9\d|<span class="db-val">−1\.00', spy_hy)
+
+
+# ---------------------------------------------------------------------------
+# T59: in-session navigation, caveat words once, no full-reload links
+# ---------------------------------------------------------------------------
+
+
+def _qp(at: AppTest, key: str) -> str:
+    value = at.query_params[key]
+    return value[0] if isinstance(value, list) else value
+
+
+def _chart_name(at: AppTest) -> str:
+    m = re.search(r'<span class="db-ch-name">([^<]*)</span>', page(at))
+    assert m is not None
+    return m.group(1)
+
+
+def test_a_name_opens_the_instrument_on_markets_in_session(
+    run_home: Callable[..., AppTest],
+) -> None:
+    """Carry-over 1: no ``<a target="_self">``; a click selects the instrument on Markets in
+    the same session, and Markets' kept selection brings it back after another page."""
+    at = run_home("hosted", rows=monday_rows() + macro_rows(60, 12))
+    at.session_state["probe"] = "still here"  # gone if the click started a new session
+    at.switch_page("pages/2_Macro.py").run()
+    assert not at.exception
+    assert 'target="_self"' not in page(at)
+    at.button(key=mx("curve", "UST_2Y")).click().run()
+    assert not at.exception
+    assert _qp(at, "id") == "UST_2Y"
+    assert _chart_name(at) == "2Y"
+    assert at.session_state["probe"] == "still here"
+    assert at.session_state["db-keep-id"] == "UST_2Y"
+    at.switch_page("pages/2_Macro.py").run()  # Markets, then Macro, then Markets again
+    at.switch_page("Home.py").run()  # AppTest names the default page by the router
+    assert not at.exception
+    assert _chart_name(at) == "2Y"
+
+
+def test_macro_uses_markets_keep_key() -> None:
+    from app.components import macro
+
+    src = (REPO / "app" / "views" / "markets.py").read_text(encoding="utf-8")
+    assert f'KEEP_ID, KEEP_RNG, KEEP_STYLE = "{macro.MARKETS_KEEP_ID}"' in src
+    macro_src = (REPO / "app" / "pages" / "2_Macro.py").read_text(encoding="utf-8")
+    assert "st.switch_page(Home.pages()[0]" in macro_src  # the router's Markets page object
+
+
+def test_chart_range_is_kept_across_a_visit(run_home: Callable[..., AppTest]) -> None:
+    at = run_home("hosted", rows=monday_rows() + macro_rows(60, 12))
+    at.switch_page("pages/2_Macro.py").run()
+    at.segmented_control(key="mx-rng").set_value("3M").run()
+    at.switch_page("Home.py").run()  # AppTest names the default page by the router
+    at.switch_page("pages/2_Macro.py").run()
+    assert not at.exception
+    assert at.segmented_control(key="mx-rng").value == "3M"
+
+
+def _cot_row(iid: str, flags: tuple[str, ...]) -> Any:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    now = datetime(2026, 11, 10, 20, tzinfo=UTC)
+    quals = tuple(f"{f}: synthetic" for f in flags if f != "proxy")
+    return SimpleNamespace(
+        instrument_id=iid, tier=3, as_of_text="10 Nov", available=True,
+        is_proxy="proxy" in flags, qualifiers=quals, value_text="240,000 contracts",
+        change_text="+12,000 contracts", basis="previous weekly value",
+        change=SimpleNamespace(last=SimpleNamespace(source="cftc", as_of=now, field="close",
+                                                    dataset="cot")),
+    )  # fmt: skip
+
+
+def _visible(html: str) -> str:
+    html = re.sub(r'<span class="db-sr[^"]*"[^>]*>.*?</span>', "", html, flags=re.S)
+    html = re.sub(r'<span class="db-tip"[^>]*>.*?</span></span>', "</span>", html, flags=re.S)
+    return re.sub(r"<[^>]+>", " ", html)
+
+
+def test_cftc_strip_shows_each_caveat_word_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Carry-over 2: the strip printed its caveat words beside the value and the change. Each
+    word is now visible once, and the later figures still name it in their accessible label."""
+    from datetime import UTC, datetime
+
+    from app.components import macro, panels
+
+    monkeypatch.setattr(panels, "field_label", lambda last: "net speculative position")
+    net = _cot_row("COT_GC_NET", ("fallback",))
+    oi = _cot_row("COT_GC_OI", ("fallback",))
+    html = macro.cot_card(net, oi, "Gold (COMEX)", datetime(2026, 11, 16, 12, tzinfo=UTC))
+    shown = _visible(html)
+    assert len(re.findall(r"\bfallback\b", shown)) == 1
+    labels = re.findall(r'class="db-prov[^"]*"[^>]*aria-label="([^"]*)"', html)
+    assert len(labels) == 3  # value, change and open interest each keep their glyph
+    assert all("fallback" in label for label in labels)
+
+
+def test_proxy_instruments_say_proxy_and_gld_is_named(run_macro: RunMacro) -> None:
+    """Review round 1, minor 3: SPY (an ETF proxy) shows "proxy" beside its heatmap figures,
+    and when gold comes from GLD the row, the strip and the chart name GLD as a proxy."""
+    rows = [
+        {**r, "instrument_id": "GLD"} if r["instrument_id"] == "GOLD_F" else r
+        for r in macro_rows(120, 12)
+    ]
+    at = run_macro("local", rows=rows)
+    assert not at.exception
+    spy = row(at, "<b>SPY</b>")
+    assert spy.count('class="db-flag">proxy<') >= 5  # every correlation printed for SPY
+    labels = re.findall(r'class="db-prov[^"]*"[^>]*aria-label="([^"]*)"', spy)
+    assert labels
+    assert all("proxy" in label for label in labels)
+    gld = row(at, "<b>GLD</b>")  # not "Gold": the ETF stands in for it
+    assert 'class="db-flag">proxy<' in gld
+    text = page(at)
+    assert "GLD (gold ETF, proxy)" in text
+    assert "<b>Gold</b>" not in text
+    ten = row(at, "<b>10Y</b>")  # not a proxy: no word beside its own figures ...
+    cells = re.findall(
+        r'<span class="db-mx-heatc".*?</span></span>(?:<span class="db-flags">.*?</span></span>)?',
+        ten,
+        flags=re.S,
+    )
+    assert cells
+    plain_pairs = [c for c in cells if "SPY" not in c and "GLD" not in c]
+    assert plain_pairs
+    assert not any("db-flag" in c for c in plain_pairs)  # ... unless the pair has a proxy

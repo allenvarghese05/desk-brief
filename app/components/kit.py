@@ -9,7 +9,13 @@ Lives in ``app/components`` (not ``app/pages``) so Streamlit does not list it as
 * hosted rule: :func:`exposed_sources` have a feed in a hidden tier; rows that may carry their
   values are dropped and counted (:func:`keep_rows`), never shown.
 * compact provenance helpers (P-022): :func:`glyph_legend` and the :func:`details` dialog.
+* the page and card template (T59, P-022): :func:`context` with ``controls=True`` puts the
+  page title on the left and a controls row on the right; :func:`card` draws a block the same
+  way (title left, controls right, content, an optional footer); :func:`page_footer` ends the
+  page with the display mode and the glyph legend. Depth goes in tabs, not down the page.
 * every cache is keyed on ``data.data_version()`` (T57), so a store change is seen at once.
+  The serving-file caches also keep a 60 s TTL (``data.CACHE_TTL_SECONDS``): the serving files
+  are not part of the data version, so a longer TTL would show them stale (T59 ruling).
 * small inline-SVG charts (dataviz skill: thin marks, one axis, direct labels, a table view next
   to every chart, secondary encoding by dash and marker as well as colour).
 """
@@ -20,7 +26,9 @@ import io
 import json
 import os
 import sys
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -82,6 +90,25 @@ PAGE_CSS = f"""
 .db-page-kicker {{ margin: 1.2rem 0 .35rem 0; font-size: .74rem; }}
 .db-xname {{ font-weight: 600; }}
 .db-id {{ color: {theme.MUTED}; font-size: .72rem; font-family: {theme.MONO}; }}
+/* ---- the page and card template (T59, P-022): title left, controls right, content, footer;
+   cards separate by shade, never a border, and a card inside a card draws no second box ---- */
+.st-key-db-head {{ align-items: center; }}
+.st-key-db-head [data-testid="stHorizontalBlock"] {{ align-items: center; }}
+div[class*="st-key-db-card-"] {{ background: {theme.PANEL}; border-radius: {theme.RADIUS}px;
+  padding: {theme.PAD}px; gap: 12px; }}
+div[class*="st-key-db-card-"] div[class*="st-key-db-card-"] {{ background: transparent;
+  padding: 0; }}
+div[class*="st-key-db-ctl-"] {{ justify-content: flex-end; gap: 8px; flex-wrap: wrap; }}
+.db-ct {{ color: {theme.META}; font-size: 11.5px; font-weight: 500; letter-spacing: .04em;
+  text-transform: uppercase; }}
+.db-ct-note {{ color: {theme.META}; font-size: {theme.SIZE_META}px; margin-top: 2px; }}
+.db-pfoot {{ margin-top: {theme.GAP}px; color: {theme.META}; font-size: {theme.SIZE_META}px;
+  display: flex; gap: 8px 16px; flex-wrap: wrap; align-items: baseline; }}
+.db-pfoot .db-glyphs {{ gap: 12px; }}
+.db-kpis {{ margin: 0; }}
+/* a wide table scrolls inside its card on a phone (only there: scrolling clips tooltips) */
+@media (max-width: 640px) {{ .db-scroll {{ overflow-x: auto; }}
+  .db-scroll > table {{ min-width: 560px; }} }}
 </style>
 """
 
@@ -93,6 +120,9 @@ class Ctx:
     hidden: frozenset[int]
     store: StorageBackend
     now: datetime
+    #: the right-hand side of the page heading, for the page's controls (``context(...,
+    #: controls=True)``); ``None`` on a page without page-level controls
+    controls: object = field(default=None, compare=False, repr=False)
 
     @property
     def today(self) -> date:
@@ -111,8 +141,12 @@ def _config(path: str) -> Config:
     return load_config(path)
 
 
-def context(title: str) -> Ctx:
-    """Common page start: set up the page, read mode and store, or stop with a message."""
+def context(title: str, *, controls: bool = False) -> Ctx:
+    """Common page start: set up the page, read mode and store, or stop with a message.
+
+    ``controls=True`` (T59) draws the heading as the page template's first row: the title on
+    the left and an empty controls row on the right, returned as ``Ctx.controls`` for the page
+    to fill. Without it the heading is exactly the T57 one."""
     st.set_page_config(
         page_title=f"{title} · Desk Brief", layout="wide", initial_sidebar_state="collapsed"
     )
@@ -127,13 +161,72 @@ def context(title: str) -> Ctx:
         st.error(f"Cannot read the data store: {exc}")
         st.stop()
     # the page list is st.navigation's top bar (app/Home.py); this is the page's own heading
-    st.markdown(
+    heading = (
         f'<div class="db-top"><span class="db-brand">{escape(title)}</span>'
         f'<span class="db-when">Desk Brief · {escape(mode)} mode</span></div>'
-        '<hr class="db-rule">',
+    )
+    right = None
+    if controls:
+        with st.container(key="db-head"):
+            left, side = st.columns([1, 1], vertical_alignment="center")
+            left.markdown(heading, unsafe_allow_html=True)
+            with side:
+                right = st.container(
+                    horizontal=True, horizontal_alignment="right", key="db-ctl-page"
+                )
+        st.markdown('<hr class="db-rule">', unsafe_allow_html=True)
+    else:
+        st.markdown(heading + '<hr class="db-rule">', unsafe_allow_html=True)
+    hidden = data.hidden_tiers(mode, config)
+    return Ctx(config, mode, hidden, store, data.current_time(), right)
+
+
+@contextmanager
+def card(
+    key: str, title: str, note: str = "", *, controls: bool = False
+) -> Iterator[object | None]:
+    """One block of the page template (T59, P-022): a card with its title on the left and,
+    with ``controls=True``, a controls row on the right (yielded for the caller to fill; else
+    ``None``), then the content the ``with`` body draws, then an optional footer
+    (:func:`card_footer`). Cards are told apart by shade only; depth goes in ``st.tabs``."""
+    head = f'<div class="db-ct">{escape(title)}</div>' + (
+        f'<div class="db-ct-note">{escape(note)}</div>' if note else ""
+    )
+    with st.container(key=f"db-card-{key}"):
+        right = None
+        if controls:
+            left, side = st.columns([3, 2], vertical_alignment="center")
+            left.markdown(head, unsafe_allow_html=True)
+            with side:
+                right = st.container(
+                    horizontal=True, horizontal_alignment="right", key=f"db-ctl-{key}"
+                )
+        else:
+            st.markdown(head, unsafe_allow_html=True)
+        yield right
+
+
+def scroll(table_html: str) -> str:
+    """A wide HTML table that scrolls sideways inside its card on a phone."""
+    return f'<div class="db-scroll">{table_html}</div>'
+
+
+def card_footer(text: str) -> None:
+    """The quiet last line of a card: what is drawn, sources, tiers and span."""
+    if text:
+        st.caption(text)
+
+
+def page_footer(ctx: Ctx, *notes: str) -> None:
+    """The page template's last row: display mode, any notes (withheld rows), and what the tier
+    glyphs mean (P-022: a visible glyph legend on each page; hosted never offers "live")."""
+    shown = ", ".join(f"{TIER_NAME[t]} (tier {t})" for t in (1, 2, 3) if t not in ctx.hidden)
+    extra = "".join(f"<span>{escape(n)}</span>" for n in notes if n)
+    st.markdown(
+        f'<div class="db-pfoot"><span class="db-mode">{escape(ctx.mode)} mode · shows '
+        f"{escape(shown)}</span>{extra}{glyph_legend(ctx.hidden)}</div>",
         unsafe_allow_html=True,
     )
-    return Ctx(config, mode, data.hidden_tiers(mode, config), store, data.current_time())
 
 
 def where_key(ctx_config: Config) -> str:
@@ -147,6 +240,26 @@ def exposed_sources(config: Config, hidden: frozenset[int]) -> frozenset[str]:
     return frozenset(f.source for i in config.instruments for f in i.feeds if f.tier in hidden)
 
 
+def feed_tier(
+    config: Config, source: str, instrument: str | None = None, dataset: str | None = None
+) -> int | None:
+    """The most live tier ``source`` serves (for ``instrument``, and ``dataset`` when given),
+    from config; ``None`` when config lists no such feed. Used for the provenance of figures
+    on the system pages (a revised value, a cross-check gap), never to invent one."""
+    feeds = [
+        f.tier
+        for i in config.instruments
+        if instrument is None or i.id == instrument
+        for f in i.feeds
+        if f.source == source and (dataset is None or f.dataset == dataset)
+    ]
+    if not feeds and dataset is not None:  # a dataset config no longer lists: its source's
+        return feed_tier(config, source, instrument, None)  # most live tier for the instrument
+    if not feeds and instrument is not None:  # e.g. a source checked against a proxy's feed
+        return feed_tier(config, source, None, dataset)
+    return min(feeds) if feeds else None
+
+
 def keep_rows(df: pd.DataFrame, cols: tuple[str, ...], exposed: frozenset[str]) -> pd.DataFrame:
     """``df`` without rows whose ``cols`` name an exposed source."""
     if df.empty or not exposed:
@@ -158,8 +271,8 @@ def keep_rows(df: pd.DataFrame, cols: tuple[str, ...], exposed: frozenset[str]) 
 
 
 # ---------------------------------------------------------------------------
-# reading: keyed on the data version, and at most 60 s old for the serving files, which the
-# version does not cover (T56). The leading-underscore arguments are not hashed.
+# reading: keyed on the data version; the serving files, which the version does not cover
+# (T56), are also at most 60 s old. The leading-underscore arguments are not hashed.
 # ---------------------------------------------------------------------------
 
 
@@ -176,6 +289,7 @@ def version(config: Config) -> str:
         return ""
 
 
+# 60 s, not 900 s: serving files are not covered by data_version() (T59 ruling)
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
 def _serving_frame(_store: StorageBackend, where: str, name: str, ver: str) -> pd.DataFrame:
     try:
@@ -189,6 +303,7 @@ def serving_frame(ctx: Ctx, name: str) -> pd.DataFrame:
     return _serving_frame(ctx.store, where_key(ctx.config), name, version(ctx.config))
 
 
+# 60 s, not 900 s: serving files are not covered by data_version() (T59 ruling)
 @st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
 def _serving_json(_store: StorageBackend, where: str, name: str, ver: str) -> dict[str, object]:
     try:
@@ -201,7 +316,9 @@ def serving_json(ctx: Ctx, name: str) -> dict[str, object]:
     return _serving_json(ctx.store, where_key(ctx.config), name, version(ctx.config))
 
 
-@st.cache_data(ttl=data.CACHE_TTL_SECONDS, show_spinner=False)
+# the 15-minute TTL of a store cache: data_version() does not list revisions or quarantine,
+# but they are written in the same runs as the tables it does list, so it changes with them
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _recent_table(
     _store: StorageBackend, where: str, table: str, since: date, ver: str
 ) -> pd.DataFrame:

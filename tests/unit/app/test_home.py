@@ -364,8 +364,10 @@ def test_candles_need_a_consistent_open_high_low() -> None:
     assert chart.candle_ok(bad).tolist() == [True, True, False]
     bare = good.assign(open=float("nan"), high=float("nan"), low=float("nan"))
     assert not chart.has_ohlc(bare)  # close only: a line, never a made-up candle
-    spec = chart.price_chart(bare, style=chart.CANDLES, last=4.1).to_dict()
-    assert "vconcat" in spec or "layer" in spec
+    # T59 retired the Altair price_chart and compare_chart: no page drew them any more
+    assert not hasattr(chart, "price_chart")
+    assert not hasattr(chart, "compare_chart")
+    assert chart.tv_series(bare, style=chart.CANDLES)[0]["kind"] == "line"
     assert len(chart.window(good, "1M")) == 3
 
 
@@ -789,6 +791,13 @@ def _caveat_rows() -> list:  # type: ignore[type-arg]
     return [*monday_rows(), tick("SPY", et(MON, "06:59"), 599.10, **SPY_IEX_FALLBACK)]
 
 
+def _row_source(row: str) -> str:
+    """The source a verdict row names: ``<span>{glyph} {source} · {tier}``."""
+    m = re.match(r'<div class="db-src-row"><span>\S+ ([^ <]+) · ', row)
+    assert m, row
+    return m.group(1)
+
+
 def _aria(html: str) -> list[str]:
     return re.findall(r'class="db-prov"[^>]*aria-label="([^"]*)"', html)
 
@@ -820,10 +829,17 @@ def test_every_verdict_row_keeps_its_caveat_words(run_home: Run, mode: str) -> N
         assert re.search(r"\bproxy\b", visible(r)), r  # SPY is an ETF proxy: every row
         (label,) = _aria(r)
         assert "proxy" in label
-    iex = [r for r in rows if "iex" in r.lower() and ("yahoo" in r or "alpaca" in r)]
-    assert iex
-    for r in iex:
-        assert re.search(r"\bIEX\b", visible(r))
+    # T59: the IEX rows are picked by the feed behind them (the fixture's two IEX datasets),
+    # not by whether "IEX" already appears in the markup, which would let a row that lost its
+    # word go unchecked
+    iex_feeds = {"alpaca": "iex_latest", SPY_IEX_FALLBACK["source"]: SPY_IEX_FALLBACK["dataset"]}
+    by_source = {_row_source(r): r for r in rows}
+    want = {"yahoo"} if mode == "hosted" else {"alpaca", "yahoo"}  # hosted never shows tier 1
+    assert {s for s in by_source if s in iex_feeds} == want
+    for source in want:
+        r = by_source[source]
+        assert re.search(r"\bIEX\b", visible(r)), (source, iex_feeds[source], r)
+        assert "IEX" in _aria(r)[0]
     fallback = [r for r in rows if "yahoo" in r]
     for r in fallback:
         assert re.search(r"\bfallback\b", visible(r))
