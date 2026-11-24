@@ -1003,7 +1003,11 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - `app/views/markets.py`;
   - `app/components/{kit.py,values.py,panels.py,tearsheet.py,instrument.py}`;
   - `app/components/data.py`, `build_snapshot` and its helpers only;
-  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,test_data_layer.py,conftest.py}`;
+  - `app/components/tvchart.py`, only to move the attribution;
+  - `src/deskbrief/query.py`, `overnight_changes`, `_price_change` and the health reads only;
+  - `src/deskbrief/report/model.py`, a keyword-only argument of `BriefModel.from_store` only;
+  - `tests/unit/test_query.py` and `tests/unit/report/test_model.py`;
+  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,test_data_layer.py,test_tvchart.py,conftest.py}`;
   - `docs/specs/2026-11-15-desk-brief-design.md` §10.2 and §10.3 only.
 - Deliverables:
   - **Theme (shared by every page).** It follows P-023:
@@ -1018,20 +1022,21 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     - in `.streamlit/config.toml`, `secondaryBackgroundColor` and `baseRadius` set so native widgets match.
 
     After T60, the only panel styles left are in `macro.MACRO_CSS` and CSS the page files inject, which belong to T60B.
-  - **Flat-CSS checker.** `tests/unit/app/conftest.py` gains a helper that parses a CSS string and fails on a block container (as P-023 defines it) that has any of:
+  - **Flat-CSS checker.** `tests/unit/app/conftest.py` gains a helper that parses a CSS string. It is default-deny: it fails on any rule, whatever its selector, that sets any of:
     - a non-transparent background;
     - a border other than one hairline top or bottom rule;
     - a non-zero radius;
     - a shadow.
 
-    The helper's explicit selector allowlist holds P-023's exempt elements.
+    The one exception is a selector on an explicit allowlist, which holds P-023's exempt elements.
+  - **Native chrome.** The theme includes global flat overrides for Streamlit's expander and tab panel, with no background, border, radius or shadow. `config.toml` cannot set those alone.
   - **Home layout,** as in P-023 and the fixture:
     - **Top bar,** then the one-line market strip, with the basis said once.
     - **The hero.** The figure is 40–44 px. The pill holds the 1D change and its basis. Below it come:
       - the provenance line;
       - range and Line/Candles controls, with Compare and CSV in "More";
       - the tvchart;
-      - the 1W–1Y horizon row with "Charts by TradingView";
+      - the 1W–1Y horizon row, with "Charts by TradingView" at its right. `tvchart` exposes the attribution so the page can place it there. It shows only when the TradingView chart drew, as now.
       - "Do the sources agree?" and "Risk and range" side by side, as flat rows.
     - **The watchlist** sits on the right:
       - It is about 340–360 px wide at 1500 px, full length, with no inner scroll.
@@ -1043,14 +1048,19 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     1. The verdict section no longer overflows its column. The Lineage and Macro links no longer overlap the 52-week labels at any of the four widths.
     2. Watchlist hover content is never clipped. It is not inside a scroll area, and it renders where neither a column nor an iframe can clip it. It has no `title` attribute.
     3. Watchlist names never break one letter per line at any width, including about 800 px. They truncate with an ellipsis only after the short id.
-    4. On weekends and holidays, the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
-    5. The run status on weekends shows the latest run and its check counts, not "No checks yet". "No checks yet" appears only when no run has been stored.
+    4. On a day that isn't an XNYS session (a weekend or holiday), the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
+       - **Cause:** `query.overnight_changes` takes the price baseline from `prev_business_day(report_date)`. On a Saturday that is Friday, the same day as the last close, so `_price_change` returns "no move yet".
+       - **Fix:** when `report_date` is not an XNYS session, the move day is the last session S. A `1d` close dated S is compared with the close of the business day before S. The basis label names S's weekday.
+       - Official-family changes, such as Treasury yields, are unchanged: they already compare the last official value with the one before.
+       - On session days nothing changes, including before the morning run, when "no move yet" stays. So the morning email is unchanged.
+       - `BriefModel.from_store` keeps `(et_date(now), now)`, so no value from after `now` is read.
+    5. On a day without a run, the run status shows the latest run, not "No checks yet".
+       - **The latest run** is the run with the greatest `target_date` on or before `et_date(now)` that has check rows evaluated at or before `now`.
+       - `BriefModel.from_store` gains a keyword-only `health_date=None`. `health_summary` and `instrument_flags` read `health_date` when it is given. `None` keeps today's behaviour for every existing caller, and the dashboard passes the latest run's date.
+       - The status names that run's day (for example "Last run Fri 07:00 · 14 checks ok").
+       - "No checks yet" stays only when no such run exists. A run whose checks were all skipped says so with its day, as `_health` reports it.
 
-    **The likely cause of 4 and 5:** `data.build_snapshot` builds `BriefModel.from_store` for `et_date(now)`, and on a day with no run there are no session changes and no health. The fix is in `data.py`:
-    - The report date is today's ET date when a run is stored for it. Otherwise it is the date of the latest stored run.
-    - The point-in-time `now` is unchanged, so no value from after `now` is read.
-
-    No file under `src/` and no contract file changes. If the implementer finds the cause is elsewhere, they stop and ask the planner before changing anything outside Owns.
+    No contract file changes. If the cause of 4 or 5 turns out to be elsewhere, the implementer stops and asks the planner before changing anything outside Owns.
     6. **The verdict** (`instrument.verdict` and `_gap_text`):
        - Within `AGREE_BP`: "Agree", tone ok, with the gap. If the values are more than `LIKE_FOR_LIKE_S` apart in time, a neutral note says so. This is the 0.8 bp, 41/41 case.
        - Beyond `AGREE_BP` and more than `LIKE_FOR_LIKE_S` apart: "Not comparable", tone warn, with the time apart.
@@ -1061,10 +1071,18 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
 - Acceptance:
   - **Theme and layout tests:**
     - The flat-CSS checker passes on `theme.CSS`, `kit.PAGE_CSS` and `panels.HOME_CSS`.
-    - The checker is shown to fail on a sample `.db-kpi` panel rule.
+    - The checker is shown to fail on a sample `.db-kpi` panel rule and on a rule with an arbitrary unlisted selector.
+    - A test checks that the expander and tab-panel overrides exist.
     - Tests pin every Home block in its new place, including the strip's single basis, the pill's 1D change and a 1W-first horizon row.
   - **Bug tests:** each fails if its fix is removed.
-    - A weekend fixture shows Friday's change and the latest run's checks.
+    - **Weekend and run-status tests** (in `test_query.py`, `test_model.py` and `test_data_layer.py`):
+      - On a Saturday, a price instrument shows Friday's close against Thursday's, labelled "Fri".
+      - In hosted mode, the same holds for a price with only daily bars.
+      - A Treasury yield keeps its official-to-official change.
+      - On a weekday before the morning run, "no move yet" stays.
+      - The status shows the latest run's checks.
+      - With no run at all, the status shows "No checks yet".
+    - The existing report and golden tests pass unchanged, which shows the email is unaffected.
     - Verdict tests cover agree-but-apart, not comparable and disagree.
     - A watchlist test shows that a folded group keeps the selected row reachable.
   - **Provenance:**
@@ -1075,7 +1093,7 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
   - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
   - **Timing:** on the T56 benchmark store, the median of five warm-cache first renders is within 10% of T59's median. Both are measured on the same machine in the same session, and the PR gives both times and the machine.
-- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59.
+- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route, the run-status definition, the default-deny checker, the native-chrome overrides and the attribution placement were set after the [PR #95 round-1 and round-2 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
 
 #### T60B — Other pages without containers
 - **Depends:** T60 merged · **Owns:**
@@ -1099,7 +1117,7 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - Hosted-versus-local tests hold.
   - No `title` attributes and no `<a target="_self">` appear (test).
   - Each page has screenshots at about 1500 and 390 px in the PR.
-- Changelog: card created from P-023.
+- Changelog: card created from P-023. The shared-file split and the checker use were set after the [PR #95 round-1 review](https://github.com/allenvarghese05/desk-brief/pull/95).
 
 ### Phase 5 — Stretch (only after DoD)
 
