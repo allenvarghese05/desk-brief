@@ -1141,10 +1141,198 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - Each page has screenshots at about 1500 and 390 px in the PR.
 - Changelog: card created from P-023. The shared-file split, the checker use and the system-page run status were set after the [PR #95 round-1 and round-3 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
 
+### Phase 4E — Dashboard v4 and the morning email: what moved more than usual (ruling P-024, 2026-11-24)
+
+The owner approved a hybrid of three Home mockups and an email mockup. The references are the labelled synthetic fixtures `tests/fixtures/design/home-mockup-2026-11-24.html` and `tests/fixtures/design/email-mockup-2026-11-24.html`. Their numbers, dates, filings and the company "Example Corp (EXMP)" are invented. P-024 and the cards win where they differ from the fixtures.
+
+Order:
+- **T61 first.** It makes the ranked moves honest; everything after it ranks them.
+- **T64 (contract)** next. It is short, and it edits `config.py` after T61 has.
+- Then **T62** and **T65** side by side. Both edit `config.yaml`, in separate sections (`brief.*` for T62, source entries for T65); the second to merge rebases.
+- Then **T63** (needs T62), **T66** (needs T62 and T63) and **T67** (needs T62 and T65).
+
+The Phase 4C and 4D rules still apply: provenance, the synthetic store for screenshots, no `title` attributes, hosted mode never shows tier 1, the flat-CSS checker on every CSS source, tests outside Owns, and no regressions. Screenshots are taken at about 1500, 1100, 800 and 390 px against the synthetic store, never real provider data.
+
+Owner decisions the cards wait for (P-024 open questions): an earnings-date source, an outbound link to a third-party research tool, and the Anthropic API key with a monthly spend cap. A card that reaches one of these stops and asks the planner.
+
+#### T61 — Honest overnight moves (the four suspect numbers)
+- **Depends:** T60 merged · **Owns:**
+  - `src/deskbrief/query.py` (`overnight_changes` and its helpers, `family_of` only if needed);
+  - `src/deskbrief/report/model.py` (`_notable` and the change rows it reads);
+  - `config.yaml` feeds for FX pairs and foreign indices, and a like-for-like list if one is added;
+  - `src/deskbrief/calendars.py` and `src/deskbrief/config.py` (`CalendarName` only), for the Tokyo, London and Frankfurt exchange calendars;
+  - `src/deskbrief/cli.py` (one read-only diagnostic subcommand);
+  - `tests/unit/test_query.py`, `tests/unit/report/test_model.py`, `tests/unit/test_calendars.py`.
+- Background (from the 2026-11-24 real email; the planner could not read the store, so each item is a hypothesis to confirm first):
+  1. **FX had no change.** `EURUSD`, `GBPUSD` and `USDJPY` are price family, and `_price_change` looks for a `close` `1d` row dated the previous XNYS day. The FX feeds have Twelve Data and Yahoo quotes and the ECB fix (`rate`), but no daily close, so every FX row is `no_baseline`.
+  2. **The Nikkei showed n/a.** Its baseline is the close dated the previous NYSE day. On a Japanese holiday that falls on an NYSE session there is no such close. FTSE and DAX only work when London and Frankfurt happen to trade on the NYSE's previous day.
+  3. **The 3-month bill's move may be false.** Its last value is a Yahoo `^IRX` quote, a discount-basis rate. Its baseline is Treasury's official "3 Mo" par yield, a bond-equivalent yield. The two differ by a basis that can look like a large move, and `_notable` then scores it in σ against the official series' own moves.
+  4. **A four-day-old value read as overnight.** A FRED series dated days before the brief (for example the 10-year real yield) gets a change and can enter NOTABLE, though nothing moved overnight.
+  5. **Brent and WTI.** That morning Brent and WTI moved far apart. Check whether a price baseline can come from a different series (FRED's spot `DCOILBRENTEU` against the `BZ=F` future), or from a contract after a roll.
+- Deliverables:
+  - **Diagnostic first.** A read-only subcommand `deskbrief diagnose changes --date D [--time T]` prints, for every instrument, the last value and the baseline it used: source, dataset, field, interval, as-of, basis, status and note. It prints no secrets and writes nothing. The owner runs it against the real store for 2026-11-24 and pastes the output into the PR; the PR states for each of the five items above whether it was confirmed.
+  - **FX baseline.** FX changes compare with the pair's own previous daily close. Add Yahoo `history` feeds for the pairs if the implementer's live probe confirms Yahoo serves daily FX bars, and say which close time they use. Otherwise use the stored New York 17:00 ET quote, if one exists. The basis text names what it is (for example "vs NY close").
+  - **Own-session basis for foreign indices.** `N225`, `FTSE` and `DAX` compare with their own exchange's previous session (XTKS, XLON, XETR) and say so ("vs Tokyo close").
+  - **Like-for-like moves.** A change is "rankable" only when its baseline has the same source, dataset and field as the value, or the pair is on an explicit like-for-like list. Otherwise the change is still shown with its note but marked not rankable. `ChangeRow` gains that flag. For `UST_3M` the rankable change is the Yahoo quote against Yahoo's own previous `^IRX` close.
+  - **New since the previous brief.** `_notable` scores only changes whose last value is newer than the previous scheduled brief's cut. Older values keep their own date in the email and are not scored.
+  - **Futures baselines.** A futures price is never compared with a spot series from another source. Brent and WTI use their own Yahoo daily closes.
+- Acceptance:
+  - Tests fail if any fix is removed:
+    - FX gets an `ok` change against its own close;
+    - N225 on a Tokyo holiday that is an NYSE session uses Tokyo's previous session;
+    - FTSE on a London holiday that is an NYSE session uses London's previous session;
+    - `UST_3M` with a Yahoo quote and an official Treasury baseline is shown but not ranked;
+    - a FRED value dated before the previous brief is not scored;
+    - Brent's baseline is never FRED spot.
+  - The diagnostic has a test on the synthetic store. The owner's real output is in the PR.
+  - Golden report tests change only where a fixed number changes, and the PR lists each change.
+  - Email and dashboard still agree (one `overnight_changes`).
+- Changelog: card created from P-024 and the planner's reading of the 2026-11-24 email.
+
+#### T62 — Home v4: the ranked strip, three panes and the brief
+- **Depends:** T61 merged · **Owns:**
+  - `app/views/markets.py`;
+  - `app/components/{kit.py,panels.py,values.py,tearsheet.py,instrument.py}`;
+  - `app/components/data.py` (`build_snapshot` and its helpers);
+  - `app/theme.py`;
+  - `src/deskbrief/report/model.py` (a `movers` section and a `read` section of `BriefModel`, shared with the email);
+  - `src/deskbrief/config.py` and `config.yaml` (`brief.regime_rules` and `brief.related_pairs` only);
+  - `tests/unit/app/{test_home,test_components,test_data_layer,conftest}.py`, `tests/unit/report/test_model.py`, `tests/unit/test_config.py`.
+- Deliverables:
+  - **One ranking, used everywhere.** `BriefModel.movers`: rankable changes (T61) with σ at or above the anomaly warn level, sorted by σ, each with its source, tier, as-of, basis and any check marker. The email, the strip, the watchlist and the brief all read it.
+  - **The read.** `BriefModel.read`: the regime label from `brief.regime_rules` in `config.yaml` (equity futures, VIX, the high-yield spread, front-end yields; each rule a market, a direction and a σ or size threshold) and the list of rules met. "Quiet" when nothing is ranked, "Mixed" when the rules split.
+  - **Check before using.** From the model:
+    - a failed or warning cross-check on a ranked market;
+    - a basis note on a ranked move;
+    - a related pair from `brief.related_pairs` (to start: Brent and WTI, gold futures and GLD) whose moves differ by more than its limit.
+  - **Layout per P-024:**
+    - the strip with σ tags and check markers;
+    - three aligned panes (watchlist with "Unusual first / By group", the selected market, the brief);
+    - the 1280 px and 960 px breakpoints;
+    - phone order brief, watchlist, market.
+
+    Until T66 lands, the brief shows the read, the rules, Check before using and Today (empty until T65) with no note. It says nothing about a note.
+  - **Keyboard:** `/` focuses search.
+- Acceptance:
+  - Model tests cover the ranking (σ order, unrankable changes excluded), each regime label and each check-before-using kind.
+  - Layout tests:
+    - the three panes are present in the source order brief, watchlist, market;
+    - the strip shows a σ tag only on ranked markets;
+    - the watchlist's default is "Unusual first";
+    - the flat-CSS checker passes.
+  - Hosted-versus-local holds; no tier-1 value appears in the strip, movers or brief when hosted.
+  - Screenshots at the four widths beside the fixture's.
+  - Timing: the median of five warm renders is within 10% of T60's, same machine.
+- Changelog: card created from P-024.
+
+#### T63 — The morning email, rebuilt
+- **Depends:** T62 merged · **Owns:**
+  - `src/deskbrief/report/{html.py,templates/brief.html.j2}`;
+  - `src/deskbrief/report/model.py` (the snapshot rows and the subject line only);
+  - `src/deskbrief/report/excel.py` (the About sheet's read line only; the tables keep their P-015 contract);
+  - `tests/unit/report/*` and the golden files.
+- Deliverables, in the order of the email fixture:
+  - **Subject line:** the read, then "Desk Brief" and the date.
+  - **The note** once T66 lands; until then, nothing in its place.
+  - **Moved more than usual:** the top five of `BriefModel.movers`, each with σ, source and time.
+  - **Today:** from T65's calendar once it lands.
+  - **Snapshot:**
+    - one row per market;
+    - the underlying market instead of its proxy when both have a value;
+    - rows with no trade since their last close folded into one grey line naming them;
+    - weekly and monthly series dated.
+  - **Check before using**, a dashboard link, and a three-line footer with the health count.
+  - The full limits and warnings list leaves the email and stays on Data health; the footer says so.
+- Acceptance:
+  - Golden files are regenerated and reviewed line by line in the PR.
+  - A test shows a proxy row disappears when its underlying has a value, and comes back when it does not.
+  - A test pins the subject line for each regime label.
+  - The email renders at 390 px and in a common desktop client width (the PR shows both).
+  - The Excel contract tests pass unchanged.
+- Changelog: card created from P-024.
+
+#### T64 — Contract: calendar events and SEC filings
+- **Depends:** T61 merged · **Owns:**
+  - `src/deskbrief/schemas.py`, `src/deskbrief/models.py`, `src/deskbrief/config.py` (`KNOWN_SOURCES` gains `fiscaldata` and `edgar`; the source settings they need);
+  - the store's dataset definitions for two new tables:
+    - `events`: scheduled releases and auctions (date, time, kind, title, source, the previous value where the source gives one);
+    - `filings`: SEC filings per instrument (form, filed date, period, URL, and parsed facts for Form 4 and 13F);
+  - the design spec's contract section, and `tests/contract/*`;
+  - PR title `contract: …`; the body names card T64.
+- Deliverables: the exact schemas proposed in the PR, with each field's source and unit. Neither table is an observation table: neither feeds `obs_latest`, checks or σ.
+- Acceptance: contract tests pin both schemas and the new enum values, and the existing contract tests pass unchanged.
+- Changelog: card created from P-024.
+
+#### T65 — Today's calendar and SEC EDGAR sources
+- **Depends:** T64 merged · **Owns:**
+  - `src/deskbrief/sources/{fiscaldata.py,edgar.py}` (new) and `src/deskbrief/sources/fred.py` (release dates only);
+  - `src/deskbrief/sources/registry.py`, and `config.yaml` source entries;
+  - `.github/workflows/morning.yml` (the new secret, in the step that runs the job only);
+  - `docs/sources/{fiscaldata.md,edgar.md}` (new);
+  - `tests/unit/sources/*` for the new adapters.
+- Deliverables:
+  - **Treasury auctions** from fiscaldata.treasury.gov's upcoming-auctions dataset; no key.
+  - **Release dates** from FRED's release calendar for the releases the brief names (CPI, jobs, GDP, PCE, durable goods, consumer confidence and others the planner lists in the PR review), with the existing FRED key.
+  - **SEC EDGAR** for the single stocks in `config.yaml`:
+    - the latest 10-Q and 10-K;
+    - Form 4 transactions in the last 90 days, with the 10b5-1 flag;
+    - 13F holder changes for the latest quarter.
+
+    The User-Agent comes from the secret `DESKBRIEF_SEC_USER_AGENT` (the owner sets it; it is never logged or committed). Requests stay under SEC's 10 per second.
+  - **Probes first:** each source doc records the implementer's live probe (status, row counts, newest date) and the terms that allow storing and showing the data.
+  - **Earnings dates are out of scope** until the owner chooses a source (P-024).
+- Acceptance:
+  - Adapter tests on recorded fixtures (invented or public-domain SEC samples, never provider market data).
+  - A test shows the User-Agent is read from the environment and redacted from logs.
+  - Freshness checks cover the two new datasets.
+- Changelog: card created from P-024. It absorbs stretch card T51 (13F changes).
+
+#### T66 — The morning note, every number checked (was T50)
+- **Depends:** T62 and T63 merged, and the owner's API key and spend cap (P-024) · **Owns:**
+  - `src/deskbrief/report/note.py` (new);
+  - `src/deskbrief/report/model.py` (a `note` section only);
+  - `config.yaml` (`brief.note`: model `claude-sonnet-5-5`, maximum sentences, timeout, monthly cap);
+  - `.github/workflows/morning.yml` (the `ANTHROPIC_API_KEY` secret, in the step that writes the brief only);
+  - the note's place in the email template and the dashboard's brief pane;
+  - `tests/unit/report/test_note.py`.
+- Deliverables:
+  - Claude receives only the brief's model (the read, the movers, Check before using, the snapshot) and writes four or five sentences. The prompt forbids advice, signals, targets and predictions.
+  - **The check.** Every number in the returned text is parsed, with its unit, and matched against a value in the model within its display rounding. A sentence with any unmatched number, or any number without a unit the model uses, is dropped and logged with the reason. Sentences with forbidden words ("buy", "sell", "target", "will rise" and similar, listed in config) are dropped too.
+  - The note shows "every number checked (n of n)". With no key, an API error, a timeout, the spend cap reached, or no surviving sentence, the note is left out and the brief says "No note today" with the reason.
+  - The note is stored with the brief, so the dashboard shows the stored note and never calls the API.
+- Acceptance:
+  - Tests with recorded model replies (no live calls in CI):
+    - a reply with a wrong number loses that sentence;
+    - a reply with a forbidden word loses that sentence;
+    - an empty reply gives "No note today";
+    - a timeout gives "No note today";
+    - a fully matching reply keeps every sentence.
+  - A test shows hosted mode never reads tier-1 values into the prompt.
+- Changelog: card created from P-024 (stretch card T50 promoted).
+
+#### T67 — The Company section for single stocks
+- **Depends:** T62 and T65 merged · **Owns:**
+  - `app/components/company.py` (new), its place in the middle pane, and `tests/unit/app/test_company.py`;
+  - `src/deskbrief/query.py` (read helpers for `filings` only).
+- Deliverables, per P-024:
+  - the latest filing with its EDGAR link;
+  - insiders in the last 90 days: sells, buys, net value, and how many were under 10b5-1 plans;
+  - big-holder changes from 13F, with its as-of quarter and the 45-day lag note;
+  - a filing marker on the chart on the filing date.
+
+  Each fact carries its source and date like any other figure. Shown only for instruments of kind stock; ETFs and indices never show it.
+
+  No earnings date and no outbound link to a third-party tool until the owner decides (P-024).
+- Acceptance:
+  - Tests: an ETF shows no Company section; an empty filings table shows "No filings stored yet"; dates and sources are in the markup.
+  - The flat-CSS checker passes. No `title` attributes.
+  - Screenshots at 1500 and 390 px.
+- Changelog: card created from P-024.
+
 ### Phase 5 — Stretch (only after DoD)
 
-- **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
-- **T51** SEC 13F changes for 3 managers (User-Agent, rate limit).
+- **T50** Claude-written morning narrative: promoted to **T66** by P-024 (2026-11-24).
+- **T51** SEC 13F changes: absorbed into **T65** by P-024 (2026-11-24).
 - **T52** Alpaca WebSocket streaming in local mode.
 
 ---
