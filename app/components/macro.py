@@ -293,7 +293,7 @@ MACRO_CSS = f"""
 <style>
 .db-mx-grid {{ display: grid; align-items: center; gap: 8px;
   grid-template-columns: minmax(96px, 1.3fr) repeat(var(--db-cols), minmax(58px, 1fr));
-  padding: 8px 6px; border-bottom: 1px solid {theme.DIVIDER}; font-size: 13px;
+  padding: 8px 6px; border-bottom: 1px solid {theme.DIVIDER}; font-size: {theme.SIZE_BODY}px;
   color: {theme.TEXT}; }}
 .db-mx-head {{ color: {theme.META}; font-size: {theme.SIZE_META}px; font-weight: 500;
   padding-top: 14px; }}
@@ -301,12 +301,16 @@ MACRO_CSS = f"""
 .db-mx-name {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 .db-mx-name b {{ font-weight: 500; }}
 .db-mx-c .db-fig {{ text-align: right; }}
-.db-mx-heatc {{ display: block; border-radius: 4px; padding: 2px 4px; text-align: center; }}
+/* a heatmap cell is a data encoding (P-023): its fill is inline, square, no radius */
+.db-mx-heatc {{ display: block; padding: 2px 4px; text-align: center; }}
 /* a proxy's caveat word sits on its own line inside the tinted cell, never spilling out */
 .db-mx-heatc .db-flags {{ display: block; line-height: 1.2; }}
 .db-mx-heatc .db-flag {{ margin-left: 0; }}
 div[class*="st-key-db-pick-mx"]:hover .db-mx-row {{ background: {theme.RAISED}; }}
 div[class*="st-key-db-mx-tbl-"] {{ gap: 0 !important; }}
+/* Streamlit's markdown block has margin-bottom: -16px: the header row would hang 16 px into
+   the first row, its hairline through the first figure (T60B fit check) */
+div[class*="st-key-db-mx-tbl-"] [data-testid="stMarkdownContainer"] {{ margin-bottom: 0; }}
 /* phone: only the heatmap scrolls sideways; the other tables fit, with each figure's as-of
    in its tooltip (P-022 no longer asks for the full line under every figure) */
 .st-key-db-mx-tbl-heat .db-mx-grid {{ grid-template-columns: minmax(84px, 1.2fr)
@@ -317,7 +321,7 @@ div[class*="st-key-db-mx-tbl-"] {{ gap: 0 !important; }}
 }}
 @media (max-width: 640px) {{
   .db-mx-grid {{ grid-template-columns: minmax(64px, 1.1fr) repeat(var(--db-cols),
-    minmax(0, 1fr)); gap: 4px; font-size: 12px; padding: 8px 0; }}
+    minmax(0, 1fr)); gap: 4px; padding: 8px 0; }}
   .db-mx-c .db-asofline {{ display: none; }}
   .db-mx-c .db-prov {{ margin-left: 2px; }}
 }}
@@ -747,8 +751,8 @@ def gold_real(bars: Bars) -> tuple[str, pd.DataFrame, pd.DataFrame]:
         items.append((gname, value_cell(f"{pg.value:,.2f}", _prov(pg))))
         q = point(gold, pg.d - timedelta(days=30))
         items.append(
-            (
-                "Gold vs 1M",
+            (  # the label follows the series in use; GLD's figure keeps "proxy" visible
+                f"{'Gold' if gid == 'GOLD_F' else 'GLD'} vs 1M",
                 _since(pg, q, signed((pg.value / q.value - 1) * 100, 1, "%"), "close", "percent")
                 if q is not None and q.value
                 else _need("1M", 30, gold),
