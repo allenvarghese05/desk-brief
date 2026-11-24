@@ -1,5 +1,6 @@
-"""Dashboard pages 2-6 (T35; the P-022 template since T59): AppTest smoke per page, hosted
-rule, P-009 labels, ref_date labels, and the T59 template, markup and cache rules. The
+"""Dashboard pages 2-6 (T35; the P-022 template since T59, flat since T60B under P-023): AppTest
+smoke per page, hosted rule, P-009 labels, ref_date labels, the T59 template, markup and cache
+rules, and T60B's flat stylesheets and latest-run status on Data health. The
 Instrument page moved into Home in T36; its tests are in test_home. Macro's own views are in
 test_macro.
 
@@ -16,6 +17,8 @@ import re
 import sys
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime, timedelta
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -74,8 +77,20 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
     st.cache_data.clear()
     counter = itertools.count()
 
-    def run(page: str, mode: str | None = "hosted", empty: bool = False, **kw: Any) -> AppTest:
+    def run(
+        page: str,
+        mode: str | None = "hosted",
+        empty: bool = False,
+        *,
+        now: datetime = MON_0700,
+        setup: Callable[[World], None] | None = None,
+        **kw: Any,
+    ) -> AppTest:
+        """``now`` pins the dashboard clock; ``setup`` adds rows to the store before the
+        serving files are built."""
         w = World(tmp_path / f"w{next(counter)}")
+        if setup is not None:
+            setup(w)
         if not empty:
             w.observations(monday_rows())
             w.observations(
@@ -148,7 +163,7 @@ def run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunPage:
             monkeypatch.setenv("DESKBRIEF_DISPLAY_MODE", mode)
         from app.components import data
 
-        monkeypatch.setattr(data, "current_time", lambda: MON_0700)
+        monkeypatch.setattr(data, "current_time", lambda: now)
         return AppTest.from_file(str(PAGES / PAGE_FILES[page]), default_timeout=60).run()
 
     return run
@@ -432,7 +447,7 @@ def test_every_store_cache_is_keyed_on_the_data_version(path: Path) -> None:
             continue
         assert "DATA_CACHE_TTL_SECONDS" in ttl, (name, ttl)
     if path.name == "4_Data_health.py":
-        assert [n for _, n, _ in found] == ["_dq", "_fallback_fetches"]
+        assert [n for _, n, _ in found] == ["_dq", "_last_run", "_fallback_fetches"]
         assert "open_connection" not in src  # the shared connection (T56)
 
 
@@ -510,3 +525,120 @@ def test_compact_is_the_default_and_keeps_caveat_words() -> None:
         for word in ("proxy", "IEX", "fallback"):
             assert f'class="db-flag">{word}<' in shown
     assert "db-meta" in value_cell("1.00", p, compact=False)
+
+
+# --- T60B: no containers (P-023) and the latest run on Data health --------------------------
+
+SAT = FRI + timedelta(days=1)
+SAT_1000 = et(SAT, "10:00")
+
+
+def stylesheets(at: AppTest) -> list[str]:
+    """Every ``<style>`` block the page rendered: the shared ones and the page's own."""
+    return [str(m.value) for m in at.markdown if "<style>" in m.value]
+
+
+def test_macro_css_is_flat(flat_css: Callable[[str], list[str]]) -> None:
+    """``macro.MACRO_CSS`` draws no panel: no background, border other than one hairline,
+    radius or shadow, whatever the selector (T60's default-deny checker)."""
+    from app.components import macro
+
+    assert flat_css(macro.MACRO_CSS) == []
+
+
+def test_macro_css_uses_the_four_type_sizes() -> None:
+    from app import theme
+    from app.components import macro
+
+    sizes = {float(x) for x in re.findall(r"font-size:\s*([\d.]+)px", macro.MACRO_CSS)}
+    assert sizes
+    assert sizes <= {theme.SIZE_HERO, theme.SIZE_HERO_PHONE, theme.SIZE_LG, theme.SIZE_BODY,
+                     theme.SIZE_META}  # fmt: skip
+
+
+def test_incidents_and_page_files_inject_no_css_of_their_own() -> None:
+    """The only page stylesheet is ``macro.MACRO_CSS`` (checked above): the page files and
+    ``incidents.py`` carry no ``<style>`` block, so nothing else needs the checker."""
+    for path in [*PAGES.glob("*.py"), REPO / "app" / "components" / "incidents.py"]:
+        assert "<style" not in path.read_text(encoding="utf-8"), path.name
+
+
+@pytest.mark.parametrize("page", list(PAGE_FILES))
+def test_every_stylesheet_a_page_renders_is_flat(
+    run_page: RunPage, page: str, flat_css: Callable[[str], list[str]]
+) -> None:
+    """Every CSS string the page injects, the shared sheets included, passes the checker."""
+    from app.components import macro
+
+    sheets = stylesheets(run_page(page, "local"))
+    assert sheets
+    for css in sheets:
+        assert flat_css(css) == [], (page, flat_css(css))
+    assert (macro.MACRO_CSS.strip() in {c.strip() for c in sheets}) == (page == "macro")
+
+
+def _health_kpis(t: str) -> dict[str, tuple[str, str]]:
+    """``label -> (value, note)`` of the headline cells."""
+    cells = re.findall(
+        r'<div class="db-kpi-label">([^<]+).*?<div class="db-kpi-value">([^<]*)</div>'
+        r'<div class="db-kpi-note">([^<]*)</div>',
+        t,
+        flags=re.S,
+    )
+    return {label: (value, unescape(note)) for label, value, note in cells}
+
+
+def _run1_started_friday(w: World) -> None:
+    """The runs-table row of RUN1 (the synthetic checks' run), started Friday 06:55."""
+    w._append("runs", [{
+        "run_id": "RUN1", "job": "morning", "trigger": "schedule", "target_date": FRI,
+        "scheduled_for": et(FRI, "06:50"), "started_at": et(FRI, "06:55"),
+        "finished_at": et(FRI, "07:00"), "status": "ok", "git_sha": "deadbeef",
+        "config_hash": "cafe", "n_fetch": 1, "n_fetch_failed": 0, "n_obs": 1,
+        "n_dq_fail": 0, "n_dq_warn": 0,
+    }], lambda r: FRI)  # fmt: skip
+
+
+@pytest.mark.parametrize("mode", ["hosted", "local"])
+def test_data_health_on_a_saturday_names_the_latest_runs_day(run_page: RunPage, mode: str) -> None:
+    """Saturday 10:00 ET, no run today: the headline counts and "Needs attention" describe
+    Friday's run, named "Fri 06:55 run", never "no run today yet" beside a green "Failing 0".
+    Monday's rows are dated after today, so they are ignored (T60's ``latest_check_run``)."""
+    at = run_page("health", mode, now=SAT_1000, setup=_run1_started_friday)
+    assert not at.exception
+    t = markup(at)
+    kpi = _health_kpis(t)
+    assert kpi["Failing"] == ("0", "checks in the Fri 06:55 run")
+    assert kpi["Passing"] == ("1", "of 1 results")  # Friday's fresh_a pass only
+    assert "Latest run Fri 13 Nov 06:55 · RUN1" in t
+    assert "no run today yet" not in t
+    assert "range_spy" not in text(at)  # Monday's failing check is in the future
+
+
+def test_data_health_on_a_run_day_names_todays_run(run_page: RunPage) -> None:
+    at = run_page("health", "local")
+    kpi = _health_kpis(markup(at))
+    assert kpi["Failing"] == ("1", "checks in today's run")  # range_spy (validity, alpaca)
+    assert "Latest run Mon 16 Nov · RUN1" in markup(at)
+
+
+def test_data_health_without_any_run_says_no_checks_yet(run_page: RunPage) -> None:
+    t = markup(run_page("health", "local", empty=True))
+    kpi = _health_kpis(t)
+    assert kpi["Failing"] == ("0", "no checks yet")
+    assert 'class="db-kpi db-kpi-muted"><div class="db-kpi-label">Failing' in t  # not green
+    assert "no run today yet" not in t
+
+
+def test_macro_table_header_never_hangs_into_the_first_row() -> None:
+    """Fit (T60B): Streamlit's markdown block has ``margin-bottom: -16px``, which pulled each
+    Macro table's first row 16 px up under the header's hairline. Every block inside a Macro
+    table cancels it (checked in a browser at 1500, 1100, 800 and 390 px)."""
+    from app.components import macro
+
+    rule = re.search(
+        r'div\[class\*="st-key-db-mx-tbl-"\] \[data-testid="stMarkdownContainer"\]\s*\{([^}]*)\}',
+        macro.MACRO_CSS,
+    )
+    assert rule is not None
+    assert re.search(r"margin-bottom:\s*0\b", rule.group(1))

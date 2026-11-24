@@ -1,19 +1,24 @@
 """Data health (spec 10.3 page 4, P-022 template since T59): is anything wrong with the data?
 
-Five blocks: the headline counts, what needs attention in today's latest run (each check type
-one tab away), freshness over the last 7 days, corrections and quarantine (one tab each), and
+Five blocks: the headline counts, what needs attention in the latest run (each check type one
+tab away), freshness over the last 7 days, corrections and quarantine (one tab each), and
 the page footer with the display mode and the glyph legend.
 
 Hosted mode withholds rows naming a source with a tier-1 feed (a validity or revision row can
 carry the value itself). A corrected value is a market figure, so the old and new values go
 through ``value_cell`` (compact) with source, tier, as-of and field. The DQ query runs on the
 shared dashboard connection and is cached on ``data.data_version()`` (T56, T59).
+
+The run shown is T60's latest run with checks (``query.latest_check_run``: the greatest target
+date on or before today with check rows evaluated by now), the same run as Markets' status line.
+On a weekend, a holiday or a morning before the run it is the last run, named by its day ("Fri
+07:00 run"), never "no run today yet" (T60B, P-023). Flat sections, no panels (P-023).
 """
 
 from __future__ import annotations
 
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +33,8 @@ from app.components import kit as _kit  # noqa: E402
 from app.components.values import Provenance, value_cell  # noqa: E402
 
 from deskbrief.config import Config  # noqa: E402
+from deskbrief.query import latest_check_run  # noqa: E402
+from deskbrief.timeutil import to_et  # noqa: E402
 
 ctx = _kit.context("Data health")
 WINDOW = 7
@@ -48,6 +55,31 @@ def _dq(_config: Config, where: str, since: date, ver: str) -> pd.DataFrame:
         ).fetchdf()
 
 
+@st.cache_data(ttl=data.DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _last_run(
+    _config: Config, where: str, today: date, ver: str, _now: datetime
+) -> tuple[date, str, datetime | None] | None:
+    """T60's latest run with checks at ``_now`` (target date, run id, start time), or None when
+    no run has recorded a check. ``where``, ``today`` and ``ver`` only key the cache; a new run
+    changes the data version."""
+    with data.shared_connection(_config) as conn:
+        ref = latest_check_run(conn, _now)
+    return None if ref is None else (ref.target_date, ref.run_id, ref.started_at)
+
+
+def start_time(day: date, started: datetime | None) -> str:
+    """The start time, " 07:00", when the run started on its own target date (as on Markets)."""
+    return (
+        f" {to_et(started):%H:%M}" if started is not None and to_et(started).date() == day else ""
+    )
+
+
+def run_name(day: date, started: datetime | None, today: date) -> str:
+    """The run in words: "the Fri 07:00 run", or "today's 07:00 run" when the run is today's."""
+    when = start_time(day, started)
+    return f"today's{when} run" if day == today else f"the {day:%a}{when} run"
+
+
 def _withhold(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     if df.empty:
         return df, 0
@@ -55,21 +87,39 @@ def _withhold(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return kept, len(df) - len(kept)
 
 
+last = _last_run(ctx.config, _kit.where_key(ctx.config), ctx.today, _kit.version(ctx.config),
+                 ctx.now)  # fmt: skip
+since = ctx.today - timedelta(days=WINDOW)
+if last is not None:  # an older latest run (a long holiday) is still read
+    since = min(since, last[0] - timedelta(days=1))
 dq, withheld = _withhold(
-    _dq(ctx.config, _kit.where_key(ctx.config), ctx.today - timedelta(days=WINDOW),
-        _kit.version(ctx.config))
+    _dq(ctx.config, _kit.where_key(ctx.config), since, _kit.version(ctx.config))
 )  # fmt: skip
 rev, rev_w = _withhold(_kit.recent_table(ctx, "revisions", 14))
 quar, q_w = _withhold(_kit.recent_table(ctx, "quarantine", 14))
 
-today = dq[dq["target_date"] == pd.Timestamp(ctx.today)] if not dq.empty else dq
-latest_run = ""
-if not today.empty:
-    latest_run = str(today.sort_values("evaluated_at")["run_id"].iloc[-1])
-    today = today[today["run_id"] == latest_run]
+# the latest run's DQ rows: T60's run when it wrote DQ rows, else that day's newest DQ run
+latest_run, run_label, attention_note = "", "no checks yet", ""
+today = dq.iloc[0:0]
+if last is not None and not dq.empty:
+    day, ref_run, started = last
+    seen = pd.to_datetime(dq["evaluated_at"], utc=True) <= pd.Timestamp(ctx.now)
+    on_day = dq[(dq["target_date"] == pd.Timestamp(day)) & seen]
+    if not on_day.empty:
+        runs_on_day = set(on_day["run_id"])
+        latest_run = (
+            ref_run
+            if ref_run in runs_on_day
+            else str(on_day.sort_values("evaluated_at")["run_id"].iloc[-1])
+        )
+        today = on_day[on_day["run_id"] == latest_run]
+        started = started if latest_run == ref_run else None
+        run_label = run_name(day, started, ctx.today)
+        attention_note = f"Latest run {day:%a %d %b}{start_time(day, started)} · {latest_run}"
 counts = today["status"].value_counts() if not today.empty else pd.Series(dtype=int)
 n_fail, n_warn = int(counts.get("fail", 0)), int(counts.get("warn", 0))
 n_pass = int(counts.get("pass", 0))
+ran = not today.empty
 
 # --- block 1: the answer first ---
 st.markdown(
@@ -78,15 +128,20 @@ st.markdown(
             (
                 "Failing",
                 str(n_fail),
-                "fail" if n_fail else "ok",
-                "checks in today's latest run" if latest_run else "no run today yet",
+                ("fail" if n_fail else "ok") if ran else "muted",
+                f"checks in {run_label}" if ran else run_label,
             ),
-            ("Warnings", str(n_warn), "warn" if n_warn else "ok", "need a look, not action"),
+            (
+                "Warnings",
+                str(n_warn),
+                ("warn" if n_warn else "ok") if ran else "muted",
+                "need a look, not action",
+            ),
             (
                 "Passing",
                 str(n_pass),
                 "ok" if n_pass else "muted",
-                f"of {len(today)} results" if len(today) else "no results yet",
+                f"of {len(today)} results" if ran else "no results yet",
             ),
             ("Corrections, 14 days", str(len(rev)), "muted", "values a source revised"),
             (
@@ -135,10 +190,10 @@ def _attention(bad: pd.DataFrame) -> str:
     )
 
 
-# --- block 2: what needs attention today, each check type one tab away ---
-with _kit.card("dh-attention", "Needs attention", f"Latest run {latest_run}" if latest_run else ""):
+# --- block 2: what needs attention in the latest run, each check type one tab away ---
+with _kit.card("dh-attention", "Needs attention", attention_note):
     if today.empty:
-        st.markdown("No DQ results for today yet.")
+        st.markdown("No DQ results recorded yet.")
     else:
         bad = today[today["status"].isin(["fail", "warn"])].copy()
         types = sorted(str(t) for t in today["check_type"].unique())
@@ -180,7 +235,12 @@ with _kit.card("dh-attention", "Needs attention", f"Latest run {latest_run}" if 
 with _kit.card(
     "dh-fresh", "Freshness, last 7 days", "One square per day: did each dataset arrive on time?"
 ):
-    fresh = dq[dq["check_type"] == "freshness"] if not dq.empty else dq
+    fresh = (
+        dq[(dq["check_type"] == "freshness")
+           & (dq["target_date"] > pd.Timestamp(ctx.today - timedelta(days=WINDOW)))]
+        if not dq.empty
+        else dq
+    )  # fmt: skip
     if fresh.empty:
         st.markdown("No freshness results in the last 7 days.")
     else:

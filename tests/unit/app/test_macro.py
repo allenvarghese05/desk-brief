@@ -630,3 +630,34 @@ def test_proxy_instruments_say_proxy_and_gld_is_named(run_macro: RunMacro) -> No
     plain_pairs = [c for c in cells if "SPY" not in c and "GLD" not in c]
     assert plain_pairs
     assert not any("db-flag" in c for c in plain_pairs)  # ... unless the pair has a proxy
+
+
+def _strip_cell(at: AppTest, label: str) -> str | None:
+    """The gold panel's strip cell under ``label`` (its figure markup), or None."""
+    m = re.search(
+        rf'<div class="db-mx-cell"><span class="db-hz-label">{re.escape(label)}</span>'
+        r"(.*?)</div>(?=<div class=\"db-mx-cell\"|</div>)",
+        page(at),
+        flags=re.S,
+    )
+    return m.group(1) if m else None
+
+
+def test_gold_change_label_follows_the_gold_series(run_macro: RunMacro) -> None:
+    """PR #90 round 2 follow-up (T60B): the 1M change reads "GLD vs 1M", with "proxy" visible
+    beside it, when gold comes from GLD; "Gold vs 1M" without the word for gold futures."""
+    gld_rows = [
+        {**r, "instrument_id": "GLD"} if r["instrument_id"] == "GOLD_F" else r
+        for r in macro_rows(120, 12)
+    ]
+    gld = run_macro("local", rows=gld_rows)
+    assert not gld.exception
+    cell = _strip_cell(gld, "GLD vs 1M")
+    assert cell is not None
+    assert re.search(r"\bproxy\b", _visible(cell))
+    assert _strip_cell(gld, "Gold vs 1M") is None
+    fut = run_macro("local")
+    cell = _strip_cell(fut, "Gold vs 1M")
+    assert cell is not None
+    assert "proxy" not in cell
+    assert _strip_cell(fut, "GLD vs 1M") is None
