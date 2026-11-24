@@ -1047,10 +1047,16 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - **Bugs reported by the owner on 2026-11-21:**
     1. The verdict section no longer overflows its column. The Lineage and Macro links no longer overlap the 52-week labels at any of the four widths.
     2. Watchlist hover content is never clipped. It is not inside a scroll area, and it renders where neither a column nor an iframe can clip it. It has no `title` attribute.
+       - **Mechanism:** a CSS tooltip, as P-022 requires, that opens on hover and on keyboard focus. It is positioned so no column or scroll area clips it, for example `position: fixed`.
+       - Native `help=` tooltips are not used.
+       - On touch, tapping a row selects it, and the hero then shows the same content: full name, field, tier, source and as-of.
     3. Watchlist names never break one letter per line at any width, including about 800 px. They truncate with an ellipsis only after the short id.
     4. On a day that isn't an XNYS session (a weekend or holiday), the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
        - **Cause:** `query.overnight_changes` takes the price baseline from `prev_business_day(report_date)`. On a Saturday that is Friday, the same day as the last close, so `_price_change` returns "no move yet".
-       - **Fix:** when `report_date` is not an XNYS session, the move day is the last session S. A `1d` close dated S is compared with the close of the business day before S. The basis label names S's weekday.
+       - **Fix:** when `report_date` is not an XNYS session, the rule is the same for every price-family last value, whatever its interval (tick, `1m` or `1d`):
+         - Let S be the ET date of the last value. If S is on or before the last session, the baseline is the `1d` close of `prev_business_day(S)`.
+         - If S is after the last session (a weekend tick), S is replaced by the last session, and the change reads against the close before it.
+         - The basis label names the weekday of the session the move belongs to (for example "Fri").
        - Official-family changes, such as Treasury yields, are unchanged: they already compare the last official value with the one before.
        - On session days nothing changes, including before the morning run, when "no move yet" stays. So the morning email is unchanged.
        - `BriefModel.from_store` keeps `(et_date(now), now)`, so no value from after `now` is read.
@@ -1077,6 +1083,11 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - **Bug tests:** each fails if its fix is removed.
     - **Weekend and run-status tests** (in `test_query.py`, `test_model.py` and `test_data_layer.py`):
       - On a Saturday, a price instrument shows Friday's close against Thursday's, labelled "Fri".
+      - The Saturday store also holds Friday ticks stored after Friday's close, plus Thursday's close. Two cases run on it, each expecting Friday against Thursday, labelled "Fri":
+        - local, with every tier;
+        - hosted, with only the tier-2 Yahoo quote.
+
+        Each fails if only the `1d` branch is changed.
       - In hosted mode, the same holds for a price with only daily bars.
       - A Treasury yield keeps its official-to-official change.
       - On a weekday before the morning run, "no move yet" stays.
@@ -1088,12 +1099,12 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - **Provenance:**
     - Hosted-versus-local tests pass.
     - The glyph-legend and tier-tooltip tests still pass.
-    - Watchlist hover content shows full name, field, tier, source and as-of.
+    - Watchlist hover content shows full name, field, tier, source and as-of. A test shows it opens on keyboard focus as well as hover.
     - No `title` attribute and no `<a target="_self">` appear (test).
     - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
   - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
   - **Timing:** on the T56 benchmark store, the median of five warm-cache first renders is within 10% of T59's median. Both are measured on the same machine in the same session, and the PR gives both times and the machine.
-- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route, the run-status definition, the default-deny checker, the native-chrome overrides and the attribution placement were set after the [PR #95 round-1 and round-2 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
+- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route (every price interval), the run-status definition, the default-deny checker, the native-chrome overrides, the tooltip mechanism and the attribution placement were set after the [PR #95 round-1 to round-3 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
 
 #### T60B — Other pages without containers
 - **Depends:** T60 merged · **Owns:**
@@ -1108,16 +1119,18 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
 
     Each page keeps its 4–6 blocks and its tabs. The panel styles in `macro.MACRO_CSS` and in CSS that page files inject are removed. T60B does not edit `kit.py`, `theme.py` or `panels.py`. If a shared style needs changing, it goes back to the planner.
   - **Fit.** At the four widths, nothing overflows, overlaps or wraps one letter per line. The Macro heatmap and tvcharts keep their attribution.
+  - **Run status on the system pages.** Data health, and Cross-checks if it shows a count for today, use T60's latest-run date when today has no run, and name that day (for example "Fri 07:00 run"). They no longer show "no run today yet" next to a green "Failing 0".
   - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): the gold vs real-yield panel's "Gold vs 1M" label follows the gold series in use. It reads "GLD vs 1M", with "proxy" visible, when gold comes from GLD.
 - Acceptance:
   - The page tests pass, updated for the new layout.
   - A test pins the GLD label.
+  - A weekend test shows Data health naming the latest run's day.
   - `test_pages.py` runs T60's flat-CSS checker on `macro.MACRO_CSS`, on `incidents.py`'s CSS if it has any, and on every CSS string a page file injects.
   - T60's own checker tests still pass.
   - Hosted-versus-local tests hold.
   - No `title` attributes and no `<a target="_self">` appear (test).
   - Each page has screenshots at about 1500 and 390 px in the PR.
-- Changelog: card created from P-023. The shared-file split and the checker use were set after the [PR #95 round-1 review](https://github.com/allenvarghese05/desk-brief/pull/95).
+- Changelog: card created from P-023. The shared-file split, the checker use and the system-page run status were set after the [PR #95 round-1 and round-3 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
 
 ### Phase 5 — Stretch (only after DoD)
 

@@ -204,7 +204,9 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
       - tooltips, popovers and dialogs;
       - the search field;
       - the selected segment of a segmented control;
-      - inline markers and data encodings: tier glyphs, σ tags, status dots, the failed-check and warn markers, stale tags, check squares, heatmap cells and chart canvases.
+      - inline markers and data encodings: tier glyphs, σ tags, status dots, the failed-check and warn markers, stale tags, check squares, heatmap cells, chart canvases, and the 52-week range track and its marker;
+      - the selected-tab underline, and the hairline under the tab row;
+      - keyboard focus indicators.
   - **Type.** Four type sizes:
     - the hero figure, 40–44 px on desktop and 36 px on phones;
     - 15 px for strip values, the verdict answer and the brand;
