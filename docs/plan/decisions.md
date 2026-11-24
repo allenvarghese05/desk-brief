@@ -187,3 +187,68 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
   - **Scope.** No contract files change.
 - Why: on 2026-11-19 (ET) the owner judged the T36 dashboard cluttered and slow. He shared reference designs and chose this direction from four options. A study of the code found the main causes of the slowness: every click was a full page reload, connections were rebuilt every 60 s, and the table cache re-downloaded whole tables. It also found the candle chart's problems: a data gap, a calendar axis with weekend gaps, and fixed-width candles.
 - Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-19 (ET). Asked four questions, he chose "Refined dark", "Big chart hero", "TradingView Lightweight" and "Compact icon + hover/panel". He then approved the clickable mockup with "Looks good, build it". The colour, label and markup rules were settled by the planner after the [PR #85 round-1 review, findings 1, 2 and 14](https://github.com/allenvarghese05/desk-brief/pull/85). Spec §10.2 and §10.3 are updated by card T58. Cards T56–T59.
+
+## P-023 · 2026-11-23 · Dashboard v3: no containers, editorial layout
+- Decision:
+  - **No containers.** Blocks sit on the page background. A section opens with a small uppercase label over a hairline rule, and sections are separated by hairlines and whitespace. Panels, card surfaces, rounded boxes, outlines around blocks and shadows are removed from every page. **This supersedes P-022's "panels one shade lighter; cards separate by shade".** Only these elements may have a background different from the page:
+    - the hero change pill;
+    - the selected watchlist row;
+    - tooltips, popovers and dialogs;
+    - the search field;
+    - the selected segment of a segmented control.
+  - **Type.** Four type sizes:
+    - the hero figure, 40–44 px on desktop and 36 px on phones;
+    - 15 px for strip values, the verdict answer and the brand;
+    - 13 px for body text, rows and tables;
+    - 11.5 px for labels, qualifiers and meta.
+
+    Hierarchy comes from weight and colour. Figures use tabular numerals.
+  - **Home layout.** It replaces P-022's layout; the reference is direction B ("editorial calm"), kept as a labelled synthetic fixture at `tests/fixtures/design/home-mockup-2026-11-23.html`. Where it differs from this ruling, this ruling wins.
+    - **Top bar:** brand and date, page tabs, search, and one status line.
+    - **Market strip:** one line of five instruments as plain text: name, value, and the change as coloured text. It has no tiles, pills or sparklines. A basis shared by all five is said once at the start of the strip (for example "Fri close"). An item with a different basis says its own (for example "10Y delayed, vs official").
+    - **Two columns:** the hero on the left, and the watchlist on the right.
+    - **The hero:**
+      - a label;
+      - the figure;
+      - one pill, holding the 1D change and its basis;
+      - a provenance line;
+      - range and style controls;
+      - the chart;
+      - one row of horizons from 1W to 1Y;
+      - "Do the sources agree?" and "Risk and range" side by side under the chart, as flat label-value rows.
+    - **The watchlist:**
+      - It runs full length and never scrolls inside itself.
+      - It is grouped by asset class, and each group's header folds and unfolds the group.
+      - Rows have full names.
+      - Changes are coloured text, not pills.
+      - Every row has the same hover content: full name, source and as-of. It is shown so that no scroll area or column can clip it.
+      - It is wide enough that names never wrap one letter per line.
+    - **Below 960 px,** the watchlist drops under the hero at full width.
+    - **Below 640 px,** the sources and risk sections stack. The All values table puts the source and its tier word on a second line in the date cell, instead of in its own column.
+    - **Tabs:** All values, Lineage, Checks and Corrections stay under the main area.
+  - **The other pages** follow the same rules: no panels; sections with labels and hairlines; tables flat with hairline rows; the same four type sizes.
+  - **Kept from P-022:**
+    - the colours: one blue accent for the selected state, muted green and red for up and down, and the failed-check marker;
+    - the provenance rules: tier glyphs, the visible words "proxy", "IEX", "fallback" and "HYPOTHETICAL", no `title` attributes, and tier 1 never shown in hosted mode;
+    - TradingView charts and their attribution;
+    - in-session navigation;
+    - "no contract files change".
+- Why: on 2026-11-21 (ET), after testing T58 and T59 against real data, the owner asked for the UI to be cleaner, without "AI slop" and without "containers for no reason". The owner also reported layout bugs:
+  - an overflowing verdict;
+  - clipped hover tooltips;
+  - watchlist names breaking one letter per line at about 800 px;
+  - dashes and "No checks yet" on weekends;
+  - a "Not like-for-like" warning for two sources 0.8 bp apart.
+
+  The planner built three container-free mockups at four widths:
+  - A, "flat terminal";
+  - B, "editorial calm";
+  - C, "focus pane".
+
+  An independent judge ranked them B, then A, then C. It recommended B with five changes taken from the others; this ruling includes them:
+  - collapsible watchlist groups;
+  - the 1D change in the pill;
+  - a smaller hero figure;
+  - the basis said once in the strip;
+  - a wider watchlist, with a phone table that keeps the source.
+- Status: **ratified by Allen Varghese (project owner)** in the Claude Code session on 2026-11-23 (ET). Shown A and B side by side and recommended "B with the grafts", the owner replied "yes go with this option". Cards T60 and T60B.

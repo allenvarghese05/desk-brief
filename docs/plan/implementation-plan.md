@@ -981,6 +981,103 @@ Rules for the phase:
   - No `<a target="_self">` and no `title` attributes appear (test).
 - Changelog: card created from P-022.
 
+### Phase 4D — Dashboard v3, no containers (ruling P-023, 2026-11-23)
+
+The owner chose mockup direction B with five changes. The reference is the labelled synthetic fixture `tests/fixtures/design/home-mockup-2026-11-23.html`. Its numbers are invented, and its `title` attributes are for viewing only. The cards and P-023 describe the design in words and win where they differ from the fixture.
+
+Order: T60 → T60B, one after the other.
+- T60 does the shared theme, Home, and the bugs the owner reported.
+- T60B applies the look to the other five pages.
+
+The Phase 4C rules still apply:
+- provenance;
+- the synthetic store for screenshots;
+- tests outside Owns;
+- no regressions.
+
+Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 synthetic store, never real provider data.
+
+#### T60 — Home without containers, shared theme, reported bugs
+- **Depends:** T59 merged · **Owns:**
+  - `app/theme.py`;
+  - `app/views/markets.py`;
+  - `app/components/{kit.py,values.py,panels.py,tearsheet.py,instrument.py}`;
+  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,conftest.py}`;
+  - `docs/specs/2026-11-15-desk-brief-design.md` §10.2 and §10.3 only.
+- Deliverables:
+  - **Theme (shared by every page).** It follows P-023:
+    - no card or panel surfaces, borders around blocks, radii on blocks, or shadows;
+    - section labels over hairlines;
+    - the four type sizes;
+    - backgrounds only on the elements P-023 lists.
+
+    Page-specific panel styles left for T60B may remain until T60B removes them, and the PR lists them.
+  - **Home layout,** as in P-023 and the fixture:
+    - **Top bar,** then the one-line market strip, with the basis said once.
+    - **The hero.** The figure is 40–44 px. The pill holds the 1D change and its basis. Below it come:
+      - the provenance line;
+      - range and Line/Candles controls, with Compare and CSV in "More";
+      - the tvchart;
+      - the 1W–1Y horizon row with "Charts by TradingView";
+      - "Do the sources agree?" and "Risk and range" side by side, as flat rows.
+    - **The watchlist** sits on the right:
+      - It is about 340–360 px wide at 1500 px, full length, with no inner scroll.
+      - Its group headers fold the group. Fold state is kept in session state, the selected instrument's group never folds away, and groups start open.
+      - Rows keep the σ tag for notable moves.
+    - **Below 960 px,** the watchlist goes under the hero. **Below 640 px,** sources and risk stack, and the All values source moves into the date cell.
+    - **The tabs** keep their current content.
+  - **Bugs reported by the owner on 2026-11-21:**
+    1. The verdict section no longer overflows its column. The Lineage and Macro links no longer overlap the 52-week labels at any of the four widths.
+    2. Watchlist hover content is never clipped. It is not inside a scroll area, and it renders where neither a column nor an iframe can clip it. It has no `title` attribute.
+    3. Watchlist names never break one letter per line at any width, including about 800 px. They truncate with an ellipsis only after the short id.
+    4. On weekends and holidays, the strip and watchlist show the last session's change, labelled with its day (for example "Fri"), not a dash.
+    5. The run status on weekends shows the latest run and its check counts, not "No checks yet". "No checks yet" appears only when no run has been stored.
+    6. **The verdict** (`instrument.verdict` and `_gap_text`):
+       - Within `AGREE_BP`: "Agree", tone ok, with the gap. If the values are more than `LIKE_FOR_LIKE_S` apart in time, a neutral note says so. This is the 0.8 bp, 41/41 case.
+       - Beyond `AGREE_BP` and more than `LIKE_FOR_LIKE_S` apart: "Not comparable", tone warn, with the time apart.
+       - Beyond `AGREE_BP` at the same moment: "No", tone fail, as today.
+       - The warn mark appears only in the warn case.
+  - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): `kit.feed_tier`'s docstring says when it falls back to the source's most live tier for the instrument, or for any instrument, and when it returns `None`.
+  - **Spec.** §10.2 and §10.3 are updated to match P-023.
+- Acceptance:
+  - **Theme and layout tests:**
+    - A test fails if the theme CSS gives a block container a background, border, radius or shadow outside P-023's list.
+    - Tests pin every Home block in its new place, including the strip's single basis, the pill's 1D change and a 1W-first horizon row.
+  - **Bug tests:** each fails if its fix is removed.
+    - A weekend fixture shows Friday's change and the latest run's checks.
+    - Verdict tests cover agree-but-apart, not comparable and disagree.
+    - A watchlist test shows that a folded group keeps the selected row reachable.
+  - **Provenance:**
+    - Hosted-versus-local tests pass.
+    - No `title` attribute and no `<a target="_self">` appear (test).
+    - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
+  - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
+  - **Timing:** a warm-cache first render is no slower than at T59 on the T56 benchmark (the PR gives both times).
+- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59.
+
+#### T60B — Other pages without containers
+- **Depends:** T60 merged · **Owns:**
+  - `app/pages/*.py`;
+  - `app/components/{macro.py,incidents.py}`;
+  - `tests/unit/app/{test_pages.py,test_macro.py}`.
+- Deliverables:
+  - **The other pages.** Macro, Cross-checks, Data health, Sources and Runs use T60's theme with no panels:
+    - section labels over hairlines;
+    - flat tables with hairline rows;
+    - the four type sizes.
+
+    Each page keeps its 4–6 blocks and its tabs, and the page-specific panel styles T60 listed are removed.
+  - **Fit.** At the four widths, nothing overflows, overlaps or wraps one letter per line. The Macro heatmap and tvcharts keep their attribution.
+  - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): the gold vs real-yield panel's "Gold vs 1M" label follows the gold series in use. It reads "GLD vs 1M", with "proxy" visible, when gold comes from GLD.
+- Acceptance:
+  - The page tests pass, updated for the new layout.
+  - A test pins the GLD label.
+  - The T60 theme test still passes with every page loaded.
+  - Hosted-versus-local tests hold.
+  - No `title` attributes and no `<a target="_self">` appear (test).
+  - Each page has screenshots at about 1500 and 390 px in the PR.
+- Changelog: card created from P-023.
+
 ### Phase 5 — Stretch (only after DoD)
 
 - **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
