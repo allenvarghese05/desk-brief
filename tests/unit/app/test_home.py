@@ -1001,6 +1001,26 @@ def test_flat_checker_is_default_deny(flat_css: Callable[[str], list[str]]) -> N
         "@media (max-width: 640px) { .x { background: #13161B; } }",
         ".db-kpi .db-x, .db-tip { background: #20252D; }",  # one denied selector in the list
         ".db-kpi .db-tip { background: #20252D; }",  # a tooltip name inside a container rule
+        # review round 2 #3: a style without a width is ``medium`` (3px)
+        ".x { border-top-style: solid; }",
+        ".x { border-bottom-style: solid; border-bottom-color: #222; }",
+        ".x { border-top-style: solid; border-top-width: 1px; border-top: none; "
+        "border-top-style: solid; }",  # the shorthand reset the width
+        ".x { border: inherit; }",  # inherit copies the parent's border
+        ".x { background: inherit; }",
+        ".x { border-top: inherit; }",
+        # two edges from two rules, or from a rule inside @media, still draw a box
+        ".x { border-top: 1px solid #222; } .x { border-bottom: 1px solid #222; }",
+        ".x { border-top: 1px solid #222; } "
+        "@media (max-width: 640px) { .x { border-bottom: 1px solid #222; } }",
+        ".a, .x { border-top: 1px solid #222; } .x { border-bottom-width: 1px; }",
+        # review round 2 #4: a focus entry may draw a ring, nothing else
+        'div[class*="st-key-db-pick-a"]:has(button:focus-visible) { background: #fff; }',
+        'div[class*="st-key-db-pick-a"]:has(button:focus-visible) { border-radius: 12px; }',
+        'div[class*="st-key-db-pick-a"]:has(button:focus-visible) { border: 3px solid red; }',
+        'div[class*="st-key-db-pick-a"]:has(button:focus-visible) { background: #fff; '
+        "border-radius: 12px; border: 3px solid red; }",
+        ".db-sq:focus-visible { background: #fff; }",
     ]
     for css in denied:
         assert flat_css(css), css
@@ -1011,6 +1031,11 @@ def test_flat_checker_is_default_deny(flat_css: Callable[[str], list[str]]) -> N
         ".x { border-collapse: collapse; border-spacing: 0; }",
         ".db-tip { background: #20252D; border-radius: 6px; }",  # exempt: tooltip
         ".db-prov:focus-visible { box-shadow: 0 0 0 2px #5B9DFF; }",  # exempt: focus
+        'div[class*="st-key-db-pick-a"]:has(button:focus-visible) { outline: 2px solid #5B9DFF; '
+        "outline-offset: 2px; }",  # exempt: a focus ring
+        ".x { border-top-style: solid; border-top-width: 1px; border-top-color: #222; }",
+        ".x { border-top: 1px solid #222; } .y { border-bottom: 1px solid #222; }",
+        ".x { border-top: 1px solid #222; } .x:hover { border-top-color: #333; }",
     ]
     for css in allowed:
         assert not flat_css(css), css
@@ -1042,6 +1067,49 @@ def test_native_expander_tab_panel_and_dataframe_are_flat() -> None:
     assert "height: 1px" in _rule(css, '[data-testid="stTabs"] [role="tablist"]::after')
     assert "baseweb" not in css  # Streamlit 1.67 renders no BaseWeb tabs
     assert "stVerticalBlockBorderWrapper" not in css
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    """(ids, classes + attributes + pseudo-classes, elements) of a simple CSS selector."""
+    sel = re.sub(r"\[[^\]]*\]", " [a] ", selector)  # attribute values may hold anything
+    ids = len(re.findall(r"#[\w-]+", sel))
+    classes = len(re.findall(r"\.[\w-]+|\[a\]|(?<!:):(?!:)[\w-]+", sel))
+    elements = len(re.findall(r"(?:^|[\s>+~])[a-zA-Z][\w-]*|::[\w-]+", sel))
+    return ids, classes, elements
+
+
+def test_selected_tab_underline_rule_outranks_streamlits() -> None:
+    """Review round 2 #5: Streamlit colours the selected underline with
+    ``.<cls>[data-selected] .react-aria-SelectionIndicator`` (0,3,0); ours must rank higher."""
+    from app import theme
+
+    sel = (
+        '[data-testid="stTabs"] [data-testid="stTab"][data-selected] .react-aria-SelectionIndicator'
+    )
+    assert f"background: {theme.TEXT}" in _rule(theme.CSS, sel)
+    assert _specificity(".c[data-selected] .react-aria-SelectionIndicator") == (0, 3, 0)
+    assert _specificity(sel) > (0, 3, 0)
+
+
+#: the hooks round 1 found broken; they must stay among what the sheets override
+_REQUIRED_HOOKS = {"stTab", "stTabPanel", "stExpanderDetails", "stDataFrame"}
+
+
+def test_overridden_streamlit_hooks_exist_in_the_installed_bundle() -> None:
+    """Review round 2 #5: every Streamlit DOM hook the shared sheets override is in the
+    installed frontend bundle, so a rename in Streamlit (which would leave the override matching
+    nothing, as in round 1) fails here rather than passing silently."""
+    sheets = "\n".join(_sheets().values())
+    js_dir = Path(st.__file__).parent / "static" / "static" / "js"
+    assert list(js_dir.glob("index.*.js")), js_dir
+    bundle = "\n".join(p.read_text(encoding="utf-8") for p in sorted(js_dir.glob("*.js")))
+    used = set(re.findall(r'data-testid="(st\w+)"', sheets))
+    assert used >= _REQUIRED_HOOKS, sorted(_REQUIRED_HOOKS - used)
+    for testid in sorted(used):  # a data-testid is a quoted string literal in the bundle
+        assert re.search(rf"[`'\"]{testid}[`'\"]", bundle), f"data-testid {testid} not in Streamlit"
+    for token in ("react-aria-SelectionIndicator", "data-selected", "tablist"):
+        assert token in sheets, token  # react-aria class, state and role the overrides use
+        assert token in bundle, f"{token} not in Streamlit"
 
 
 def test_four_type_sizes() -> None:

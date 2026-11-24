@@ -6,11 +6,13 @@ No real R2 and no network: the local backend only.
 
 from __future__ import annotations
 
+import fnmatch
 import itertools
 import re
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import streamlit as st
@@ -94,11 +96,20 @@ def run_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., A
 # shadow. The only way through is a selector on FLAT_ALLOW, which holds P-023's exempt elements
 # (each pattern is matched against the whole selector, so a container cannot borrow an exempt
 # element's name: ``.db-kpi .db-tip`` styles a tooltip, ``.db-kpi`` is still a container).
+# An entry may name the only properties it is exempt for: a focus entry may draw a ring
+# (``outline*``, ``box-shadow``) and nothing else, so it cannot paint a background or a border.
+#
+# Hairlines are counted per selector over the whole sheet, ``@media`` blocks included: a box
+# drawn by ``border-top`` in one rule and ``border-bottom`` in another still fails. A border
+# style needs an explicit 1px width in the same rule (the default width is ``medium``, 3px).
 
 _PICK_RE = r'div\[class\*="st-key-db-pick-[\w-]*"\]'
-#: P-023's exempt elements, as full-selector regular expressions (checked against the
-#: Streamlit 1.67 DOM: react-aria tabs and segmented controls)
-FLAT_ALLOW: tuple[tuple[str, str], ...] = (
+#: only a focus ring: what a keyboard-focus entry may set
+_RING = ("outline*", "box-shadow")
+#: P-023's exempt elements, as ``(name, full-selector regular expression)`` or ``(name, regex,
+#: allowed property patterns)`` (fnmatch patterns; without them every property is exempt).
+#: Checked against the Streamlit 1.67 DOM: react-aria tabs and segmented controls.
+FLAT_ALLOW: tuple[tuple[Any, ...], ...] = (
     ("hero change pill", r"\.db-pill(-(up|down|flat))?"),
     ("selected watchlist row", r"\.db-wl-row\.is-sel(::before)?"),
     ("hover highlight of a clickable row", _PICK_RE + r":hover \.db-(wl-row|mx-row)"),
@@ -114,16 +125,19 @@ FLAT_ALLOW: tuple[tuple[str, str], ...] = (
     ("check markers and stale tags", r"\.db-mark(-(fail|warn|pass|stale|skip))?"),
     ("check squares", r"\.db-sq"),
     ("52-week range track and marker", r"\.db-range( span| \.db-range-fill)?"),
-    ("selected-tab underline", r'\[data-testid="stTabs"\] \.react-aria-SelectionIndicator'),
-    ("hairline under the tab row", r'\[data-testid="stTabs"\] \[role="tablist"\]::after'),
     (
-        "keyboard focus indicators",
-        r"\.db-(prov|sq):focus-visible|" + _PICK_RE + r":has\(button:focus-visible\)",
+        "selected-tab underline",
+        r'\[data-testid="stTabs"\] (\[data-testid="stTab"\]\[data-selected\] )?'
+        r"\.react-aria-SelectionIndicator",
     ),
+    ("hairline under the tab row", r'\[data-testid="stTabs"\] \[role="tablist"\]::after'),
+    ("keyboard focus on a glyph", r"\.db-(prov|sq):focus-visible", _RING),
+    ("keyboard focus on a clickable row", _PICK_RE + r":has\(button:focus-visible\)", _RING),
     ("opaque app header in the page colour", r'header\[data-testid="stHeader"\]'),
 )
 
-_NONE = {"0", "0px", "none", "transparent", "inherit", "initial", "unset", "rgba(0,0,0,0)"}
+#: values that draw nothing (``inherit`` is not one: it copies the parent's border)
+_NONE = {"0", "0px", "none", "transparent", "initial", "unset", "rgba(0,0,0,0)"}
 #: border properties that are not drawing: table layout only
 _LAYOUT = {"border-collapse", "border-spacing"}
 
@@ -171,75 +185,104 @@ def _off(val: str) -> bool:
     return val.replace(" ", "") in _NONE or _zero(val)
 
 
-def _problems(decls: list[tuple[str, str]]) -> list[str]:
-    """What draws a container in one rule: any background, any shadow (prefixed ones too), any
-    outline, any radius, and any border except one 1 px top or bottom hairline. Edges count
-    whether set by the shorthand or by its longhands."""
-    bad: list[str] = []
+def _problems(decls: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], set[str]]:
+    """What draws a container in one rule, as ``(property, "property: value")`` pairs: any
+    background, any shadow (prefixed ones too), any outline, any radius, and any border except a
+    1 px top or bottom hairline; plus the hairline edges the rule draws. Edges count whether set
+    by the shorthand or by its longhands; a style without a 1px width in the same rule fails."""
+    bad: list[tuple[str, str]] = []
     edges: set[str] = set()
+    styled: dict[str, str] = {}  # edge -> the style declaration that draws it
+    widths: dict[str, str] = {}  # edge -> its width in this rule
     for prop, val in decls:
         bare = re.sub(r"^-(webkit|moz|ms|o)-", "", prop)
         drawn = bare in ("background", "background-color", "background-image", "box-shadow")
         drawn |= bare == "text-shadow" or (bare == "filter" and "shadow" in val)
         if drawn:
             if not _off(val):
-                bad.append(f"{prop}: {val}")
+                bad.append((prop, f"{prop}: {val}"))
         elif bare.startswith("outline"):
             if bare != "outline-offset" and not _off(val):
-                bad.append(f"{prop}: {val}")
+                bad.append((prop, f"{prop}: {val}"))
         elif bare.startswith("border") and bare not in _LAYOUT:
             if bare.endswith("radius"):
                 if not _zero(val):
-                    bad.append(f"{prop}: {val}")
+                    bad.append((prop, f"{prop}: {val}"))
                 continue
             m = re.fullmatch(r"border-(top|bottom)(-(width|style|color))?", bare)
             if m is None:  # border, border-left/right, -width/-style/-color, -inline, -block, ...
                 if not _off(val):
-                    bad.append(f"{prop}: {val}")
+                    bad.append((prop, f"{prop}: {val}"))
+                elif bare in ("border", "border-style"):  # resets both edges
+                    styled.clear()
+                elif bare == "border-width":
+                    widths.update(top=val, bottom=val)
                 continue
             edge, part = m.group(1), m.group(3)
             if part is None:  # the shorthand: one solid 1 px line, or nothing
-                if _off(val):
+                if _off(val):  # also resets the width to ``medium``
+                    styled.pop(edge, None)
+                    widths[edge] = "medium"
                     continue
                 if not re.fullmatch(r"1px solid \S+", val):
-                    bad.append(f"{prop}: {val}")
+                    bad.append((prop, f"{prop}: {val}"))
+                widths[edge] = "1px"
+                styled[edge] = f"{prop}: {val}"
                 edges.add(edge)
             elif part == "width":
+                widths[edge] = val
                 if _off(val):
                     continue
                 if val != "1px":
-                    bad.append(f"{prop}: {val}")
+                    bad.append((prop, f"{prop}: {val}"))
                 edges.add(edge)
             elif part == "style":
                 if _off(val):
+                    styled.pop(edge, None)
                     continue
                 if val != "solid":
-                    bad.append(f"{prop}: {val}")
+                    bad.append((prop, f"{prop}: {val}"))
+                styled[edge] = f"{prop}: {val}"
                 edges.add(edge)
-    if len(edges) > 1:
-        bad.append("more than one hairline rule (" + ", ".join(sorted(edges)) + ")")
-    return bad
+    for edge, decl in styled.items():
+        if widths.get(edge) != "1px":  # unset means ``medium`` (3px)
+            bad.append((f"border-{edge}-width", f"{decl} without an explicit 1px width"))
+    return bad, edges
 
 
-def _allowed(selector: str, allow: tuple[tuple[str, str], ...]) -> bool:
-    return any(re.fullmatch(pattern, selector) for _, pattern in allow)
+def _entry(selector: str, allow: tuple[tuple[Any, ...], ...]) -> tuple[Any, ...] | None:
+    """The first FLAT_ALLOW entry whose pattern matches the whole ``selector``."""
+    return next((e for e in allow if re.fullmatch(e[1], selector)), None)
 
 
-def flat_css_violations(css: str, allow: tuple[tuple[str, str], ...] = FLAT_ALLOW) -> list[str]:
+def _exempt(entry: tuple[Any, ...] | None, prop: str) -> bool:
+    if entry is None:
+        return False
+    if len(entry) < 3:  # every property
+        return True
+    bare = re.sub(r"^-(webkit|moz|ms|o)-", "", prop)
+    return any(fnmatch.fnmatchcase(p, pat) for p in (prop, bare) for pat in entry[2])
+
+
+def flat_css_violations(css: str, allow: tuple[tuple[Any, ...], ...] = FLAT_ALLOW) -> list[str]:
     """Every rule of ``css`` that draws a container (see the block comment above), as
     ``"selector -> declaration"`` lines; empty when the stylesheet is flat."""
-    out = []
+    out: list[str] = []
+    edges: dict[str, set[str]] = {}  # selector -> hairline edges over the whole sheet
     for selector, body in _rules(css):
-        problems = _problems(_decls(body))
-        if not problems:
-            continue
-        denied = [s.strip() for s in selector.split(",") if not _allowed(s.strip(), allow)]
-        if denied:
-            out += [f"{', '.join(denied)} -> {p}" for p in problems]
+        problems, drawn = _problems(_decls(body))
+        for sel in (s.strip() for s in selector.split(",")):
+            entry = _entry(sel, allow)
+            out += [f"{sel} -> {msg}" for prop, msg in problems if not _exempt(entry, prop)]
+            if drawn and not _exempt(entry, "border-top"):
+                edges.setdefault(sel, set()).update(drawn)
+    for sel, found in edges.items():
+        if len(found) > 1:
+            out.append(f"{sel} -> more than one hairline rule ({', '.join(sorted(found))})")
     return out
 
 
-def assert_flat(css: str, allow: tuple[tuple[str, str], ...] = FLAT_ALLOW) -> None:
+def assert_flat(css: str, allow: tuple[tuple[Any, ...], ...] = FLAT_ALLOW) -> None:
     bad = flat_css_violations(css, allow)
     assert not bad, "P-023: block containers must be flat:\n" + "\n".join(bad)
 

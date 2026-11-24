@@ -109,7 +109,11 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
 [data-testid="stTabs"] [role="tablist"] {{ background: transparent; gap: 28px; }}
 [data-testid="stTabs"] [data-testid="stTab"] {{ background: transparent; padding: 0 0 11px 0; }}
 [data-testid="stTabs"] [data-testid="stTab"] p {{ font-size: {SIZE_BODY}px; font-weight: 500; }}
-[data-testid="stTabs"] .react-aria-SelectionIndicator {{ background: {TEXT}; height: 1px; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator {{ height: 1px; }}
+/* the selected underline in the text colour: Streamlit's own
+   ``.<cls>[data-selected] .react-aria-SelectionIndicator`` is (0,3,0), so this needs (0,4,0) */
+[data-testid="stTabs"] [data-testid="stTab"][data-selected] .react-aria-SelectionIndicator {{
+  background: {TEXT}; }}
 [data-testid="stTabs"] [role="tablist"]::after {{ background: {DIVIDER}; height: 1px; }}
 [data-testid="stDataFrame"] {{ border: 0; border-radius: 0; box-shadow: none; }}
 /* a bordered st.container (border=True) draws no box; keyed db-* blocks set their own rules */
@@ -197,8 +201,7 @@ div[data-testid="stTextInput"] > div {{ border: 0; }}
 /* Streamlit's markdown block pulls the next element up by 16 px; a row under its button
    must keep its full height, or rows overlap */
 {_PICK} [data-testid="stMarkdownContainer"] {{ margin-bottom: 0; }}
-{_PICK}:has(button:focus-visible) {{ outline: 2px solid {ACCENT}; outline-offset: 2px;
-  border-radius: {RADIUS}px; }}
+{_PICK}:has(button:focus-visible) {{ outline: 2px solid {ACCENT}; outline-offset: 2px; }}
 
 /* ---- performance over horizons: one flat row ---- */
 .db-hzs {{ display: flex; align-items: baseline; gap: 8px 24px; flex-wrap: wrap; margin: 0; }}
