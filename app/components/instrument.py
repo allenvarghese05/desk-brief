@@ -19,7 +19,7 @@ from html import escape
 import pandas as pd
 import streamlit as st
 from app.components import data
-from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, value_cell
+from app.components.values import TIER_GLYPH, TIER_NAME, Provenance, status_marker, value_cell
 
 from deskbrief.config import Config
 from deskbrief.query import Lineage, ValueRow, field_label, latest_snapshot, lineages
@@ -114,8 +114,10 @@ def _apart(seconds: float) -> str:
     return f"{m / 60:.1f} h" if m < 2880 else f"{m / 1440:.1f} d"
 
 
-#: gap (bp) at or under which two same-moment values count as agreeing
+#: gap (bp) at or under which two values count as agreeing
 AGREE_BP = 5.0
+#: values further apart in time than this are from different moments (a gap beyond AGREE_BP
+#: between them is "not comparable", not a disagreement)
 LIKE_FOR_LIKE_S = 15 * 60
 
 
@@ -130,13 +132,24 @@ class Verdict:
     """The answer to "do the sources agree?" for the visible tiers' latest values."""
 
     tone: str  # ok | warn | fail | muted
-    mark: str  # a check, !, a cross or a dash, so the answer never relies on colour alone
-    headline: str
-    detail: str
+    mark: str  # a mark beside the answer; only the warn case shows the warn mark "!"
+    headline: str  # the answer: Agree, Not comparable, No, One source only
+    detail: str  # one sentence under the answer
+    gap: str = ""  # the size of the gap (or the time apart) beside the answer
+    note: str = ""  # a neutral note: the values agree but are from different moments
 
 
 def verdict(rows: list[ValueRow]) -> Verdict | None:
-    """Compare each visible tier's latest value with the official (highest) tier's."""
+    """Compare each visible tier's latest value with the official (highest) tier's (T60 bug 6).
+
+    * every gap within :data:`AGREE_BP`: "Agree" (ok) with the gap; when the values are more
+      than :data:`LIKE_FOR_LIKE_S` apart in time a neutral note says so (two sources 0.8 bp
+      apart, a day apart, still agree);
+    * a gap beyond :data:`AGREE_BP` between values more than :data:`LIKE_FOR_LIKE_S` apart:
+      "Not comparable" (warn), with the time apart: a move between two moments is not a
+      disagreement;
+    * a gap beyond :data:`AGREE_BP` at the same moment: "No" (fail).
+    """
     if not rows:
         return None
     best = rows[0]
@@ -145,44 +158,48 @@ def verdict(rows: list[ValueRow]) -> Verdict | None:
     gaps = [abs(g) for r in rows[1:] if (g := _gap_bp(r, best)) is not None]
     worst = max(gaps, default=0.0)
     apart = max(abs((x.as_of - best.as_of).total_seconds()) for x in rows[1:])
+    n = len(rows)
+    if worst <= AGREE_BP:
+        note = f"The values are {_apart(apart)} apart in time." if apart > LIKE_FOR_LIKE_S else ""
+        when = "" if note else " at the same moment"
+        return Verdict(
+            "ok", "✓", "Agree", f"{n} sources within {AGREE_BP:g} bp{when}.",
+            f"{worst:.1f} bp apart", note,
+        )  # fmt: skip
     if apart > LIKE_FOR_LIKE_S:
         return Verdict(
-            "warn", "!", "Not like-for-like",
-            f"{len(rows)} sources, {worst:.1f} bp apart, but their prices are {_apart(apart)} "
-            "apart in time.",
+            "warn", "!", "Not comparable",
+            f"{n} sources, {worst:.1f} bp apart, but their values are {_apart(apart)} apart "
+            "in time, so the gap may be a move rather than a disagreement.",
+            f"{_apart(apart)} apart",
         )  # fmt: skip
-    if worst <= AGREE_BP:
-        return Verdict(
-            "ok", "✓", f"Yes, within {worst:.1f} bp", f"{len(rows)} sources at the same moment."
-        )
     return Verdict(
-        "fail",
-        "✕",
-        f"No, {worst:.1f} bp apart",
-        f"{len(rows)} sources disagree at the same moment.",
+        "fail", "✕", "No", f"{n} sources disagree at the same moment.", f"{worst:.1f} bp apart"
     )
 
 
 def _gap_text(r: ValueRow, best: ValueRow) -> str:
+    """The gap of one row to the official value, as in :func:`verdict`: a gap beyond
+    :data:`AGREE_BP` between different moments is "not comparable", a small one only names the
+    time apart."""
     if r is best:
         return "reference"
-    if r.unit == "pct":
-        gap = f"{(r.value - best.value) * 100:+.1f} bp"
-    elif best.value:
-        gap = f"{(r.value - best.value) / best.value * 10_000:+.1f} bp"
-    else:
-        gap = "–"
+    bp = _gap_bp(r, best)
+    gap = f"{bp:+.1f} bp" if bp is not None else "–"
     apart = abs((r.as_of - best.as_of).total_seconds())
-    if apart > LIKE_FOR_LIKE_S:  # a gap between different moments is not a gap
-        gap += f", {_apart(apart)} apart: not like-for-like"
+    if apart > LIKE_FOR_LIKE_S:
+        too_far = bp is None or abs(bp) > AGREE_BP
+        gap += f", {_apart(apart)} apart" + (": not comparable" if too_far else "")
     return gap
 
 
 def verdict_card_html(rows: list[ValueRow], summary: str = "") -> str:
-    """The right-rail card (P-022): one verdict, a sentence, then each visible tier's latest
-    value with its source, tier and gap to the official value. ``summary`` is a line about the
-    last fortnight of cross-checks."""
-    head = '<div class="db-card-h">Do the sources agree?</div>'
+    """The "Do the sources agree?" block (P-023): its label over a hairline, the answer
+    (15 px) with its gap, a sentence, then each visible tier's latest value as a flat row with
+    its source, tier and gap to the official value. ``summary`` is a line about the last
+    fortnight of cross-checks. Only the warn case shows the warn mark; agreement shows a
+    status dot."""
+    head = '<div class="db-label">Do the sources agree?</div>'
     v = verdict(rows)
     if v is None:
         return head + '<div class="db-empty">No value in a tier shown in this mode.</div>'
@@ -193,12 +210,19 @@ def verdict_card_html(rows: list[ValueRow], summary: str = "") -> str:
         f"<b>{value_cell(_num(r), _prov(r), compact=True)}</b></div>"
         for r in rows
     )
+    if v.tone == "warn":
+        mark = status_marker("warn")
+    elif v.tone == "fail":
+        mark = status_marker("fail")
+    else:
+        mark = f'<span class="db-dot db-dot-{v.tone}" aria-hidden="true"></span>'
+    gap = f'<span class="db-verdict-gap">{escape(v.gap)}</span>' if v.gap else ""
+    note = f'<p class="db-verdict-p db-verdict-note">{escape(v.note)}</p>' if v.note else ""
     more = f'<p class="db-verdict-sum">{escape(summary)}</p>' if summary else ""
     return (
-        f'{head}<div class="db-verdict db-verdict-{v.tone}">'
-        f'<span class="db-verdict-ico" aria-hidden="true">{v.mark}</span>'
-        f"<b>{escape(v.headline)}</b></div>"
-        f'<p class="db-verdict-p">{escape(v.detail)}</p>{more}'
+        f'{head}<div class="db-verdict db-verdict-{v.tone}">{mark}'
+        f"<b>{escape(v.headline)}</b>{gap}</div>"
+        f'<p class="db-verdict-p">{escape(v.detail)}</p>{note}{more}'
         f'<div class="db-srcs">{srcs}</div>'
     )
 

@@ -191,6 +191,7 @@ class BriefModel:
         report_time: datetime,
         *,
         exclude_tiers: Collection[int] = (),
+        health_date: date | None = None,
     ) -> Self:
         """Build the brief for ET ``report_date`` as known at ``report_time`` (aware UTC).
 
@@ -199,6 +200,12 @@ class BriefModel:
         to its best remaining tier, as a hosted deployment that may not show tier 1 needs. The
         default ``()`` excludes nothing. Health, the derived 2s10s spread (official tier 3
         yields only) and the anomaly history read no tier-1 value and take no filter.
+
+        ``health_date`` (keyword-only) is the run date whose checks the health block, the check
+        flags and the check items read, for example ``query.latest_check_run(duck, now)``'s date
+        on a weekend. When given, those reads are bounded by ``report_time`` (a re-run stored
+        later is ignored). The default ``None`` reads ``report_date`` without that bound, exactly
+        as before, so the morning email is unchanged.
         """
         report_time = ensure_utc(report_time)
         changes = {
@@ -208,8 +215,10 @@ class BriefModel:
         snapshot = tuple(c.last for c in changes.values())  # ordered by instrument_id
         baselines = tuple(c.previous for c in changes.values() if c.previous is not None)
         enabled = [s for s, st in config.sources.items() if st.enabled]
-        summary = health_summary(duck, report_date, expected_sources=enabled)
-        flags = instrument_flags(duck, report_date)
+        checks_date = report_date if health_date is None else health_date
+        checks_as_of = None if health_date is None else report_time
+        summary = health_summary(duck, checks_date, expected_sources=enabled, as_of=checks_as_of)
+        flags = instrument_flags(duck, checks_date, as_of=checks_as_of)
 
         rows = {
             i.id: replace(

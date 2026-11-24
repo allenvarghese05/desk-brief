@@ -19,7 +19,7 @@ import pytest
 import brief_synth
 from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, fixture_config, monday_rows, tick
 from deskbrief.config import Config, config_hash
-from deskbrief.query import ValueRow, latest_snapshot
+from deskbrief.query import ValueRow, latest_check_run, latest_snapshot
 from deskbrief.report.model import BriefModel, Row, _qualifiers, signed
 
 GOLDEN = Path(__file__).parent / "golden" / "brief_model.json"
@@ -576,3 +576,69 @@ def test_known_limits_say_a_partial_rerun_supersedes_both_check_tables(
     assert "both check tables" in text
     kinds = {k.kind for k in build(World(tmp_path / "none")).known_limits}
     assert "checks_scope" not in kinds  # no results, nothing to scope (dq_missing says so)
+
+
+# ---------------------------------------------------------------------------
+# T60 bugs 4 and 5: a report date that is not an XNYS session, and the latest run's health
+# ---------------------------------------------------------------------------
+
+SAT = date(2026, 11, 14)
+SAT_1000 = et(SAT, "10:00")
+
+
+def test_saturday_row_describes_the_move_since_thursday_close(world: World) -> None:
+    es = row(BriefModel.from_store(world.connect(), world.config, SAT, SAT_1000), "ES_F")
+    # Friday's yahoo close (6000) against Thursday's (6024); the Monday tick is after SAT_1000
+    assert es.change_text == "−0.4%"
+    assert es.description.endswith("since Thu close (12 Nov)")
+    assert es.basis == "Thu close"
+    # session days are unchanged: Monday still reads the previous NYSE close (golden unchanged)
+    assert row(build(world), "ES_F").description.endswith("since previous NYSE close (13 Nov)")
+
+
+def test_health_date_shows_the_latest_run_on_a_saturday(world: World) -> None:
+    world.dq(FRI, [("fresh", "pass", "yahoo", None), ("range", "warn", "stooq", "WTI")])
+    world.xchecks(FRI, [("sp500_spy_es", "pass", 1.0)])
+    db = world.connect()
+    ref = latest_check_run(db, SAT_1000)
+    assert ref is not None
+    assert ref.target_date == FRI
+    m = BriefModel.from_store(db, world.config, SAT, SAT_1000, health_date=ref.target_date)
+    assert (m.health.status, m.health.text) == ("warn", "2/3 checks pass (0 fail, 1 warn)")
+    assert m.health.summary.target_date == FRI
+    assert row(m, "WTI").dq_flag == "warn"
+    without = BriefModel.from_store(db, world.config, SAT, SAT_1000)  # reads Saturday: nothing
+    assert without.health.status == "unknown"
+
+
+def test_health_date_without_any_run_is_unknown(world: World) -> None:
+    db = world.connect()
+    assert latest_check_run(db, SAT_1000) is None
+    m = BriefModel.from_store(db, world.config, SAT, SAT_1000, health_date=SAT)
+    assert m.health.status == "unknown"
+    assert m.health.text.startswith("No data-quality results")
+
+
+def test_health_date_of_an_all_skipped_run_says_so_with_its_day(world: World) -> None:
+    world.dq(THU, [("fresh", "pass", "yahoo", None)], run_id="R-THU")
+    world.dq(FRI, [("fresh", "skip", "yahoo", None), ("anom", "skip", None, "VIX")], run_id="R-FRI")
+    db = world.connect()
+    ref = latest_check_run(db, SAT_1000)
+    assert ref is not None
+    assert (ref.target_date, ref.run_id) == (FRI, "R-FRI")
+    m = BriefModel.from_store(db, world.config, SAT, SAT_1000, health_date=ref.target_date)
+    assert (m.health.status, m.health.text) == (
+        "unknown",
+        "No data-quality results recorded for 2026-11-13",
+    )
+    assert (m.health.summary.target_date, m.health.summary.n_skip) == (FRI, 2)
+
+
+def test_health_date_ignores_a_rerun_stored_after_report_time(world: World) -> None:
+    world.dq(MON, [("fresh", "fail", "yahoo", None)], run_id="R1")  # 07:00 == MON_0700
+    world.dq(MON, [("fresh", "pass", "yahoo", None)], at="08:00", run_id="R2")
+    db = world.connect()
+    m = BriefModel.from_store(db, world.config, MON, MON_0700, health_date=MON)
+    assert (m.health.status, m.health.text) == ("fail", "0/1 checks pass (1 fail, 0 warn)")
+    # without health_date nothing is bounded, as before (the scheduled email's behaviour)
+    assert build(world).health.status == "ok"

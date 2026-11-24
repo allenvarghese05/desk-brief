@@ -5,13 +5,16 @@ SYNTHETIC FIXTURE: all data comes from ``brief_synth`` (made-up values, labelled
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from brief_synth import FRI, MON, MON_0700, THU, WED, World, daily, et, monday_rows, tick
 from deskbrief import query
+from deskbrief.calendars import is_business_day
+from deskbrief.timeutil import et_date
 
 
 @pytest.fixture
@@ -388,3 +391,256 @@ def test_dq_and_crosschecks_come_from_one_run(tmp_path: Path) -> None:
     h = query.health_summary(w.connect(), MON)
     assert (h.n_pass, h.n_xcheck_pass, h.n_xcheck_warn) == (1, 0, 0)
     assert query.instrument_flags(w.connect(), MON) == {}
+
+
+# ---------------------------------------------------------------------------
+# T60 bug 4: weekends and XNYS holidays (SYNTHETIC values; dates are real calendar days)
+# ---------------------------------------------------------------------------
+
+SAT = date(2026, 11, 14)  # after FRI 13 Nov; the last XNYS session before it is FRI
+SAT_1000 = et(SAT, "10:00")
+YH_HIST = {"source": "yahoo", "dataset": "history", "tier": 2}
+
+
+@pytest.mark.parametrize("exclude_tiers", [(), (1,)], ids=["local", "hosted"])
+def test_saturday_daily_close_compares_friday_with_thursday(
+    tmp_path: Path, exclude_tiers: tuple[int, ...]
+) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("SPY", WED, 400.0),  # decoy
+            daily("SPY", THU, 500.0),
+            daily("SPY", FRI, 510.0),
+        ]
+    )
+    db = w.connect()
+    spy = change_of(query.overnight_changes(db, SAT, SAT_1000, exclude_tiers=exclude_tiers), "SPY")
+    assert (spy.status, spy.basis) == ("ok", "Thu close")
+    assert spy.last.as_of == et(FRI)
+    assert et_date(spy.last.as_of) == FRI
+    assert spy.previous is not None
+    assert spy.previous.as_of == et(THU)
+    assert spy.change == pytest.approx(2.0)
+
+
+def _friday_after_close_world(tmp_path: Path) -> World:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("SPY", THU, 500.0),
+            daily("SPY", FRI, 510.0),
+            tick("SPY", et(FRI, "16:10"), 515.0),  # tier-2 yahoo quote after the close
+            tick("SPY", et(FRI, "16:30"), 520.0, tier=1, source="alpaca", dataset="iex_latest"),
+        ]
+    )
+    return w
+
+
+def test_saturday_friday_ticks_after_the_close_compare_with_thursday_local(
+    tmp_path: Path,
+) -> None:
+    spy = change_of(
+        query.overnight_changes(_friday_after_close_world(tmp_path).connect(), SAT, SAT_1000),
+        "SPY",
+    )
+    assert (spy.last.tier, spy.last.value, et_date(spy.last.as_of)) == (1, 520.0, FRI)
+    assert (spy.status, spy.basis) == ("ok", "Thu close")
+    assert spy.previous is not None
+    assert spy.previous.as_of == et(THU)  # not Friday's close: the tick is Friday's move
+    assert spy.change == pytest.approx(4.0)
+
+
+def test_saturday_friday_ticks_after_the_close_compare_with_thursday_hosted(
+    tmp_path: Path,
+) -> None:
+    db = _friday_after_close_world(tmp_path).connect()
+    spy = change_of(query.overnight_changes(db, SAT, SAT_1000, exclude_tiers={1}), "SPY")
+    assert (spy.last.tier, spy.last.source, spy.last.value) == (2, "yahoo", 515.0)
+    assert (spy.status, spy.basis) == ("ok", "Thu close")
+    assert spy.previous is not None
+    assert spy.previous.as_of == et(THU)
+    assert spy.change == pytest.approx(3.0)
+
+
+def test_mlk_monday_futures_tick_moves_since_friday_close(tmp_path: Path) -> None:
+    mlk, thu, fri = date(2026, 1, 19), date(2026, 1, 15), date(2026, 1, 16)
+    assert not is_business_day("XNYS", mlk)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("ES_F", thu, 6000.0, unit="index_pts", **YH_HIST),
+            daily("ES_F", fri, 6100.0, unit="index_pts", **YH_HIST),
+            tick("ES_F", et(mlk, "06:59"), 6161.0, unit="index_pts"),
+        ]
+    )
+    es = change_of(query.overnight_changes(w.connect(), mlk, et(mlk, "07:00")), "ES_F")
+    assert (es.status, es.basis) == ("ok", "Fri close")
+    assert es.previous is not None
+    assert es.previous.as_of == et(fri)  # L's own close, not the session before it
+    assert es.change == pytest.approx(1.0)
+
+
+def test_thanksgiving_fx_quote_moves_since_wednesday_close(tmp_path: Path) -> None:
+    tue, wed, thanksgiving = date(2026, 11, 24), date(2026, 11, 25), date(2026, 11, 26)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("EURUSD", tue, 1.00, unit="fx_rate", **YH_HIST),
+            daily("EURUSD", wed, 1.05, unit="fx_rate", **YH_HIST),
+            tick("EURUSD", et(thanksgiving, "06:00"), 1.071, unit="fx_rate"),
+        ]
+    )
+    fx = change_of(
+        query.overnight_changes(w.connect(), thanksgiving, et(thanksgiving, "07:00")), "EURUSD"
+    )
+    assert (fx.family, fx.status, fx.basis) == ("price", "ok", "Wed close")
+    assert fx.previous is not None
+    assert fx.previous.as_of == et(wed)
+    assert fx.change == pytest.approx(2.0)
+
+
+def test_good_friday_n225_close_seen_saturday_moves_since_thursday_close(tmp_path: Path) -> None:
+    wed, thu, good_friday, sat = (date(2026, 4, d) for d in (1, 2, 3, 4))
+    assert not is_business_day("XNYS", good_friday)
+    w = World(tmp_path)
+    w.observations(
+        [daily("N225", d, v, unit="index_pts") for d, v in ((wed, 30000.0), (thu, 31000.0))]
+        + [daily("N225", good_friday, 31620.0, unit="index_pts")]
+    )
+    n225 = change_of(query.overnight_changes(w.connect(), sat, et(sat, "10:00")), "N225")
+    assert et_date(n225.last.as_of) == good_friday
+    assert (n225.status, n225.basis) == ("ok", "Thu close")
+    assert n225.previous is not None
+    assert n225.previous.as_of == et(thu)
+    assert n225.change == pytest.approx(2.0)
+
+
+def test_saturday_treasury_yield_keeps_its_official_change(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    tsy = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+    w.observations([daily("UST_10Y", THU, 4.45, **tsy), daily("UST_10Y", FRI, 4.40, **tsy)])
+    y = change_of(query.overnight_changes(w.connect(), SAT, SAT_1000), "UST_10Y")
+    assert (y.family, y.basis, y.status) == ("yield", query.BASIS_OFFICIAL, "ok")
+    assert y.previous is not None
+    assert y.previous.as_of == et(THU)
+    assert y.change == pytest.approx(-5.0)
+
+
+def test_weekday_before_the_morning_run_keeps_no_move_yet(tmp_path: Path) -> None:
+    tue = date(2026, 11, 17)
+    w = World(tmp_path)
+    w.observations([daily("SPY", FRI, 500.0), daily("SPY", MON, 510.0)])
+    spy = change_of(query.overnight_changes(w.connect(), tue, et(tue, "06:00")), "SPY")
+    assert (spy.status, spy.basis, spy.change) == ("no_move_yet", query.BASIS_NYSE_CLOSE, None)
+
+
+# ---------------------------------------------------------------------------
+# T60 bug 5: the latest run, and health reads bounded by as_of
+# ---------------------------------------------------------------------------
+
+
+def _checks(w: World, target: date, run_id: str, at: datetime, status: str = "pass") -> None:
+    """One dq row for ``target`` evaluated at any instant ``at`` (not only on ``target``)."""
+    row = {
+        "result_id": f"DQ-{run_id}-{at.isoformat()}",
+        "run_id": run_id,
+        "check_name": "fresh",
+        "check_type": "freshness",
+        "source": "yahoo",
+        "instrument_id": "SPY",
+        "target_date": target,
+        "evaluated_at": at,
+        "status": status,
+        "observed": 1.0,
+        "threshold": 1.0,
+        "details_json": "{}",
+    }
+    w._append("dq_results", [row], lambda r: r["target_date"])
+
+
+def _run_row(w: World, target: date, run_id: str, started: datetime, status: str = "ok") -> None:
+    row: dict[str, Any] = {
+        "run_id": run_id,
+        "job": "morning",
+        "trigger": "manual",
+        "target_date": target,
+        "started_at": started,
+        "finished_at": started,
+        "status": status,
+        "git_sha": "deadbeef",
+        "config_hash": "cafe",
+        "n_fetch": 1,
+        "n_fetch_failed": 0,
+        "n_obs": 1,
+        "n_dq_fail": 0,
+        "n_dq_warn": 0,
+    }
+    w._append("runs", [row], lambda r: r["target_date"])
+
+
+def test_latest_check_run_on_an_empty_store_is_none(tmp_path: Path) -> None:
+    assert query.latest_check_run(World(tmp_path).connect(), SAT_1000) is None
+
+
+def test_latest_check_run_skips_a_later_backfill_of_an_earlier_date(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    _run_row(w, FRI, "R-FRI", et(FRI, "06:55"))
+    _checks(w, FRI, "R-FRI", et(FRI, "07:00"))
+    _run_row(w, THU, "R-BACKFILL", et(FRI, "09:00"))  # started later, for an earlier date
+    _checks(w, THU, "R-BACKFILL", et(FRI, "09:05"))
+    ref = query.latest_check_run(w.connect(), SAT_1000)
+    assert ref == query.RunRef(FRI, "R-FRI", et(FRI, "06:55"))
+
+
+def test_latest_check_run_ignores_target_dates_after_today(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    _checks(w, FRI, "R-FRI", et(FRI, "07:00"))
+    _checks(w, MON, "R-AHEAD", et(SAT, "09:00"), "fail")  # evaluated before now, but for Monday
+    ref = query.latest_check_run(w.connect(), SAT_1000)
+    assert ref == query.RunRef(FRI, "R-FRI", None)  # no runs row: started_at unknown
+
+
+def test_latest_check_run_ignores_rows_evaluated_after_now(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(THU, [("fresh", "pass", "yahoo", None)], run_id="R-THU")
+    w.dq(FRI, [("fresh", "pass", "yahoo", None)], run_id="R-FRI")  # 07:00
+    w.dq(FRI, [("fresh", "fail", "yahoo", None)], at="09:00", run_id="R-FRI-2")
+    db = w.connect()
+    assert query.latest_check_run(db, et(FRI, "08:00")) == query.RunRef(FRI, "R-FRI", None)
+    assert query.latest_check_run(db, et(FRI, "06:00")) == query.RunRef(THU, "R-THU", None)
+    assert query.latest_check_run(db, SAT_1000) == query.RunRef(FRI, "R-FRI-2", None)
+
+
+def test_latest_check_run_counts_a_run_of_skipped_checks(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(THU, [("fresh", "pass", "yahoo", None)], run_id="R-THU")
+    w.dq(FRI, [("fresh", "skip", "yahoo", None)], run_id="R-FRI")
+    assert query.latest_check_run(w.connect(), SAT_1000) == query.RunRef(FRI, "R-FRI", None)
+
+
+def test_health_reads_with_as_of_ignore_a_rerun_stored_later(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.dq(MON, [("fresh_a", "fail", "stooq", "WTI")], run_id="R1")  # 07:00
+    w.dq(MON, [("fresh_a", "pass", "stooq", "WTI")], at="08:00", run_id="R2")
+    w.xchecks(MON, [("sp500_return", "warn", 7.0)], run_id="R1")
+    w.xchecks(MON, [("sp500_return", "pass", 1.0)], at="08:00", run_id="R2")
+    _run_row(w, MON, "R1", et(MON, "06:55"), "degraded")
+    _run_row(w, MON, "R2", et(MON, "07:55"), "ok")
+    w.fetches(MON, [("yahoo", "ok")])  # requested 06:00
+    db = w.connect()
+    bounded = query.health_summary(db, MON, expected_sources=["yahoo"], as_of=et(MON, "07:30"))
+    assert (bounded.n_pass, bounded.n_fail, bounded.n_xcheck_warn) == (0, 1, 1)
+    assert (bounded.run_id, bounded.run_status) == ("R1", "degraded")
+    assert {s.source: s.status for s in bounded.sources} == {"yahoo": "ok"}
+    assert query.instrument_flags(db, MON, as_of=et(MON, "07:30")) == {
+        "WTI": "fail",
+        "SPY": "warn",
+        "ES_F": "warn",
+    }
+    early = query.health_summary(db, MON, expected_sources=["yahoo"], as_of=et(MON, "05:00"))
+    assert {s.source: s.status for s in early.sources} == {"yahoo": "missing"}
+    assert (early.n_checks, early.run_id) == (0, None)
+    unbounded = query.health_summary(db, MON, expected_sources=["yahoo"])  # as before
+    assert (unbounded.n_pass, unbounded.n_fail, unbounded.run_status) == (1, 0, "ok")
+    assert query.instrument_flags(db, MON) == {"WTI": "pass", "SPY": "pass", "ES_F": "pass"}

@@ -1,5 +1,6 @@
-"""Markets panels (T36 layout, T57 v2 look, T58 Home v2): top bar, headline strip, watchlist
-with sigma tags, chart header, yield curve, the page footer and the Home stylesheet.
+"""Markets panels (T36 layout, T57 look, T58 Home v2, T60 Home v3): top bar status line, the
+one-line market strip, the watchlist with sigma tags and row tooltips, the hero header, the
+page footer and the Home stylesheet.
 
 All text comes from ``BriefModel`` rows (labels, signed changes, as-of text); every number is
 printed through ``values.value_cell`` / ``change_cell`` with compact provenance (a focusable
@@ -10,22 +11,33 @@ Selection is in-session (T57): each selectable item is returned as ``(instrument
 and the page draws it under a transparent button whose callback sets ``st.query_params``
 (``app/views/markets.py``). The markup itself holds no link, no ``target`` and no ``title``.
 
-:data:`HOME_CSS` styles the T58 blocks (watchlist rows, verdict, risk facts, range bar, tabs,
-footer) from the ``app/theme.py`` tokens; the page injects it after ``theme.apply()``.
+Every watchlist row carries the same hover content (P-023): full name, field, tier, source and
+as-of, in a CSS tooltip (``.db-wl-tip``) that opens on hover and on keyboard focus of the row's
+button and is ``position: fixed``, so no column, scroll area or iframe can clip it.
+
+On a day that is not an XNYS session the 1D change of a price is the last session's (bug 4 of
+T60): :func:`move_label` names it by that session's weekday ("Fri"), or "since Fri close" for a
+market that traded on an XNYS holiday.
+
+:data:`HOME_CSS` styles the T60 blocks (strip, hero, watchlist, verdict, risk facts, range bar,
+footer) from the ``app/theme.py`` tokens, with no container backgrounds (P-023); the page
+injects it after ``theme.apply()``.
 """
 # ruff: noqa: RUF001  (the sigma sign is intentional output)
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from html import escape
 
 import numpy as np
 from app.components.data import Overview
 from app.components.values import (
+    TIER_GLYPH,
     TIER_NAME,
     Provenance,
     change_cell,
@@ -34,11 +46,12 @@ from app.components.values import (
     value_cell,
 )
 
-from deskbrief.query import field_label
+from deskbrief.calendars import is_business_day
+from deskbrief.query import BASIS_NYSE_CLOSE, field_label
 from deskbrief.report.model import SPREAD_ID, Row, Section
 from deskbrief.timeutil import to_et
 
-_BADGE = {"ok": "Healthy", "warn": "Warnings", "fail": "Failing checks", "unknown": "No checks yet"}
+NO_CHECKS = "No checks yet"
 
 #: what a trader calls each instrument; anything not listed shows its id (SPY, AAPL, EURUSD)
 SHORT = {
@@ -146,16 +159,27 @@ def brand(ov: Overview) -> str:
     )
 
 
-def status(ov: Overview) -> str:
-    """Pipeline health as one status dot and word; the counts are in its CSS tooltip and for
-    screen readers. The page puts a button over it that opens Data health in the same session.
-    The display mode moved to the page footer (T58)."""
+def status(ov: Overview, run: tuple[date, datetime | None] | None = None) -> str:
+    """Pipeline health as one status dot and one line (P-023): "Last run Fri 07:00 · 14 checks
+    ok". ``run`` is the latest run with checks (its target date and start time,
+    ``data.Snapshot.last_run``); ``None`` means no run has recorded a check, the only case that
+    says "No checks yet". The counts are also in the dot's CSS tooltip and for screen readers.
+    The page puts a button over it that opens Data health in the same session."""
     s = ov.health.status
     text = escape(ov.health.text)
+    if run is None:
+        line = NO_CHECKS
+    else:
+        day, started = run
+        when = f" {to_et(started):%H:%M}" if started and to_et(started).date() == day else ""
+        summ = ov.health.summary
+        total = summ.n_checks - summ.n_skip
+        counts = f"{total} checks ok" if s == "ok" else text
+        line = f'Last run {day:%a}{when}<span class="db-status-long"> · {counts}</span>'
     return (
         '<div class="db-status">'
         f'<span class="db-health db-health-{s} db-tipwrap">'
-        f'<span class="db-dot db-dot-{s}"></span>{_BADGE[s]}'
+        f'<span class="db-dot db-dot-{s}"></span>{line}'
         f'<span class="db-sr"> · {text}</span>'
         f'<span class="db-tip" aria-hidden="true">{text}</span></span></div>'
     )
@@ -166,54 +190,104 @@ def status(ov: Overview) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _spark(
-    values: Sequence[float], cls: str, w: int = 72, h: int = 22, *, area: bool = False
-) -> str:
-    """Sparkline of the last official daily values (no axis, no numbers)."""
-    if len(values) < 2:
-        return ""
-    lo, hi = min(values), max(values)
-    span = (hi - lo) or 1.0
-    step = w / (len(values) - 1)
-    pts = [(i * step, h - 2 - (v - lo) / span * (h - 4)) for i, v in enumerate(values)]
-    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-    fill = f'<polygon class="db-spark-area" points="0,{h} {line} {w},{h}"/>' if area else ""
-    return (
-        f'<svg class="db-spark {cls}" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
-        f'preserveAspectRatio="none" aria-hidden="true">{fill}<polyline points="{line}"/></svg>'
-    )
-
-
-def _trend_cls(row: Row) -> str:
-    return direction(row.change_text) if _has_change(row) else "db-flat"
-
-
 Item = tuple[str, str]  # (instrument id, html of the selectable item)
 
 
-def tile_items(ov: Overview, sel: str = "") -> list[Item]:
-    """The headline strip: one tile per headline instrument."""
+def _day(ts: datetime) -> date:
+    return to_et(ts).date()
+
+
+def move_label(row: Row) -> str:
+    """The short basis of a row's 1D change, as the strip says it (P-023).
+
+    * a weekly value: "week on week";
+    * an official value against the one before (a yield, a rate): the value's weekday ("Fri");
+      a quote against an official baseline: "vs official";
+    * a price on an XNYS session day: "vs Fri close", naming the baseline's day;
+    * a price on a day that is not an XNYS session (T60 bug 4; ``query.overnight_changes``
+      then names the baseline "<weekday> close"): the last session's weekday ("Fri") when the
+      value is from a session, else "since Fri close" (a market that traded on an XNYS
+      holiday, compared with the last session's close).
+
+    Empty when the row has no change to label."""
+    ch = row.change
+    if ch is None or ch.previous is None or not _has_change(row):
+        return ""
+    last, prev = ch.last, ch.previous
+    if last.interval == "1w":
+        return "week on week"
+    if ch.family != "price":
+        return f"{_day(last.as_of):%a}" if last.tier == 3 else "vs official"
+    if ch.basis == BASIS_NYSE_CLOSE:
+        return f"vs {_day(prev.as_of):%a} close"
+    s = _day(last.as_of)
+    return f"{s:%a}" if is_business_day("XNYS", s) else f"since {ch.basis}"
+
+
+def basis_text(row: Row) -> str:
+    """The longer basis inside the hero pill: what the 1D change spans, with dates."""
+    ch = row.change
+    if ch is None or ch.previous is None or not _has_change(row):
+        return ""
+    last, prev = ch.last, ch.previous
+    pd_ = _day(prev.as_of)
+    then = f"{pd_.day} {pd_:%b}"
+    if last.interval == "1w":
+        return f"week on week, vs {then}"
+    if ch.family != "price":
+        return f"vs {then} official" + ("" if last.tier == 3 else " value")
+    if ch.basis == BASIS_NYSE_CLOSE:
+        return f"vs {pd_:%a} {then} close"
+    s = _day(last.as_of)
+    if is_business_day("XNYS", s):
+        return f"{s:%a} vs {pd_:%a} {then} close"
+    return f"since {pd_:%a} {then} close"
+
+
+def _is_weekday(label: str) -> bool:
+    return label in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def strip_items(ov: Overview, sel: str = "") -> tuple[str, list[Item]]:
+    """The market strip (P-023): one line of plain text per headline instrument, name, value
+    and the change as coloured text; no tiles, pills or sparklines.
+
+    Returns ``(lead, items)``: ``lead`` is the basis most items share, said once at the start
+    of the strip ("Fri close"); an item whose basis differs says its own ("vs official")."""
+    labels = {row.instrument_id: move_label(row) for _, row in ov.headline if row.available}
+    counts = Counter(v for v in labels.values() if v)
+    common, n = counts.most_common(1)[0] if counts else ("", 0)
+    common = common if n >= 2 else ""
     items = []
     for label, row in ov.headline:
         if not row.available:
-            body = f'<div class="db-tile-value db-unavailable">{NO_DATA}</div>'
+            body = f'<span class="db-sx-val db-unavailable">{NO_DATA}</span>'
         else:
             p = provenance_of(row, ov.as_of)
+            own = labels.get(row.instrument_id, "")
+            tag = f'<em class="db-sx-basis">{escape(own)}</em>' if own and own != common else ""
             body = (
-                f'<div class="db-tile-value">{_listed(row.value_text, p)}</div>'
-                f'<div class="db-tile-row"><span class="db-tile-chg">{_change(row, p)}</span>'
-                f"{_spark(ov.sparks.get(row.instrument_id, ()), _trend_cls(row))}</div>"
+                f'<span class="db-sx-val">{_listed(row.value_text, p)}</span>'
+                f'<span class="db-sx-chg">{tag}{_change(row, p)}</span>'
             )
-        cls = "db-tile is-sel" if row.instrument_id == sel else "db-tile"
+        cls = "db-sx is-sel" if row.instrument_id == sel else "db-sx"
         items.append(
             (
                 row.instrument_id,
                 f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}">'
-                f'<div class="db-tile-label">{escape(label)}'
-                f'<span class="db-sr"> · {escape(row.name)}</span></div>{body}</a>',
+                f'<span class="db-sx-name">{escape(label)}'
+                f'<span class="db-sr"> · {escape(row.name)}</span></span>{body}</a>',
             )
         )
-    return items
+    lead = f"{common} close" if _is_weekday(common) else common
+    return lead, items
+
+
+def strip_lead(lead: str) -> str:
+    """The shared basis at the start of the strip, or nothing."""
+    if not lead:
+        return ""
+    return f'<div class="db-sx-lead"><span class="db-sr">Changes: </span>{escape(lead)}</div>'
 
 
 _SIGMA = re.compile(r"is (\d+(?:\.\d+)?)σ")
@@ -283,6 +357,25 @@ def search(sections: Iterable[Section], query: str) -> list[Section]:
     return out
 
 
+def _row_tip(row: Row, now: datetime) -> str:
+    """The hover content every watchlist row has (P-023): full name, field, tier, source and
+    as-of. A CSS tooltip (``.db-wl-tip``), shown on hover and on keyboard focus of the row's
+    button; ``aria-hidden`` because the row's screen-reader text says the same."""
+    if not row.available:
+        facts = "no data"
+    else:
+        p = provenance_of(row, now)
+        facts = (
+            f'<span class="db-field">{escape(p.field)}</span> · {TIER_GLYPH[p.tier]} '
+            f'{TIER_NAME[p.tier]} · <span class="db-src">{escape(p.source)}</span> · '
+            f'<span class="db-asof">{escape(p.hover or p.as_of)}</span>'
+        )
+    return (
+        f'<span class="db-tip db-wl-tip" role="tooltip" aria-hidden="true">'
+        f'<b>{escape(row.name)}</b><span class="db-wl-tip-l">{facts}</span></span>'
+    )
+
+
 def wl_row(
     row: Row,
     now: datetime,
@@ -290,28 +383,32 @@ def wl_row(
     spark: Sequence[float] = (),
     sig: tuple[str, str] | None = None,
 ) -> str:
-    """One watchlist row (P-022): the full name, the short name with a sigma tag for an unusual
-    move, a 30-day sparkline, then the value over its change."""
+    """One watchlist row (P-023): the short name (never truncated) with a sigma tag for an
+    unusual move, the full name under it (truncated with an ellipsis), then the value and the
+    change as coloured text. ``spark`` is accepted for callers of the T58 signature and not
+    drawn (P-023: no sparklines in lists)."""
+    del spark
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy and not row.available else ""
     hover = "; ".join((row.label, *row.qualifiers))
     cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
     name = (
-        f'<span class="db-wl-name"><b>{escape(row.name)}</b>'
-        f"<small>{escape(short(row))}{tag}{sigma_tag(sig)}</small>"
+        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}{sigma_tag(sig)}</b>'
+        f"<small>{escape(row.name)}</small>"
         f'<span class="db-sr"> ({escape(hover)})</span></span>'
     )
-    trend = _spark(spark, _trend_cls(row), 40, 20) if row.available else ""
     if not row.available:
         cells = f'<span class="db-wl-gap db-unavailable">{NO_DATA}</span>'
     else:
         p = provenance_of(row, now)
         cells = (
-            f'<span class="db-wl-spark">{trend}</span>'
-            f'<span class="db-wl-lv"><span class="db-wl-val">{_listed(row.value_text, p)}</span>'
-            f'<span class="db-wl-chg">{_change(row, p)}</span></span>'
+            f'<span class="db-wl-val">{_listed(row.value_text, p)}</span>'
+            f'<span class="db-wl-chg">{_change(row, p)}</span>'
         )
     current = ' aria-current="true"' if row.instrument_id == sel else ""
-    return f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}"{current}>{name}{cells}</a>'
+    return (
+        f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}"{current}>'
+        f"{_row_tip(row, now)}{name}{cells}</a>"
+    )
 
 
 @dataclass(frozen=True)
@@ -319,11 +416,21 @@ class WatchGroup:
     title: str
     rows: list[Item]
     proxies: list[Item]  # folded behind one line; empty while searching
+    #: instrument ids of every row, proxies included (the page keeps the selected one in view)
+    ids: tuple[str, ...] = field(default=())
 
     @property
     def fold_label(self) -> str:
         noun = "proxy" if len(self.proxies) == 1 else "proxies"
         return f"Show {len(self.proxies)} ETF {noun}"
+
+    @property
+    def key(self) -> str:
+        """A widget-key-safe name of the group."""
+        return re.sub(r"[^a-z0-9]+", "-", self.title.lower()).strip("-")
+
+    def __len__(self) -> int:
+        return len(self.rows) + len(self.proxies)
 
 
 def watchlist(
@@ -336,24 +443,43 @@ def watchlist(
     sigs: Mapping[str, tuple[str, str]] | None = None,
 ) -> list[WatchGroup]:
     """Every instrument grouped by asset class; ETF proxies fold behind one line unless
-    searching. ``sparks`` are 30-day trends and ``sigs`` the sigma tags (:func:`sigmas`)."""
-    sparks = sparks or {}
+    searching. ``sigs`` are the sigma tags (:func:`sigmas`); ``sparks`` is accepted and not
+    drawn (P-023)."""
+    del sparks
     sigs = sigs or {}
 
     def item(r: Row) -> Item:
         iid = r.instrument_id
-        return iid, wl_row(r, now, sel, sparks.get(iid, ()), sigs.get(iid))
+        return iid, wl_row(r, now, sel, (), sigs.get(iid))
 
     out = []
     for sec in sections:
         real = [r for r in sec.rows if not (fold_proxies and r.is_proxy)]
         proxies = [r for r in sec.rows if fold_proxies and r.is_proxy]
-        out.append(WatchGroup(sec.title, [item(r) for r in real], [item(r) for r in proxies]))
+        out.append(
+            WatchGroup(
+                sec.title,
+                [item(r) for r in real],
+                [item(r) for r in proxies],
+                tuple(r.instrument_id for r in sec.rows),
+            )
+        )
     return out
 
 
-def group_title(title: str) -> str:
-    return f'<div class="db-wl-grp db-sec-title">{escape(title)}</div>'
+def group_title(title: str, *, folded: bool | None = None, count: int = 0) -> str:
+    """A watchlist group header. ``folded`` is ``None`` for a header that does not fold (the
+    T58 signature); otherwise a chevron says whether the group is open."""
+    if folded is None:
+        return f'<div class="db-wl-grp db-sec-title">{escape(title)}</div>'
+    chev = "▸" if folded else "▾"
+    state = "folded" if folded else "open"
+    n = f'<span class="db-grp-n">{count}</span>' if count else ""
+    return (
+        f'<div class="db-wl-grp db-sec-title db-grp-h"><span aria-hidden="true" '
+        f'class="db-grp-chev">{chev}</span>{escape(title)}{n}'
+        f'<span class="db-sr"> ({state})</span></div>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -376,26 +502,34 @@ def _header_notes(row: Row) -> list[str]:
     return out
 
 
+def label(title: str, aside: str = "") -> str:
+    """A section label over a hairline (P-023), with an optional quiet note on its right."""
+    extra = f"<span>{escape(aside)}</span>" if aside else ""
+    return f'<div class="db-label">{escape(title)}{extra}</div>'
+
+
 def chart_header(row: Row, now: datetime) -> str:
-    """Name and what it is; the latest value (large) with its glyph and caveat tags, the change
-    pill, and one quiet provenance line: field, tier, as-of and source."""
+    """The hero (P-023): its label (short name over a hairline, the full name on the right),
+    the figure with its glyph and caveat words, one pill holding the 1D change and its basis,
+    and one quiet provenance line: field, tier, as-of and source."""
     head = (
-        f'<div class="db-ch"><span class="db-ch-name">{escape(short(row))}</span>'
+        f'<div class="db-label db-ch"><span class="db-ch-name">{escape(short(row))}</span>'
         f'<span class="db-ch-sub">{escape(row.name)}</span></div>'
     )
     if not row.available:
         return head + f'<div class="db-ch-value db-unavailable">{NO_DATA}</div>'
     p = provenance_of(row, now)
-    chg = (
-        change_cell(row.change_text, p, row.basis, compact=True, glyph=False)
-        if _has_change(row)
-        else _no_change("no change yet")
-    )
-    basis = (
-        f'<span class="db-ch-basis">vs {escape(row.basis)}</span>'
-        if row.basis and _has_change(row)
-        else ""
-    )
+    if _has_change(row):
+        tone = direction(row.change_text).removeprefix("db-")
+        chg = change_cell(row.change_text, p, row.basis, compact=True, glyph=False)
+        basis = basis_text(row)
+        pill = (
+            f'<span class="db-pill db-pill-{tone}">{chg}'
+            + (f'<span class="db-pill-basis">1D · {escape(basis)}</span>' if basis else "")
+            + "</span>"
+        )
+    else:
+        pill = f'<span class="db-pill-none">{_no_change("no change yet")}</span>'
     line = " · ".join(
         [
             f'<span class="db-field">{escape(p.field)}</span>',
@@ -406,9 +540,9 @@ def chart_header(row: Row, now: datetime) -> str:
         ]
     )
     return (
-        head + '<div class="db-ch db-ch-price">'
+        head + '<div class="db-ch-price">'
         f'<span class="db-ch-value">{value_cell(row.value_text, p, compact=True, show_as_of=False)}'
-        f'</span><span class="db-ch-chg">{chg}</span>{basis}</div>'
+        f"</span>{pill}</div>"
         f'<div class="db-ch-foot">{line}</div>'
     )
 
@@ -442,95 +576,192 @@ def _css() -> str:
     from app import theme as t
 
     pick = 'div[class*="st-key-db-pick-"]'
+    wl = 'div[class*="st-key-db-pick-wl-"]'
+    main = '[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] .st-key-db-watch)'
+    watch_col = '[data-testid="stColumn"]:has(.st-key-db-watch)'
+    hero_col = '[data-testid="stColumn"]:has(.st-key-db-hero)'
     return f"""
 <style>
-/* ---- T58 Home v2 (P-022) ---- */
-.st-key-db-risk {{ background: {t.PANEL}; border-radius: {t.RADIUS}px; padding: {t.PAD}px; }}
-.st-key-db-detail, .st-key-db-risk {{ gap: 0; }}
-.db-card-h {{ color: {t.SECONDARY}; font-size: 13px; font-weight: 500; margin-bottom: 4px; }}
-.st-key-db-watch .db-card-h {{ padding: 6px {t.PAD}px 0 {t.PAD}px; }}
+/* ---- T60 Home v3 (P-023): no containers; labels over hairlines; four type sizes ---- */
 
-/* the status dot's tooltip opens below it, right-aligned: it sits at the top right corner */
+/* top bar: the status line's tooltip opens below it, right-aligned */
 .db-status .db-tip {{ left: auto; right: 0; bottom: auto; top: calc(100% + 8px);
   transform: none; }}
+@media (max-width: 1280px) and (min-width: 961px) {{ .db-status-long {{ display: none; }} }}
 
-/* watchlist rows: full name, short name and sigma tag, sparkline, value over change */
-.db-wl-row {{ grid-template-columns: minmax(0, 1fr) 40px auto; }}
-.db-wl-name b {{ font-size: 13.5px; line-height: 1.3; }}
-.db-wl-name small {{ display: flex; align-items: center; gap: 6px; white-space: normal;
-  overflow: visible; text-overflow: clip; }}
-.db-wl-name small .db-tag {{ margin-left: 0; }}
-.db-sig {{ color: {t.AMBER}; font-size: 11px; font-weight: 500; }}
-.db-wl-spark .db-spark {{ width: 40px; height: 20px; opacity: .9; }}
-.db-wl-lv {{ text-align: right; }}
-.db-wl-lv .db-wl-val, .db-wl-lv .db-wl-chg {{ display: block; }}
-.db-wl-lv .db-fig {{ text-align: right; }}
-.db-wl-chg .db-val {{ font-size: 11.5px; }}
-{pick}:hover .db-wl-row {{ background: {t.HOVER}; }}
+/* market strip: one line of plain text, the shared basis said once at its start */
+.st-key-db-strip {{ flex-wrap: wrap; align-items: baseline; gap: 8px 44px !important;
+  padding: 14px 0 13px 0; border-bottom: 1px solid {t.DIVIDER}; margin-bottom: 8px; }}
+.st-key-db-strip > div {{ flex: 0 0 auto !important; width: auto !important; min-width: 0; }}
+.db-sx-lead {{ color: {t.META}; font-size: {t.SIZE_META}px; white-space: nowrap; }}
+.db-sx {{ display: flex; align-items: baseline; gap: 10px; white-space: nowrap;
+  color: {t.TEXT}; }}
+.db-sx-name {{ color: {t.META}; font-size: {t.SIZE_BODY}px; }}
+.db-sx.is-sel .db-sx-name {{ color: {t.TEXT}; }}
+.db-sx-val {{ font-size: {t.SIZE_LG}px; font-weight: 500; }}
+.db-sx .db-fig {{ display: inline-block; text-align: left; }}
+.db-sx-chg {{ font-size: {t.SIZE_BODY}px; }}
+.db-sx-basis {{ font-style: normal; color: {t.META}; font-size: {t.SIZE_META}px;
+  margin-right: 5px; }}
+{pick}:hover .db-sx-name {{ color: {t.TEXT}; }}
+@media (max-width: 1280px) {{ .st-key-db-strip {{ gap: 8px 28px !important; }}
+  .db-sx {{ flex-direction: column; gap: 0; }} }}
+@media (max-width: 640px) {{ .st-key-db-strip > div {{ flex: 1 1 28% !important; }} }}
 
-/* chart card header */
-.db-ch-price {{ align-items: center; margin-top: 6px; }}
-.db-ch-value .db-fig {{ display: inline-flex; align-items: center; gap: 6px; }}
-.db-ch-value .db-flag {{ font-size: {t.SIZE_META}px; letter-spacing: 0; }}
-.db-ch-chg .db-val {{ font-size: 13px; }}
-.db-ch-basis {{ color: {t.META}; font-size: {t.SIZE_META}px; }}
+/* main row: the hero on the left, the watchlist (about 352 px) on the right; below 960 px the
+   watchlist drops under the hero at full width (columns stack below 640 px natively) */
+{main} {{ gap: {t.GAP}px; flex-wrap: nowrap; align-items: flex-start; }}
+{watch_col} {{ flex: 0 0 352px !important; width: 352px !important; min-width: 0; }}
+{hero_col} {{ flex: 1 1 0 !important; width: auto !important; min-width: 0; }}
+@media (max-width: 960px) {{
+  {main} {{ flex-wrap: wrap; gap: 40px; }}
+  {watch_col}, {hero_col} {{ flex: 1 1 100% !important; width: 100% !important; }}
+}}
+
+/* the hero: label, figure, pill, provenance line */
+.db-ch .db-ch-name {{ text-transform: uppercase; letter-spacing: .09em; font-weight: 600;
+  overflow: visible; flex: 0 0 auto; }}
+.db-ch-price {{ display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }}
+.db-ch-value {{ font-size: {t.SIZE_HERO}px; font-weight: 500; letter-spacing: -.025em;
+  line-height: 1.05; color: {t.TEXT}; }}
+.db-ch-value .db-fig {{ display: inline-flex; align-items: center; gap: 6px; text-align: left; }}
+.db-ch-value .db-prov, .db-ch-value .db-flag {{ font-size: {t.SIZE_META}px; letter-spacing: 0; }}
+.db-pill {{ display: inline-flex; align-items: baseline; gap: 8px; padding: 3px 9px;
+  border-radius: {t.RADIUS}px; font-size: {t.SIZE_LG}px; font-weight: 500;
+  background: {t.RAISED}; }}
+.db-pill-up {{ background: {t.UP_TINT}; }}
+.db-pill-down {{ background: {t.DOWN_TINT}; }}
+.db-pill-down .db-val {{ color: {t.DOWN_PILL}; }}
+.db-pill .db-fig {{ display: inline; }}
+.db-pill-basis {{ color: {t.SECONDARY}; font-size: {t.SIZE_META}px; font-weight: 400; }}
+.db-pill-none {{ font-size: {t.SIZE_BODY}px; }}
+.db-ch-foot {{ color: {t.META}; font-size: {t.SIZE_META}px; margin-top: 12px; }}
 .db-ch-foot .db-tier {{ color: {t.META}; }}
-.st-key-db-ctrls {{ justify-content: flex-end; align-items: center; gap: 10px !important;
-  flex-wrap: wrap; }}
+@media (max-width: 640px) {{ .db-ch-value {{ font-size: {t.SIZE_HERO_PHONE}px; }} }}
+
+/* range and style controls; Compare and CSV in "More" */
+.st-key-db-ctrls {{ align-items: center; gap: 8px 20px !important; flex-wrap: wrap;
+  margin-top: 18px; }}
 .st-key-db-ctrls > div {{ width: auto !important; flex: 0 0 auto !important; }}
-.db-chfoot {{ color: {t.META}; font-size: {t.SIZE_META}px; margin-top: 4px; }}
-.db-hzs {{ margin: 0 0 12px 0; }}
+.st-key-db-ctrls > div:last-child {{ margin-left: auto; }}
+.st-key-db-ctrls [data-testid="stButtonGroup"] button {{ background: transparent; border: 0;
+  color: {t.SECONDARY}; min-height: 28px; padding: 0 10px; font-size: {t.SIZE_BODY}px; }}
+[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] {{
+  background: {t.RAISED}; color: {t.TEXT}; border-radius: {t.RADIUS}px; }}
+.st-key-db-ctrls [data-testid="stPopover"] button {{ background: transparent; border: 0;
+  color: {t.SECONDARY}; font-size: {t.SIZE_BODY}px; }}
 
-/* right rail: the verdict */
-.st-key-db-detail .db-verdict {{ display: flex; align-items: center; gap: 10px; margin: 10px 0 6px;
-  padding: 0; background: transparent; }}
-.db-verdict-ico {{ width: 28px; height: 28px; border-radius: 8px; display: inline-flex;
-  align-items: center; justify-content: center; font-weight: 600; background: {t.RAISED};
-  color: {t.SECONDARY}; }}
-.db-verdict-ok .db-verdict-ico {{ background: {t.UP_TINT}; color: {t.UP}; }}
-.db-verdict-warn .db-verdict-ico, .db-verdict-fail .db-verdict-ico {{
-  background: {t.AMBER_TINT}; color: {t.AMBER}; }}
-.st-key-db-detail .db-verdict b {{ font-size: 17px; font-weight: 500; color: {t.TEXT}; }}
-.db-verdict-p, .db-verdict-sum {{ color: {t.SECONDARY}; font-size: 13px; margin: 0 0 4px 0; }}
-.db-srcs {{ margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }}
-.db-src-row {{ display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }}
-.db-src-row > span {{ color: {t.SECONDARY}; }}
-.db-src-row b {{ font-weight: 500; color: {t.TEXT}; }}
+/* under the chart: the 1W-1Y horizons, "Charts by TradingView" at the right */
+.db-under {{ display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px 24px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid {t.DIVIDER}; }}
+.db-under .db-tv-attr {{ color: {t.META}; font-size: {t.SIZE_META}px; text-align: right;
+  margin-left: auto; }}
+.db-under .db-asofline {{ display: none; }}
+.db-chfoot {{ color: {t.META}; font-size: {t.SIZE_META}px; margin-top: 8px; }}
+@media (max-width: 640px) {{ .db-under {{ flex-direction: column; }}
+  .db-under .db-tv-attr {{ margin-left: 0; text-align: left; }} }}
 
-/* right rail: risk and range */
-.db-facts {{ margin: 4px 0 8px 0; }}
-.db-fact {{ display: flex; justify-content: space-between; align-items: center; gap: 10px;
-  padding: 12px 0; border-top: 1px solid {t.DIVIDER}; }}
-.db-fact:first-child {{ border-top: 0; }}
-.db-fact > span {{ color: {t.SECONDARY}; font-size: 13px; }}
-.db-fact > b {{ font-weight: 500; font-size: {t.SIZE_BODY}px; color: {t.TEXT}; }}
+/* "Do the sources agree?" and "Risk and range" side by side, flat label-value rows */
+.st-key-db-notes {{ margin-top: 28px; }}
+.st-key-db-notes [data-testid="stHorizontalBlock"] {{ gap: {t.GAP}px; }}
+.st-key-db-detail, .st-key-db-risk {{ gap: 0; min-width: 0; }}
+.db-verdict {{ align-items: baseline; gap: 10px; margin: 0; }}
+.db-verdict b {{ font-size: {t.SIZE_LG}px; }}
+.db-verdict .db-dot {{ align-self: center; margin-right: 0; }}
+.db-verdict-gap {{ color: {t.SECONDARY}; font-size: {t.SIZE_BODY}px; }}
+.db-verdict-p, .db-verdict-sum {{ color: {t.META}; font-size: {t.SIZE_BODY}px;
+  margin: 4px 0 0 0; overflow-wrap: anywhere; }}
+.db-srcs {{ margin-top: 12px; }}
+.db-src-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px;
+  align-items: baseline; padding: 9px 0; border-top: 1px solid {t.DIVIDER};
+  font-size: {t.SIZE_BODY}px; }}
+.db-src-row > span {{ color: {t.SECONDARY}; min-width: 0; overflow-wrap: anywhere; }}
+.db-src-row .db-tagline {{ white-space: normal; }}
+.db-src-row > b {{ font-weight: 500; color: {t.TEXT}; text-align: right; white-space: nowrap; }}
+.db-src-row .db-fig {{ text-align: right; }}
+.db-facts {{ margin: 0; }}
+.db-fact {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px;
+  align-items: baseline; padding: 9px 0; border-top: 1px solid {t.DIVIDER}; }}
+.db-fact:first-child {{ border-top: 0; padding-top: 0; }}
+.db-fact > span {{ color: {t.SECONDARY}; font-size: {t.SIZE_BODY}px; min-width: 0; }}
+.db-fact > b {{ font-weight: 500; font-size: {t.SIZE_BODY}px; color: {t.TEXT};
+  text-align: right; }}
 .db-fact .db-fig {{ text-align: right; }}
 .db-gapnote {{ margin: 0 0 8px 0; }}
-.db-rangebox {{ padding: 4px 0 8px 0; }}
-.db-range-head {{ display: flex; justify-content: space-between; font-size: 13px; }}
+.db-rangebox {{ position: relative; padding: 10px 0 2px 0; border-top: 1px solid {t.DIVIDER}; }}
+.db-range-head {{ display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px; font-size: {t.SIZE_BODY}px; }}
 .db-range-label {{ color: {t.SECONDARY}; }}
 .db-range-head b {{ font-weight: 500; font-variant-numeric: tabular-nums; }}
-.db-range .db-range-fill {{ top: 0; height: 4px; left: 0; border-radius: 2px;
-  background: linear-gradient(90deg, {t.RAISED}, #3A4250); }}
+.db-range .db-range-fill {{ top: 0; height: 2px; left: 0; border-radius: 2px;
+  background: #3A4250; }}
+.db-range-ends > span {{ position: static; min-width: 0; }}
 .db-range-ends .db-fig {{ text-align: left; }}
 .db-range-ends > span:last-child .db-fig {{ text-align: right; }}
-.st-key-db-risk [data-testid="stButton"] button,
-.st-key-db-risk [data-testid="stPageLink"] a {{ color: {t.SECONDARY}; font-size: 13px; }}
+/* the links sit in their own block under the range, never over its labels (T60 bug 1) */
+.st-key-db-links {{ position: relative; clear: both; margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid {t.DIVIDER}; gap: 6px !important; }}
+.st-key-db-links [data-testid="stButton"] button,
+.st-key-db-links [data-testid="stPageLink"] a {{ color: {t.ACCENT}; font-size: {t.SIZE_BODY}px;
+  padding: 0; min-height: 0; background: transparent; border: 0; justify-content: flex-start; }}
+.st-key-db-links [data-testid="stPageLink"] a p, .st-key-db-links [data-testid="stButton"] p {{
+  color: {t.ACCENT}; font-size: {t.SIZE_BODY}px; }}
 
-/* tabs under the chart */
-.st-key-db-values [data-baseweb="tab-list"] {{ gap: 24px; }}
-.st-key-db-values [data-baseweb="tab"] p {{ font-size: 13.5px; font-weight: 500; }}
-.st-key-db-values [data-baseweb="tab-highlight"] {{ background: {t.ACCENT}; }}
-.st-key-db-values [data-baseweb="tab-border"] {{ background: {t.DIVIDER}; }}
+/* the watchlist: full length, never an inner scroller */
+.st-key-db-watch {{ gap: 0 !important; }}
+.st-key-db-watch [data-testid="stVerticalBlock"] {{ gap: 0; }}
+.db-wl-head {{ display: grid; grid-template-columns: minmax(0, 1fr) auto 64px; column-gap: 12px;
+  padding: 0 10px; color: {t.META}; font-size: {t.SIZE_META}px; margin-top: -4px; }}
+.db-wl-head span {{ text-align: right; }}
+.db-wl-grp {{ padding: 18px 10px 6px 10px; }}
+.db-grp-h {{ display: flex; align-items: baseline; gap: 6px; }}
+.db-grp-chev {{ display: inline-block; width: 10px; }}
+.db-grp-n {{ margin-left: auto; font-weight: 400; letter-spacing: 0; }}
+{pick}:hover .db-grp-h {{ color: {t.TEXT}; }}
+.db-wl-row {{ position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto 64px;
+  column-gap: 12px; align-items: center; min-height: 44px; padding: 4px 10px;
+  color: {t.TEXT}; font-size: {t.SIZE_BODY}px; }}
+{pick}:hover .db-wl-row {{ background: {t.RAISED}; border-radius: {t.RADIUS}px; }}
+.db-wl-row.is-sel {{ background: {t.RAISED}; border-radius: {t.RADIUS}px; }}
+.db-wl-row.is-sel::before {{ content: ""; position: absolute; left: 0; top: 11px; bottom: 11px;
+  width: 2px; border-radius: 2px; background: {t.ACCENT}; }}
+/* names never break one letter per line: the short id never wraps, the full name truncates
+   with an ellipsis after it (T60 bug 3) */
+.db-wl-name {{ min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }}
+.db-wl-name b {{ display: flex; align-items: baseline; gap: 6px; font-weight: 600;
+  white-space: nowrap; word-break: keep-all; }}
+.db-wl-name small {{ display: block; min-width: 0; color: {t.META}; font-size: {t.SIZE_META}px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; word-break: keep-all; }}
+.db-wl-val, .db-wl-chg {{ text-align: right; white-space: nowrap; min-width: 0; }}
+.db-wl-val .db-fig, .db-wl-chg .db-fig {{ text-align: right; }}
+.db-wl-val .db-flags {{ display: block; line-height: 1.2; }}
+.db-wl-val .db-flag {{ margin-left: 4px; }}
+.db-wl-gap {{ grid-column: 2 / 4; text-align: right; }}
+.db-sig {{ color: {t.AMBER}; font-size: {t.SIZE_META}px; font-weight: 500; }}
+/* every row's hover content: fixed, so no column, scroll area or iframe clips it; it opens
+   on hover and on keyboard focus of the row's button (T60 bug 2) */
+.db-tip.db-wl-tip {{ position: fixed; left: auto; right: auto; top: auto; bottom: auto;
+  transform: translate(calc(-100% - 14px), -6px); z-index: 1000; }}
+.db-wl-tip b, .db-wl-tip .db-wl-tip-l {{ display: block; }}
+{wl}:hover .db-wl-tip, {wl}:has(button:focus-visible) .db-wl-tip {{ display: block; }}
+{wl}:has(.db-prov:hover) .db-wl-tip, {wl}:has(.db-prov:focus) .db-wl-tip {{ display: none; }}
+@media (max-width: 960px) {{
+  .db-tip.db-wl-tip {{ transform: translateY(calc(-100% - 6px)); max-width: min(280px, 90vw); }}
+}}
 
+/* tabs under the main area */
+.st-key-db-values {{ margin-top: 40px; }}
+.st-key-db-values .db-table {{ max-width: 980px; }}
+.db-values .db-src-m {{ display: none; }}
 @media (max-width: 640px) {{
-  .st-key-db-watch {{ max-height: 440px !important; }}
+  .db-values .db-c-src {{ display: none; }}
+  .db-values .db-src-m {{ display: block; white-space: normal; }}
   .db-values .db-tagline, .db-values td {{ white-space: normal; overflow-wrap: anywhere; }}
-  .st-key-db-values [data-testid="stMarkdownContainer"] {{ overflow-x: auto; }}
 }}
 
 /* footer */
-.db-foot {{ margin-top: 24px; color: {t.META}; font-size: {t.SIZE_META}px; display: flex;
+.db-foot {{ margin-top: 40px; color: {t.META}; font-size: {t.SIZE_META}px; display: flex;
   gap: 8px 16px; flex-wrap: wrap; }}
 .db-foot .db-glyphs {{ gap: 12px; }}
 </style>

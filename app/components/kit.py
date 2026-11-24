@@ -9,10 +9,11 @@ Lives in ``app/components`` (not ``app/pages``) so Streamlit does not list it as
 * hosted rule: :func:`exposed_sources` have a feed in a hidden tier; rows that may carry their
   values are dropped and counted (:func:`keep_rows`), never shown.
 * compact provenance helpers (P-022): :func:`glyph_legend` and the :func:`details` dialog.
-* the page and card template (T59, P-022): :func:`context` with ``controls=True`` puts the
-  page title on the left and a controls row on the right; :func:`card` draws a block the same
-  way (title left, controls right, content, an optional footer); :func:`page_footer` ends the
-  page with the display mode and the glyph legend. Depth goes in tabs, not down the page.
+* the page and section template (T59; flat since T60, P-023): :func:`context` with
+  ``controls=True`` puts the page title on the left and a controls row on the right;
+  :func:`card` draws a block the same way (label over a hairline, controls right, content, an
+  optional footer), with no panel behind it; :func:`page_footer` ends the page with the
+  display mode and the glyph legend. Depth goes in tabs, not down the page.
 * every cache is keyed on ``data.data_version()`` (T57), so a store change is seen at once.
   The serving-file caches also keep a 60 s TTL (``data.CACHE_TTL_SECONDS``): the serving files
   are not part of the data version, so a longer TTL would show them stale (T59 ruling).
@@ -67,46 +68,46 @@ PAGE_CSS = f"""
 <style>
 .db-strip-row {{ display: flex; gap: 3px; align-items: center; }}
 .db-sq {{ position: relative; width: 20px; height: 20px; display: inline-flex;
-  align-items: center; justify-content: center; font-size: .72rem; border-radius: 4px;
-  outline: none; }}
+  align-items: center; justify-content: center; font-size: {theme.SIZE_META}px;
+  border-radius: 4px; outline: none; }}
 .db-sq:focus-visible {{ box-shadow: 0 0 0 2px {theme.ACCENT}; }}
 .db-sq:hover .db-tip, .db-sq:focus .db-tip {{ display: block; }}
-.db-sq-label {{ color: {theme.MUTED}; font-size: .72rem; margin-left: .5rem; }}
-.db-legend {{ display: flex; gap: 1.2rem; font-size: .8rem; color: {theme.MUTED};
-  margin: .2rem 0 .4rem 0; flex-wrap: wrap; }}
-.db-chart text {{ font-size: 11px; fill: {theme.MUTED}; }}
-.db-n {{ color: {theme.MUTED}; font-size: .85rem; }}
+.db-sq-label {{ color: {theme.MUTED}; font-size: {theme.SIZE_META}px; margin-left: 8px; }}
+.db-legend {{ display: flex; gap: 20px; font-size: {theme.SIZE_META}px; color: {theme.MUTED};
+  margin: 4px 0 6px 0; flex-wrap: wrap; }}
+.db-chart text {{ font-size: {theme.SIZE_META}px; fill: {theme.MUTED}; }}
+.db-n {{ color: {theme.MUTED}; font-size: {theme.SIZE_BODY}px; }}
+/* ---- headline numbers (P-023): flat label-value cells side by side, no boxes ---- */
 .db-kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: .6rem; margin: .2rem 0 1rem 0; }}
-.db-kpi {{ background: {theme.PANEL}; border-radius: {theme.RADIUS}px; padding: 18px 20px; }}
+  gap: 0 32px; margin: 0 0 8px 0; }}
+.db-kpi {{ border-top: 1px solid {theme.DIVIDER}; padding: 10px 0 12px 0; }}
 .db-kpi .db-mark {{ margin-left: 6px; text-transform: none; letter-spacing: 0; }}
-.db-kpi-label {{ color: {theme.META}; font-size: 11.5px; font-weight: 500; letter-spacing: .04em;
-  text-transform: uppercase; }}
-.db-kpi-value {{ font-size: {theme.SIZE_FIGURE}px; font-weight: 500;
-  font-variant-numeric: tabular-nums; color: {theme.INK}; line-height: 1.3; }}
+.db-kpi-label {{ color: {theme.META}; font-size: {theme.SIZE_META}px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; }}
+.db-kpi-value {{ font-size: {theme.SIZE_LG}px; font-weight: 500;
+  font-variant-numeric: tabular-nums; color: {theme.INK}; line-height: 1.6; }}
 .db-kpi-fail .db-kpi-value {{ color: {theme.FAIL}; }}
 .db-kpi-warn .db-kpi-value {{ color: {theme.WARN}; }}
 .db-kpi-note {{ color: {theme.META}; font-size: {theme.SIZE_META}px; }}
-.db-page-kicker {{ margin: 1.2rem 0 .35rem 0; font-size: .74rem; }}
+.db-page-kicker {{ margin: 20px 0 6px 0; }}
 .db-xname {{ font-weight: 600; }}
-.db-id {{ color: {theme.MUTED}; font-size: .72rem; font-family: {theme.MONO}; }}
-/* ---- the page and card template (T59, P-022): title left, controls right, content, footer;
-   cards separate by shade, never a border, and a card inside a card draws no second box ---- */
+.db-id {{ color: {theme.MUTED}; font-size: {theme.SIZE_META}px; font-family: {theme.MONO}; }}
+/* ---- the page and section template (T59, flattened by T60 for P-023): a section is its
+   label over a hairline, then its content; no background, border, radius or padding ---- */
 .st-key-db-head {{ align-items: center; }}
 .st-key-db-head [data-testid="stHorizontalBlock"] {{ align-items: center; }}
-div[class*="st-key-db-card-"] {{ background: {theme.PANEL}; border-radius: {theme.RADIUS}px;
-  padding: {theme.PAD}px; gap: 12px; }}
-div[class*="st-key-db-card-"] div[class*="st-key-db-card-"] {{ background: transparent;
-  padding: 0; }}
+div[class*="st-key-db-card-"] {{ background: transparent; border: 0; border-radius: 0;
+  box-shadow: none; padding: 0; gap: 12px; margin-bottom: 24px; }}
+div[class*="st-key-db-card-"] div[class*="st-key-db-card-"] {{ margin-bottom: 0; }}
 div[class*="st-key-db-ctl-"] {{ justify-content: flex-end; gap: 8px; flex-wrap: wrap; }}
-.db-ct {{ color: {theme.META}; font-size: 11.5px; font-weight: 500; letter-spacing: .04em;
-  text-transform: uppercase; }}
+.db-ct {{ color: {theme.META}; font-size: {theme.SIZE_META}px; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; border-top: 1px solid {theme.DIVIDER};
+  padding-top: 10px; }}
 .db-ct-note {{ color: {theme.META}; font-size: {theme.SIZE_META}px; margin-top: 2px; }}
-.db-pfoot {{ margin-top: {theme.GAP}px; color: {theme.META}; font-size: {theme.SIZE_META}px;
+.db-pfoot {{ margin-top: 40px; color: {theme.META}; font-size: {theme.SIZE_META}px;
   display: flex; gap: 8px 16px; flex-wrap: wrap; align-items: baseline; }}
 .db-pfoot .db-glyphs {{ gap: 12px; }}
-.db-kpis {{ margin: 0; }}
-/* a wide table scrolls inside its card on a phone (only there: scrolling clips tooltips) */
+/* a wide table scrolls sideways on a phone (only there: scrolling clips tooltips) */
 @media (max-width: 640px) {{ .db-scroll {{ overflow-x: auto; }}
   .db-scroll > table {{ min-width: 560px; }} }}
 </style>
@@ -185,10 +186,11 @@ def context(title: str, *, controls: bool = False) -> Ctx:
 def card(
     key: str, title: str, note: str = "", *, controls: bool = False
 ) -> Iterator[object | None]:
-    """One block of the page template (T59, P-022): a card with its title on the left and,
-    with ``controls=True``, a controls row on the right (yielded for the caller to fill; else
-    ``None``), then the content the ``with`` body draws, then an optional footer
-    (:func:`card_footer`). Cards are told apart by shade only; depth goes in ``st.tabs``."""
+    """One block of the page template (T59; flat since T60, P-023): its label over a hairline
+    on the left and, with ``controls=True``, a controls row on the right (yielded for the caller
+    to fill; else ``None``), then the content the ``with`` body draws, then an optional footer
+    (:func:`card_footer`). No background, border, radius or shadow; depth goes in
+    ``st.tabs``."""
     head = f'<div class="db-ct">{escape(title)}</div>' + (
         f'<div class="db-ct-note">{escape(note)}</div>' if note else ""
     )
@@ -243,9 +245,22 @@ def exposed_sources(config: Config, hidden: frozenset[int]) -> frozenset[str]:
 def feed_tier(
     config: Config, source: str, instrument: str | None = None, dataset: str | None = None
 ) -> int | None:
-    """The most live tier ``source`` serves (for ``instrument``, and ``dataset`` when given),
-    from config; ``None`` when config lists no such feed. Used for the provenance of figures
-    on the system pages (a revised value, a cross-check gap), never to invent one."""
+    """The most live (lowest-numbered) tier ``source`` serves, from config. Used for the
+    provenance of figures on the system pages (a revised value, a cross-check gap), never to
+    invent a value.
+
+    Lookup order, widest last:
+
+    1. the feeds of ``source`` for ``instrument`` and ``dataset``, as given (``None`` matches
+       any);
+    2. when ``dataset`` was given and matched nothing (a dataset the config no longer lists):
+       the source's most live tier **for that instrument**, any dataset;
+    3. when ``instrument`` was given and still nothing matched (for example a source checked
+       against a proxy's feed): the source's most live tier **for any instrument**, any
+       dataset.
+
+    Returns ``None`` only when config lists no feed of ``source`` at all (for no instrument),
+    so the caller shows no tier rather than a guessed one."""
     feeds = [
         f.tier
         for i in config.instruments
