@@ -23,9 +23,12 @@ Data contract (:func:`points`): one point per business day, as a ``"YYYY-MM-DD"`
 sorted, without duplicates, NaN or infinities. Lightweight Charts places bars by index, so
 weekends and holidays leave no gaps. Every point carries a provenance index into its series'
 ``meta`` table (field, tier, source). The chart's tooltip shows those facts with the as-of
-date. Every chart is followed by :func:`attribution`: a visible "Charts by TradingView"
+date. Every chart that drew carries :func:`attribution`: a visible "Charts by TradingView"
 link and the library's attribution notice (the library's own logo is off: it carries a
-``title`` attribute).
+``title`` attribute). By default :func:`chart` draws it right under the chart; a page that
+places it itself (Home puts it at the right of the horizon row, T60) passes
+``with_attribution=False`` and draws :func:`attribution_html` there, only when :func:`chart`
+returned True (the TradingView chart drew).
 
 If the component cannot be used (the bundle is missing or fails its checksum, or the browser
 reports that it could not draw), :func:`chart` draws an Altair line of the same data with a
@@ -231,8 +234,8 @@ def attribution_html() -> str:
     # the link takes the line's colour through ``theme.apply()``'s ``.stMarkdown a { color:
     # inherit }``: Streamlit's sanitiser strips an inline ``color: … !important`` on the link
     return (
-        f'<div class="db-tv-attr" style="font-size:{theme.SIZE_META}px;color:{theme.META};'
-        f'margin-top:-6px">Charts by <a href="{ATTRIBUTION_URL}" target="_blank" '
+        f'<div class="db-tv-attr" style="font-size:{theme.SIZE_META}px;color:{theme.META}">'
+        f'Charts by <a href="{ATTRIBUTION_URL}" target="_blank" '
         f'rel="noopener noreferrer" style="text-decoration:underline" '
         f'aria-label="{ATTRIBUTION_TEXT} (opens tradingview.com)">'
         f"TradingView</a> · {ATTRIBUTION_NOTICE}</div>"
@@ -309,9 +312,13 @@ def chart(
     precision: int = 2,
     last: float | None = None,
     label: str = "Price chart",
+    with_attribution: bool = True,
 ) -> bool:
     """Draw one TradingView chart, then its attribution. Returns True when the TradingView
     chart was drawn, False when the Altair fallback was (it has no ``last`` price line).
+
+    ``with_attribution=False`` leaves the attribution to the caller, which must then draw
+    :func:`attribution_html` near the chart whenever this returns True (Home, T60).
 
     The first series is the main one (``last`` draws a dashed price line on it). Width fits
     the container. Falls back to Altair lines with a visible note when the component cannot
@@ -337,5 +344,6 @@ def chart(
         return False
     st.session_state.pop(_fail_key(key), None)  # drawn: a later failure is a new report
     component(spec=payload, key=key, default=None)
-    attribution()
+    if with_attribution:
+        attribution()
     return True

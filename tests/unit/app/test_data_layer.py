@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001  (the true minus sign is intentional output)
 """T56: one shared dashboard connection, rebuilt in the background only when the listing changed,
 and ``data_version`` keying the page caches.
 
@@ -311,3 +312,170 @@ def test_the_snapshot_cache_refreshes_its_clock_every_minute(
     now[0] = MON_0700 + timedelta(minutes=1)
     data.load_snapshot(config, frozenset({1}))
     assert calls == [MON_0700, MON_0700 + timedelta(minutes=1)]
+
+
+# --- T60 bugs 4 and 5: weekend and holiday changes, the latest run ----------------------------
+# SYNTHETIC: every row below is made up (brief_synth helpers).
+
+from brief_synth import FRI, THU, et, tick  # noqa: E402
+
+SAT_1000 = et(date(2026, 11, 14), "10:00")  # Saturday after the brief_synth Friday
+
+
+def _config_for(world: World) -> Config:
+    text = (REPO / "config.yaml").read_text(encoding="utf-8")
+    path = world.store.root.parent / "config.yaml"
+    path.write_text(
+        text.replace("local_root: ./.data", f"local_root: {world.store.root}"), encoding="utf-8"
+    )
+    return load_config(path)
+
+
+def _snapshot(world: World, now: Any, hidden: frozenset[int] = frozenset()) -> data.Snapshot:
+    cfg = _config_for(world)
+    try:
+        return data.build_snapshot(cfg, {}, now, hidden)
+    finally:
+        data.wait_for_refresh(cfg)
+        slot = data._SLOTS.pop((cfg.storage.backend, data._where(cfg)), None)
+        if slot is not None and slot.current is not None:
+            slot.current.conn.close()
+
+
+def _row(snap: data.Snapshot, iid: str) -> Any:
+    return next(r for r in snap.model.rows() if r.instrument_id == iid)
+
+
+@pytest.mark.parametrize("hidden", [frozenset(), frozenset({1})], ids=["local", "hosted"])
+def test_saturday_shows_fridays_change_labelled_fri(tmp_path: Path, hidden: frozenset[int]) -> None:
+    """Bug 4: on a Saturday the strip and watchlist show Friday's close against Thursday's,
+    labelled "Fri", not a dash. Friday ticks stored after the close (a tier-1 alpaca tick and a
+    tier-2 yahoo quote) are compared with Thursday's close too, in both modes."""
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    yh = {"source": "yahoo", "dataset": "history", "tier": 2, "unit": "index_pts"}
+    w.observations(
+        [
+            daily("ES_F", THU, 6024.0, **yh),
+            daily("ES_F", FRI, 6000.0, **yh),
+            daily("SPY", THU, 600.0),
+            tick("SPY", et(FRI, "17:30"), 594.0, unit="USD"),  # yahoo quote after the close
+            tick("SPY", et(FRI, "17:31"), 595.0, tier=1, source="alpaca", dataset="iex_latest"),
+        ]
+    )
+    snap = _snapshot(w, SAT_1000, hidden)
+    es, spy = _row(snap, "ES_F"), _row(snap, "SPY")
+    assert es.change_text.startswith("−0.4")
+    assert es.basis == "Thu close"
+    assert panels.move_label(es) == "Fri"
+    assert spy.change.status == "ok"
+    assert spy.change.previous.value == 600.0  # Thursday's close
+    assert spy.change.last.tier == (2 if hidden else 1)
+    assert panels.move_label(spy) == "Fri"
+
+
+def test_mlk_monday_futures_tick_says_since_friday_close(tmp_path: Path) -> None:
+    """Bug 4, S after L: ES futures traded on MLK Monday (an XNYS holiday): the move since
+    Friday's close, labelled "since Fri close" (not "Mon", which the Saturday rule would say)."""
+    from app.components import panels
+
+    fri, mon = date(2026, 1, 16), date(2026, 1, 19)
+    w = World(tmp_path / "w")
+    yh = {"source": "yahoo", "dataset": "history", "tier": 2, "unit": "index_pts"}
+    w.observations(
+        [
+            daily("ES_F", date(2026, 1, 15), 6100.0, **yh),
+            daily("ES_F", fri, 6000.0, **yh),
+            tick("ES_F", et(mon, "11:00"), 6030.0, unit="index_pts"),
+        ]
+    )
+    es = _row(_snapshot(w, et(mon, "12:00")), "ES_F")
+    assert es.change.previous.value == 6000.0
+    assert es.basis == "Fri close"
+    assert panels.move_label(es) == "since Fri close"
+    assert "since Fri" in panels.basis_text(es)
+
+
+def test_weekday_before_the_run_keeps_no_move_yet(tmp_path: Path) -> None:
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    yh = {"source": "yahoo", "dataset": "history", "tier": 2, "unit": "index_pts"}
+    w.observations([daily("ES_F", THU, 6024.0, **yh), daily("ES_F", FRI, 6000.0, **yh)])
+    es = _row(_snapshot(w, et(MON, "05:00")), "ES_F")
+    assert es.change.status == "no_move_yet"
+    assert panels.move_label(es) == ""
+
+
+def test_saturday_status_shows_the_latest_run(tmp_path: Path) -> None:
+    """Bug 5: on a day without a run the status names the latest run and its checks."""
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    w.dq(FRI, [("fresh_a", "pass", None, None), ("fresh_b", "pass", None, None)], run_id="RF")
+    w.run(FRI)
+    snap = _snapshot(w, SAT_1000)
+    assert snap.last_run is not None
+    assert snap.last_run[0] == FRI
+    assert snap.model.health.summary.target_date == FRI
+    assert snap.model.health.status == "ok"
+    ov = data.overview(snap, "local", frozenset())
+    line = panels.status(ov, snap.last_run)
+    assert "Last run Fri" in line
+    assert "2 checks ok" in line
+    assert panels.NO_CHECKS not in line
+
+
+def test_status_without_any_run_says_no_checks_yet(tmp_path: Path) -> None:
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    snap = _snapshot(w, SAT_1000)
+    assert snap.last_run is None
+    ov = data.overview(snap, "local", frozenset())
+    assert panels.NO_CHECKS in panels.status(ov, snap.last_run)
+
+
+@pytest.mark.parametrize(
+    ("iid", "rows", "now", "label"),
+    [
+        (  # FX traded on Thanksgiving (an XNYS holiday): since Wednesday's close
+            "EURUSD",
+            [
+                daily("EURUSD", date(2026, 11, 24), 1.00, source="yahoo", dataset="history",
+                      tier=2, unit="fx_rate"),
+                daily("EURUSD", date(2026, 11, 25), 1.05, source="yahoo", dataset="history",
+                      tier=2, unit="fx_rate"),
+                tick("EURUSD", et(date(2026, 11, 26), "06:00"), 1.071, unit="fx_rate"),
+            ],
+            et(date(2026, 11, 26), "07:00"),
+            "since Wed close",
+        ),
+        (  # N225 closed on Good Friday (an XNYS holiday), seen on Saturday: since Thursday
+            "N225",
+            [
+                daily("N225", date(2026, 4, 1), 30000.0, unit="index_pts"),
+                daily("N225", date(2026, 4, 2), 31000.0, unit="index_pts"),
+                daily("N225", date(2026, 4, 3), 31620.0, unit="index_pts"),
+            ],
+            et(date(2026, 4, 4), "10:00"),
+            "since Thu close",
+        ),
+    ],
+    ids=["thanksgiving_fx", "good_friday_n225"],
+)  # fmt: skip
+def test_holiday_trades_say_since_the_last_session_close(
+    tmp_path: Path, iid: str, rows: list[dict[str, Any]], now: Any, label: str
+) -> None:
+    """Bug 4, S after L: the label is "since <L's weekday> close", never S's own weekday
+    ("Thu", "Fri"), which the S-on-or-before-L rule would give."""
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(rows)
+    row = _row(_snapshot(w, now), iid)
+    assert row.change.status == "ok"
+    assert panels.move_label(row) == label

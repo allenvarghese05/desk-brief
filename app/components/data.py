@@ -35,7 +35,7 @@ import streamlit as st
 from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
-from deskbrief.query import Lineage, series_all
+from deskbrief.query import Lineage, latest_check_run, series_all
 from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Notable, Row, Section
 from deskbrief.store import duck
 from deskbrief.store.backend import StorageError
@@ -327,6 +327,9 @@ class Snapshot:
     model: BriefModel
     #: (tier, value, ET date, source) of official daily values, oldest first
     series: dict[str, tuple[tuple[int, float, date, str], ...]]
+    #: the latest run with checks (T60 bug 5): its target date and start time; None when no
+    #: run has recorded a check, the only case the status line says "No checks yet"
+    last_run: tuple[date, datetime | None] | None = None
 
 
 def build_snapshot(
@@ -340,9 +343,22 @@ def build_snapshot(
     ``exclude_tiers`` (the mode's hidden tiers) reaches the latest-value read, so a hidden-tier
     latest value falls back to the best remaining tier. ``series_all`` stays unfiltered here;
     :func:`overview` applies the per-mode filter to the history.
+
+    Health describes the latest run with checks (T60 bug 5, ``query.latest_check_run``: the
+    greatest target date on or before today with check rows evaluated by ``now``), passed to
+    ``BriefModel.from_store(health_date=...)``, so a weekend or a morning before the run shows
+    the last run's checks rather than none. With no such run the model reads today, as before.
     """
     with shared_connection(config, env) as conn:
-        model = BriefModel.from_store(conn, config, et_date(now), now, exclude_tiers=exclude_tiers)
+        latest = latest_check_run(conn, now)
+        model = BriefModel.from_store(
+            conn,
+            config,
+            et_date(now),
+            now,
+            exclude_tiers=exclude_tiers,
+            health_date=latest.target_date if latest is not None else None,
+        )
         history = series_all(conn, SPARK_DAYS, now)
     return Snapshot(
         model,
@@ -350,6 +366,7 @@ def build_snapshot(
             k: tuple((r.tier, r.value, et_date(r.as_of), r.source) for r in v)
             for k, v in history.items()
         },
+        (latest.target_date, latest.started_at) if latest is not None else None,
     )
 
 

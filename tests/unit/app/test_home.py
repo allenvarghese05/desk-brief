@@ -55,12 +55,13 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     assert "Desk Brief" in text
     assert "Mon 16 Nov" in text
     assert "07:00 ET" in text
-    assert "Healthy" in text
+    assert "Last run Mon" in text  # T60: the status line names the latest run's day
+    assert "2 checks ok" in text
     assert "2/2 checks pass" in text
     assert "hosted" in text
     assert "delayed+official" in text
     for title in ("Rates", "FX", "Commodities", "Equities"):
-        assert f'db-sec-title">{title}</div>' in text
+        assert f'class="db-grp-chev">▾</span>{title}<' in text  # T60: groups start open
     assert "Cross checks" in nav_titles(at)  # T57: the page list is st.navigation's top bar
     assert at.button(key="-".join(("pick", "health"))).label == (
         "Open Data health: 2/2 checks pass"  # T57: counts readable without hovering
@@ -239,13 +240,13 @@ def test_overview_numbers_use_the_compact_tag(run_home: Run) -> None:
     assert ten.count('class="db-prov"') == 1  # the change does not repeat the tag
 
 
-def test_headline_tiles_link_to_the_instrument_page(run_home: Run) -> None:
+def test_strip_items_select_the_instrument(run_home: Run) -> None:
     at = run_home("hosted")
     text = page(at)
-    assert '<a class="db-tile' in text
+    assert '<a class="db-sx' in text
     assert 'data-db-id="UST_10Y"' in text
     assert at.button(
-        key="-".join(("pick", "tile", "UST_10Y"))
+        key="-".join(("pick", "strip", "UST_10Y"))
     )  # T57: a click selects it in-session
 
 
@@ -313,9 +314,9 @@ def test_single_search_match_selects_it(run_home: Run) -> None:
 
 
 def verdict_card(text: str) -> str:
-    """The right rail's "Do the sources agree?" card (T58: the old tier ladder)."""
-    return text.split('<div class="db-card-h">Do the sources agree?</div>', 1)[1].split(
-        '<div class="db-card-h">Risk and range</div>', 1
+    """The "Do the sources agree?" block under the chart (T58's right rail card)."""
+    return text.split('<div class="db-label">Do the sources agree?</div>', 1)[1].split(
+        '<div class="db-label">Risk and range</div>', 1
     )[0]
 
 
@@ -396,8 +397,9 @@ def test_hosted_tearsheet_never_shows_tier1_values(run_home: Run) -> None:
 def test_horizons_say_how_much_history_they_need(run_home: Run) -> None:
     text = page(select(run_home("hosted"), "UST_10Y"))
     strip = text.split('aria-label="performance over horizons"', 1)[1].split("</div></div>", 1)[0]
-    for label in ("1D", "1W", "1M", "3M", "YTD", "1Y"):
+    for label in ("1W", "1M", "3M", "YTD", "1Y"):
         assert f">{label}<" in strip
+    assert ">1D<" not in strip  # T60: the 1D change is in the hero pill
     assert "needs" in strip  # the synthetic store holds days, not a year
 
 
@@ -450,8 +452,12 @@ def test_verdict_card_answers_do_the_sources_agree(run_home: Run) -> None:
     card = verdict_card(page(select(run_home("local"), "SPY")))
     verdict = re.search(r'<div class="db-verdict db-verdict-(\w+)">(.*?)</div>', card, flags=re.S)
     assert verdict is not None
-    assert verdict.group(1) in ("ok", "warn", "fail")
-    assert re.search(r'db-verdict-ico" aria-hidden="true">[✓!✕]<', verdict.group(2))
+    tone = verdict.group(1)
+    assert tone in ("ok", "warn", "fail")
+    # T60: the answer is a word (Agree, Not comparable, No); only warn shows the warn mark
+    answer = {"ok": "Agree", "warn": "Not comparable", "fail": "No"}[tone]
+    assert f"<b>{answer}</b>" in verdict.group(2)
+    assert ("db-mark-warn" in verdict.group(2)) == (tone == "warn")
     assert card.count('class="db-src-row"') >= 2  # one row per visible tier with a value
     one = verdict_card(page(select(run_home("hosted"), "UST_2Y")))
     assert "One source only" in one
@@ -476,12 +482,12 @@ def qp(at: AppTest, key: str) -> str:
 def visible(html: str) -> str:
     """Text a sighted user reads: no screen-reader-only spans, no tooltips, no tags."""
     html = re.sub(r'<span class="db-sr[^"]*"[^>]*>.*?</span>', "", html, flags=re.S)
-    html = re.sub(r'<span class="db-tip"[^>]*>.*?</span></span>', "</span>", html, flags=re.S)
+    html = re.sub(r'<span class="db-tip[^"]*"[^>]*>.*?</span></span>', "</span>", html, flags=re.S)
     return re.sub(r"<[^>]+>", " ", html)
 
 
 def chart_card(text: str) -> str:
-    return text.split('<div class="db-ch">', 1)[1].split('<div class="db-hzs"', 1)[0]
+    return text.split('<div class="db-label db-ch">', 1)[1].split('<div class="db-hzs"', 1)[0]
 
 
 def test_layout_top_bar_has_brand_search_and_one_status_dot(run_home: Run) -> None:
@@ -495,15 +501,23 @@ def test_layout_top_bar_has_brand_search_and_one_status_dot(run_home: Run) -> No
     assert '<span class="db-brand">Desk Brief</span>' in text
 
 
-def test_layout_headline_strip_outlines_the_selection(run_home: Run) -> None:
+def test_layout_strip_is_one_line_with_the_basis_said_once(run_home: Run) -> None:
+    """P-023: five instruments as plain text (no tiles, pills or sparklines); a basis the items
+    share is said once at the start, an item with another basis says its own."""
     at = select(run_home("hosted"), "UST_10Y")
-    tiles = re.findall(r'<a class="db-tile[^"]*" data-db-id="([^"]+)"', page(at))
-    assert 1 <= len(tiles) <= 5
-    sel = re.findall(r'<a class="db-tile is-sel" data-db-id="([^"]+)"', page(at))
+    text = page(at)
+    items = re.findall(r'<a class="db-sx[^"]*" data-db-id="([^"]+)"', text)
+    assert 1 <= len(items) <= 5
+    sel = re.findall(r'<a class="db-sx is-sel" data-db-id="([^"]+)"', text)
     assert sel == ["UST_10Y"]
-    tile = re.search(r'<a class="db-tile is-sel".*?</a>', page(at), flags=re.S)
-    assert tile is not None
-    assert 'class="db-prov"' in tile.group(0)
+    item = re.search(r'<a class="db-sx is-sel".*?</a>', text, flags=re.S)
+    assert item is not None
+    assert 'class="db-prov"' in item.group(0)
+    strip = "".join(re.findall(r'<a class="db-sx.*?</a>', text, flags=re.S))
+    assert "db-spark" not in strip
+    assert "db-pill" not in strip
+    assert "db-tile" not in text
+    assert text.count('<div class="db-sx-lead">') <= 1  # the shared basis, once
 
 
 def test_layout_watchlist_has_full_names_and_no_raw_ids(run_home: Run) -> None:
@@ -514,8 +528,8 @@ def test_layout_watchlist_has_full_names_and_no_raw_ids(run_home: Run) -> None:
     text = page(run_home("hosted"))
     rows = re.findall(ROW, text, flags=re.S)
     ten = next(r for r in rows if 'data-db-id="UST_10Y"' in r)
-    assert "<b>US 10-year Treasury yield</b>" in ten
-    assert "<small>10Y" in ten
+    assert "<b>10Y" in ten  # T60: the short id first, never truncated
+    assert "<small>US 10-year Treasury yield</small>" in ten  # then the full name
     for r in rows:
         shown = visible(r.split(">", 1)[1])
         assert not re.search(r"\b[A-Z0-9]+_[A-Z0-9_]+\b", shown), shown  # no UST_10Y, ES_F
@@ -525,8 +539,8 @@ def test_layout_watchlist_has_full_names_and_no_raw_ids(run_home: Run) -> None:
         assert "_" not in panels.short(stub)
     css = panels.HOME_CSS
     rule = css.split(".db-wl-name small {", 1)[1].split("}", 1)[0]
-    assert "white-space: normal" in rule
-    assert "text-overflow: clip" in rule
+    assert "white-space: nowrap" in rule
+    assert "text-overflow: ellipsis" in rule
 
 
 def test_sigma_tags_mark_unusual_moves_on_watchlist_rows() -> None:
@@ -563,18 +577,21 @@ def test_layout_chart_card_header_controls_and_horizons(run_home: Run) -> None:
     assert rng.options == ["1M", "3M", "6M", "1Y", "All"]
     assert at.selectbox(key="vs-ES_F").label == "Compare with"  # in the small menu
     assert at.get("download_button")[0].label == "Download CSV of the range shown"
-    strip = text.split('aria-label="performance over horizons"', 1)[1]
-    for label in ("1D", "1W", "1M", "3M", "YTD", "1Y"):
-        assert f">{label}<" in strip
+    # P-023: the pill holds the 1D change and its basis; the horizon row starts at 1W
+    assert re.search(r'<span class="db-pill db-pill-(up|down|flat)">', card)
+    assert '<span class="db-pill-basis">1D · ' in card
+    row = text.split('aria-label="performance over horizons"', 1)[1].split("</div></div>", 1)[0]
+    labels = re.findall(r'class="db-hz-label">([^<]+)<', row)
+    assert labels == ["1W", "1M", "3M", "YTD", "1Y"]
     assert '<div class="db-chfoot">Daily ' in text  # chart and compare captions: the footer
 
 
-def test_layout_tabs_and_right_rail(run_home: Run) -> None:
+def test_layout_tabs_and_notes_under_the_chart(run_home: Run) -> None:
     at = run_home("local")
     assert [t.label for t in at.tabs] == ["All values", "Lineage", "Checks", "Corrections"]
     text = page(at)
-    assert '<div class="db-card-h">Do the sources agree?</div>' in text
-    risk = text.split('<div class="db-card-h">Risk and range</div>', 1)[1]
+    assert '<div class="db-label">Do the sources agree?</div>' in text
+    risk = text.split('<div class="db-label">Risk and range</div>', 1)[1]
     for label in ("Realised vol, 20 days", "Latest move"):
         assert f"<span>{label}</span>" in risk
     assert '<div class="db-rangebox">' in risk
@@ -851,7 +868,8 @@ def test_every_figure_of_a_proxy_shows_proxy(run_home: Run, mode: str) -> None:
     """The sweep: every compact figure on a proxy's page (strip, header, horizons, risk, range,
     verdict, all values, corrections) carries "proxy" visibly and in its label."""
     at = select(run_home(mode, rows=_caveat_rows()), "SPY")
-    card = page(at).split('<div class="db-ch">', 1)[1].split('<div class="db-foot">', 1)[0]
+    hero = page(at).split('<div class="db-label db-ch">', 1)[1]
+    card = hero.split('<div class="db-label">Watchlist', 1)[0]  # the hero column, then tabs
     card += "\n".join(m.value for t in at.tabs for m in t.markdown if not m.value.startswith("- "))
     figs = re.findall(r'<span class="db-fig">(?:(?!<span class="db-fig">).)*', card, flags=re.S)
     figs = [f for f in figs if 'class="db-prov' in f]  # with a visible glyph
@@ -930,3 +948,258 @@ def test_known_limits_describe_the_v2_layout() -> None:
     assert "Biggest moves" not in text
     assert "sigma tag on their watchlist row" in text
     assert "yield curve (on Macro)" in text
+
+
+# --- T60: Home v3, no containers (P-023) ---------------------------------------------------
+
+
+def _sheets() -> dict[str, str]:
+    from app import theme
+    from app.components import kit, panels
+
+    return {
+        "theme.CSS": theme.CSS,
+        "kit.PAGE_CSS": kit.PAGE_CSS,
+        "panels.HOME_CSS": panels.HOME_CSS,
+    }
+
+
+def _rule(css: str, selector: str) -> str:
+    """The declarations of the first rule whose selector list is exactly ``selector``."""
+    m = re.search(r"(?:^|[}\n])\s*" + re.escape(selector) + r"\s*\{\{?([^}]*)\}", css)
+    assert m is not None, selector
+    return m.group(1)
+
+
+@pytest.mark.parametrize("name", ["theme.CSS", "kit.PAGE_CSS", "panels.HOME_CSS"])
+def test_shared_stylesheets_are_flat(name: str, flat_css: Callable[[str], list[str]]) -> None:
+    assert flat_css(_sheets()[name]) == []
+
+
+def test_flat_checker_is_default_deny(flat_css: Callable[[str], list[str]]) -> None:
+    """The checker fails on the T59 KPI panel, on any selector it has never heard of, and on
+    every way of drawing a box: borders by shorthand or longhand, outlines, prefixed shadows."""
+    denied = [
+        ".db-kpi { background: #13161B; border-radius: 12px; padding: 18px; }",
+        ".brand-new-thing { box-shadow: 0 8px 24px rgba(0,0,0,.4); }",
+        ".x { -webkit-box-shadow: 0 1px 2px #000; }",
+        ".x { filter: drop-shadow(0 1px 2px #000); }",
+        ".x { border: 1px solid #22262E; }",  # a box, not a hairline
+        ".x { border-left: 1px solid #22262E; }",
+        ".x { border-right-width: 1px; }",
+        ".x { border-width: 1px; }",
+        ".x { border-color: #22262E; }",
+        ".x { border-inline-start: 2px solid #fff; }",
+        ".x { border-top: 2px solid #222; }",  # not a hairline
+        ".x { border-top: 1px dashed #222; }",
+        ".x { border-top: 1px solid #222; border-bottom: 1px solid #222; }",
+        ".x { border-top-width: 1px; border-bottom-width: 1px; }",  # two edges by longhands
+        ".x { border-top: 1px solid #222; border-bottom-style: solid; }",
+        ".x { border-top-left-radius: 4px; }",
+        ".x { outline: 1px solid #22262E; }",  # an outline is a box too
+        ".x:focus-within { outline: 2px solid #5B9DFF; }",  # not one of the listed indicators
+        "@media (max-width: 640px) { .x { background: #13161B; } }",
+        ".db-kpi .db-x, .db-tip { background: #20252D; }",  # one denied selector in the list
+        ".db-kpi .db-tip { background: #20252D; }",  # a tooltip name inside a container rule
+    ]
+    for css in denied:
+        assert flat_css(css), css
+    allowed = [
+        ".x { border-top: 1px solid #22262E; background: transparent; }",
+        ".x { border-bottom-width: 1px; border-bottom-style: solid; border-left: 0; }",
+        ".x { border: 0; outline: none; box-shadow: none; border-radius: 0; }",
+        ".x { border-collapse: collapse; border-spacing: 0; }",
+        ".db-tip { background: #20252D; border-radius: 6px; }",  # exempt: tooltip
+        ".db-prov:focus-visible { box-shadow: 0 0 0 2px #5B9DFF; }",  # exempt: focus
+    ]
+    for css in allowed:
+        assert not flat_css(css), css
+
+
+def test_native_expander_tab_panel_and_dataframe_are_flat() -> None:
+    """The Streamlit 1.67 DOM (react-aria tabs: stTab, stTabPanel, the selection indicator and
+    the tab list's ::after hairline; checked in a rendered page)."""
+    from app import theme
+
+    css = theme.CSS
+    for sel in (
+        '[data-testid="stExpander"] details',
+        '[data-testid="stExpanderDetails"]',
+        '[data-testid="stTabs"] [data-testid="stTabPanel"]',
+        '[data-testid="stDataFrame"]',
+        'div[data-testid="stVerticalBlock"]:not([class*="st-key-db-"])',
+    ):
+        rule = _rule(css, sel)
+        assert "border: 0" in rule, sel
+        assert "border-radius: 0" in rule, sel
+    for sel in (
+        '[data-testid="stExpander"] details',
+        '[data-testid="stTabs"] [data-testid="stTabPanel"]',
+        '[data-testid="stTabs"] [data-testid="stTab"]',
+    ):
+        assert "background: transparent" in _rule(css, sel)
+    assert "height: 1px" in _rule(css, '[data-testid="stTabs"] .react-aria-SelectionIndicator')
+    assert "height: 1px" in _rule(css, '[data-testid="stTabs"] [role="tablist"]::after')
+    assert "baseweb" not in css  # Streamlit 1.67 renders no BaseWeb tabs
+    assert "stVerticalBlockBorderWrapper" not in css
+
+
+def test_four_type_sizes() -> None:
+    """P-023: 42 px hero (36 px on a phone), 15, 13 and 11.5 px; nothing else."""
+    from app import theme
+
+    allowed = {f"{s:g}px" for s in theme.TYPE_SIZES}
+    for name, css in _sheets().items():
+        sizes = set(re.findall(r"font-size:\s*([\d.]+(?:px|rem|em))", css))
+        sizes |= set(re.findall(r"font:\s*\d+\s+([\d.]+px)", css))
+        assert sizes <= allowed, (name, sizes - allowed)
+
+
+def test_home_blocks_sit_in_their_p023_places(run_home: Run) -> None:
+    """Top bar, strip, then the main row (hero, then the watchlist), then the tabs, footer."""
+    text = page(run_home("local"))
+    order = [
+        '<span class="db-brand">',
+        '<div class="db-status">',
+        '<a class="db-sx',
+        '<div class="db-label db-ch">',
+        'class="db-pill',
+        '<div class="db-ch-foot">',
+        'aria-label="performance over horizons"',
+        '<div class="db-label">Do the sources agree?</div>',
+        '<div class="db-label">Risk and range</div>',
+        '<div class="db-label">Watchlist',
+        "Every value we hold",
+        '<div class="db-foot">',
+    ]
+    at = [text.find(s) for s in order]
+    assert -1 not in at, [s for s, i in zip(order, at, strict=True) if i < 0]
+    assert at == sorted(at)
+
+
+def test_strip_says_a_shared_basis_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from app.components import panels
+    from app.components.values import Provenance
+
+    labels = {"A": "Fri", "B": "Fri", "C": "Fri", "D": "vs official"}
+    rows = [
+        SimpleNamespace(instrument_id=i, name=i, available=True, value_text="1", change_text="+1%")
+        for i in labels
+    ]
+    ov = SimpleNamespace(headline=[(r.instrument_id, r) for r in rows], as_of=MON_0700)
+    monkeypatch.setattr(panels, "move_label", lambda r: labels[r.instrument_id])
+    monkeypatch.setattr(panels, "provenance_of", lambda r, now: Provenance("s", 3, "x", "close"))
+    monkeypatch.setattr(panels, "_change", lambda r, p: "+1%")
+    lead, items = panels.strip_items(ov)  # type: ignore[arg-type]
+    assert lead == "Fri close"
+    bodies = dict(items)
+    assert all("db-sx-basis" not in bodies[i] for i in "ABC")
+    assert 'db-sx-basis">vs official<' in bodies["D"]
+
+
+def test_watchlist_runs_full_length_and_the_horizon_row_holds_the_attribution(
+    run_home: Run,
+) -> None:
+    from app.components import tvchart
+
+    src = (REPO / "app" / "views" / "markets.py").read_text(encoding="utf-8")
+    assert 'st.container(key="db-watch")' in src  # no height=: never an inner scroller
+    assert "WATCH_HEIGHT" not in src
+    under = page(run_home("local")).split('<div class="db-under">', 1)[1]
+    _, rest = under.split('aria-label="performance over horizons"', 1)[1].split("</div></div>", 1)
+    assert rest.startswith(tvchart.attribution_html())  # at the right of the horizons
+
+
+def test_attribution_only_when_the_tradingview_chart_drew(
+    run_home: Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.components import tvchart
+
+    monkeypatch.setattr(tvchart, "_component", lambda: None)  # the Altair fallback draws
+    at = run_home("local")
+    assert tvchart.NOTE_FALLBACK in page(at)
+    assert tvchart.attribution_html() not in page(at)
+
+
+def test_a_folded_group_keeps_the_selected_row(run_home: Run) -> None:
+    at = select(run_home("hosted"), "UST_10Y")
+    at.button(key="fold-rates").click().run()
+    assert not at.exception
+    keys = {b.key for b in at.button}
+    assert "pick-wl-UST_10Y" in keys  # the selection never folds away
+    assert "pick-wl-UST_2Y" not in keys  # the rest of the group did
+    assert "pick-wl-EURUSD" in keys  # other groups stay open
+    assert at.button(key="fold-rates").label == "Unfold Rates"
+    at.button(key="fold-rates").click().run()
+    assert "pick-wl-UST_2Y" in {b.key for b in at.button}
+
+
+# --- T60 bugs 1-3: CSS regression checks -----------------------------------------------------
+
+
+def test_bug1_verdict_wraps_and_links_never_overlap_the_range() -> None:
+    from app.components import panels
+
+    css = panels.HOME_CSS
+    src = _rule(css, ".db-src-row > span")
+    assert "min-width: 0" in src
+    assert "overflow-wrap: anywhere" in src
+    assert "grid-template-columns: minmax(0, 1fr) auto" in _rule(css, ".db-src-row")
+    assert "overflow-wrap: anywhere" in _rule(css, ".db-verdict-p, .db-verdict-sum")
+    links = _rule(css, ".st-key-db-links")
+    assert "margin-top: 16px" in links
+    assert "border-top: 1px solid" in links
+    assert "position: relative" in links
+    assert "position: static" in _rule(css, ".db-range-ends > span")
+    assert not re.search(r"margin(-top)?:\s*-", _rule(css, ".db-rangebox"))
+    # the notes columns never squeeze: each takes half the hero, both wrap
+    assert "min-width: 0" in _rule(css, ".st-key-db-detail, .st-key-db-risk")
+
+
+def test_bug2_row_hover_content_is_fixed_and_opens_on_focus(run_home: Run) -> None:
+    from app.components import panels
+
+    css = panels.HOME_CSS
+    assert "position: fixed" in _rule(css, ".db-tip.db-wl-tip")
+    wl = 'div[class*="st-key-db-pick-wl-"]'
+    assert f"{wl}:hover .db-wl-tip, {wl}:has(button:focus-visible) .db-wl-tip" in css
+    text = page(select(run_home("local"), "SPY"))
+    for r in re.findall(ROW, text, flags=re.S):
+        tip = re.search(r'<span class="db-tip db-wl-tip"[^>]*>(.*?)</span></span>', r, flags=re.S)
+        assert tip is not None, r
+        if "no data" in tip.group(1):
+            continue
+        for part in ('class="db-field">', 'class="db-src">', 'class="db-asof">'):
+            assert part in tip.group(1)  # field, source and as-of, with the name and tier
+        assert re.search(r"(live|delayed|official)", tip.group(1))
+        assert "title=" not in r
+
+
+def test_bug3_names_never_break_one_letter_per_line() -> None:
+    from app.components import panels
+
+    css = panels.HOME_CSS
+    b = _rule(css, ".db-wl-name b")
+    assert "white-space: nowrap" in b
+    small = _rule(css, ".db-wl-name small")
+    for decl in ("white-space: nowrap", "overflow: hidden", "text-overflow: ellipsis"):
+        assert decl in small
+    assert "min-width: 0" in _rule(css, ".db-wl-name")
+    # the watchlist keeps about 352 px beside the hero and goes full width below 960 px
+    watch = '[data-testid="stColumn"]:has(.st-key-db-watch)'
+    assert "flex: 0 0 352px" in _rule(css, watch)
+
+
+def test_all_values_source_folds_into_the_date_cell_on_a_phone(run_home: Run) -> None:
+    from app.components import panels
+
+    at = select(run_home("local"), "UST_10Y")
+    body = tab(at, "All values")
+    assert "<th class='db-c-src'>Source</th>" in body
+    assert "<span class='db-tagline db-src-m'>treasury · official</span>" in body
+    assert (
+        ".db-values .db-c-src {{ display: none; }}".replace("{{", "{").replace("}}", "}")
+        in panels.HOME_CSS
+    )

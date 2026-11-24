@@ -10,6 +10,7 @@ Functions
 ``health_summary(duck, target_date)``          DQ / cross-check counts, issues, source status
                                                (mirrored ``consistency`` rows count once)
 ``instrument_flags(duck, target_date)``        worst check / cross-check status per instrument
+``latest_check_run(duck, now)``                the latest run with check rows known at ``now``
 ``series(duck, instrument_id, days, at)``      one official daily value per ET date
 ``series_all(duck, days, at)``                 the same for every instrument in one query
 ``lineage(duck, instrument_id, at)``           provenance of the latest value
@@ -28,13 +29,31 @@ every row is excluded is absent, as if it had no data. Baselines honour the same
 Health (``health_summary``, ``instrument_flags``, the cross-check items) reads one run for the
 date: the newest run that wrote any row to ``dq_results`` or ``crosscheck_results`` (one run id
 for both tables). Re-runs keep every run's rows (P-008), but a check that failed in a superseded
-run does not count.
+run does not count. ``health_summary`` and ``instrument_flags`` take an optional ``as_of``: when
+given, check rows evaluated after it, ``runs`` rows started after it and ``source_log`` rows
+requested after it are ignored, so a re-run stored later cannot change a brief written earlier.
+``None`` (the default) reads everything, as before. :func:`latest_check_run` finds the date to
+read on a day without a run of its own (a weekend or holiday).
 
 Overnight change (P-009)
 ------------------------
 * price family (``field`` close/last; indices, futures, ETFs, FX ticks): change in **%** (VIX in
   index points) versus the **previous NYSE close** (``field = close``, 1d, on the previous XNYS
   business day: Monday -> Friday, holidays skipped).
+* price family when ``report_date`` is **not an XNYS session** (a weekend or holiday; T60 bug 4),
+  for every price interval (tick, 1m, 1d). Let L be the last XNYS session before ``report_date``
+  and S the ET date of the last value:
+
+  - S on or before L (Saturday, including Friday ticks stored after the close): the baseline is
+    the 1d close of the session before S, and the basis names that session's weekday
+    (``"Thu close"``). Such a row is never "no move yet".
+  - S after L (a market that traded on an XNYS holiday: ES futures on MLK Monday, FX on
+    Thanksgiving, N225 on Good Friday seen on Saturday): the baseline stays L's own close and the
+    basis is ``"<L's weekday> close"`` (``"Fri close"``).
+
+  On XNYS sessions nothing changes, including "no move yet" before the morning run. Scheduled
+  morning runs only happen on XNYS sessions (``pipeline/jobs.py``), so the scheduled email is
+  unchanged; a manual ``--date`` run for a day that is not a session does use this rule.
 * yields: change in **bp** versus the **previous official value**.
   A tick compared with an official baseline carries a note saying so (different sources).
 * reference rates (``field = rate``, e.g. the ECB fix) and macro series: change versus the
@@ -57,7 +76,7 @@ from typing import Any
 
 import duckdb
 
-from deskbrief.calendars import prev_business_day
+from deskbrief.calendars import is_business_day, prev_business_day
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import ensure_utc, et_date
 
@@ -80,6 +99,12 @@ CHANGE_DECIMALS = 9
 BASIS_NYSE_CLOSE = "previous NYSE close"
 BASIS_OFFICIAL = "previous official value"
 BASIS_WEEKLY = "previous weekly value"
+
+
+def session_close_basis(session: date) -> str:
+    """Basis of a price change off an XNYS session: ``"Thu close"`` for a Thursday baseline."""
+    return f"{session:%a} close"
+
 
 _ET_DATE = "CAST(timezone('America/New_York', o.as_of) AS DATE)"
 _FIELD_RANK = (
@@ -134,7 +159,7 @@ class ChangeRow:
     last: ValueRow
     previous: ValueRow | None
     family: str  # price | yield | rate | macro
-    basis: str  # BASIS_NYSE_CLOSE | BASIS_OFFICIAL
+    basis: str  # BASIS_NYSE_CLOSE | BASIS_OFFICIAL | BASIS_WEEKLY | "<weekday> close"
     change: float | None
     change_unit: str  # pct | bp | pts | pp
     status: str  # ok | no_baseline | no_move_yet
@@ -177,6 +202,15 @@ class SourceHealth:
     status: str  # ok | failed | skipped | missing
     n_fetches: int
     n_failed: int
+
+
+@dataclass(frozen=True)
+class RunRef:
+    """A run that wrote check rows: its target date, id and (if recorded) start time."""
+
+    target_date: date
+    run_id: str
+    started_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -354,19 +388,24 @@ def overnight_changes(
 
     ``report_time`` is the point-in-time cut (what was known when the brief was written);
     ``report_date`` is the ET date being reported. Price-family baselines are the ``close`` of
-    the previous XNYS business day; everything else uses the previous official value.
-    ``exclude_tiers`` applies to the last value and to its baseline alike.
+    the previous XNYS business day; everything else uses the previous official value. When
+    ``report_date`` is not an XNYS session, price baselines follow the weekend and holiday rule
+    of the module docstring. ``exclude_tiers`` applies to the last value and to its baseline alike.
     """
     last_rows = _snapshot(duck, report_time, report_date, exclude_tiers=exclude_tiers)
     by_inst: dict[str, list[ValueRow]] = {}
     for r in _official(duck, report_time, report_date, exclude_tiers):
         by_inst.setdefault(r.instrument_id, []).append(r)
     nyse_prev = prev_business_day("XNYS", report_date)
+    session = is_business_day("XNYS", report_date)
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
         if family_of(last) == "price" and last.interval != "1w":
-            out.append(_price_change(last, history, nyse_prev))
+            if session:
+                out.append(_price_change(last, history, nyse_prev))
+            else:
+                out.append(_off_session_price_change(last, history))
         else:
             out.append(_official_change(last, history))
     return tuple(out)
@@ -380,6 +419,20 @@ def _price_change(last: ValueRow, history: list[ValueRow], nyse_prev: date) -> C
     ]
     return _change(
         last, closes[0] if closes else None, BASIS_NYSE_CLOSE, "ok" if closes else "no_baseline"
+    )
+
+
+def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
+    """Price change on a day that is not an XNYS session (module docstring, T60 bug 4)."""
+    # S <= L: the session before S. S > L (a holiday trade): L itself, which is also the
+    # session before S, since no session lies between L and the report date.
+    base = prev_business_day("XNYS", _et(last))
+    closes = [r for r in history if r.field == "close" and r.interval == "1d" and _et(r) == base]
+    return _change(
+        last,
+        closes[0] if closes else None,
+        session_close_basis(base),
+        "ok" if closes else "no_baseline",
     )
 
 
@@ -496,6 +549,7 @@ def health_summary(
     target_date: date,
     *,
     expected_sources: Collection[str] | None = None,
+    as_of: datetime | None = None,
 ) -> HealthSummary:
     """Quality-check and source status for ``target_date`` (empty tables give zero counts).
 
@@ -509,9 +563,12 @@ def health_summary(
     A partial re-run (one that evaluated only some checks) is still the latest run, so it
     supersedes both check tables for ``target_date``: checks the earlier, fuller run recorded and
     the re-run did not repeat are not counted, in the DQ and the cross-check counts alike.
+
+    ``as_of`` bounds every read: check rows evaluated after it, ``runs`` rows started after it
+    and fetches requested after it are ignored. ``None`` reads everything.
     """
-    dq = _latest_dq(duck, target_date)
-    xc = _latest_xchecks(duck, target_date)
+    dq = _latest_dq(duck, target_date, as_of)
+    xc = _latest_xchecks(duck, target_date, as_of)
     issues: list[CheckItem] = [
         CheckItem("dq", n, st, ct, src, inst, None, obs, thr)
         for n, ct, src, inst, st, obs, thr in dq
@@ -546,10 +603,11 @@ def health_summary(
     def count(rows: list[tuple[Any, ...]], idx: int, status: str) -> int:
         return sum(1 for r in rows if r[idx] == status)
 
+    run_sql, run_params = _bound("started_at", as_of)
     run = duck.execute(
-        "SELECT run_id, status FROM runs WHERE target_date = ? "
+        f"SELECT run_id, status FROM runs WHERE target_date = ?{run_sql} "  # noqa: S608
         "ORDER BY started_at DESC, run_id DESC LIMIT 1",
-        [target_date],
+        [target_date, *run_params],
     ).fetchone()
     return HealthSummary(
         target_date=target_date,
@@ -563,58 +621,105 @@ def health_summary(
         n_xcheck_warn=count(xc, 4, "warn"),
         n_xcheck_fail=count(xc, 4, "fail"),
         issues=tuple(issues),
-        sources=_source_health(duck, target_date, expected_sources),
+        sources=_source_health(duck, target_date, expected_sources, as_of),
     )
 
 
-def _latest_run(duck: duckdb.DuckDBPyConnection, target_date: date) -> str | None:
+def _bound(column: str, as_of: datetime | None) -> tuple[str, list[Any]]:
+    """`` AND <column> <= ?`` and its bound value (empty when ``as_of`` is None)."""
+    if as_of is None:
+        return "", []
+    return f" AND {column} <= ?", [ensure_utc(as_of)]
+
+
+def latest_check_run(duck: duckdb.DuckDBPyConnection, now: datetime) -> RunRef | None:
+    """The run whose checks a status line should show at ``now`` (None if there is none).
+
+    The run with the greatest ``target_date`` on or before ``et_date(now)`` that has check rows
+    (``dq_results`` or ``crosscheck_results``, skipped checks included) evaluated at or before
+    ``now``. Among that date's rows the newest run wins, as in ``health_summary``. A backfill run
+    started later for an earlier date is therefore not chosen. ``started_at`` comes from the
+    ``runs`` table (None when the run has no row there).
+    """
+    now = ensure_utc(now)
+    today = et_date(now)
+    row = duck.execute(
+        "SELECT target_date, run_id FROM ("
+        "SELECT target_date, run_id, evaluated_at AS ts, result_id FROM dq "
+        "WHERE target_date <= ? AND evaluated_at <= ? "
+        "UNION ALL SELECT target_date, run_id, at_time, result_id FROM xchecks "
+        "WHERE target_date <= ? AND at_time <= ?"
+        ") ORDER BY target_date DESC, ts DESC, result_id DESC LIMIT 1",
+        [today, now, today, now],
+    ).fetchone()
+    if row is None:
+        return None
+    started = duck.execute("SELECT max(started_at) FROM runs WHERE run_id = ?", [row[1]]).fetchone()
+    return RunRef(row[0], row[1], started[0] if started else None)
+
+
+def _latest_run(
+    duck: duckdb.DuckDBPyConnection, target_date: date, as_of: datetime | None = None
+) -> str | None:
     """The newest run that wrote any check row (``dq_results`` or ``crosscheck_results``).
 
     One run id serves both tables, so the DQ counts, the cross-check items and the instrument
     flags always describe the same run. A newer run that wrote only one of the two tables still
-    wins: the other table then contributes nothing for that date.
+    wins: the other table then contributes nothing for that date. Rows evaluated after
+    ``as_of`` (when given) are ignored.
     """
+    dq_sql, dq_params = _bound("evaluated_at", as_of)
+    xc_sql, xc_params = _bound("at_time", as_of)
     row = duck.execute(
-        "SELECT run_id FROM ("
-        "SELECT run_id, evaluated_at AS ts, result_id FROM dq WHERE target_date = ? "
-        "UNION ALL SELECT run_id, at_time, result_id FROM xchecks WHERE target_date = ?"
+        "SELECT run_id FROM ("  # noqa: S608
+        f"SELECT run_id, evaluated_at AS ts, result_id FROM dq WHERE target_date = ?{dq_sql} "
+        f"UNION ALL SELECT run_id, at_time, result_id FROM xchecks WHERE target_date = ?{xc_sql}"
         ") ORDER BY ts DESC, result_id DESC LIMIT 1",
-        [target_date, target_date],
+        [target_date, *dq_params, target_date, *xc_params],
     ).fetchone()
     return row[0] if row else None
 
 
-def _latest_dq(duck: duckdb.DuckDBPyConnection, target_date: date) -> list[tuple[Any, ...]]:
+def _latest_dq(
+    duck: duckdb.DuckDBPyConnection, target_date: date, as_of: datetime | None = None
+) -> list[tuple[Any, ...]]:
     """Single-source results of the latest run for ``target_date`` (mirrored rows left out)."""
+    bound_sql, bound_params = _bound("evaluated_at", as_of)
     return duck.execute(
-        "SELECT check_name, check_type, source, instrument_id, status, observed, threshold "
-        "FROM dq WHERE target_date = ? AND check_type <> 'consistency' AND run_id = ? "
+        "SELECT check_name, check_type, source, instrument_id, status, observed, threshold "  # noqa: S608
+        f"FROM dq WHERE target_date = ? AND check_type <> 'consistency' AND run_id = ?{bound_sql} "
         "QUALIFY row_number() OVER (PARTITION BY check_name, "
         "coalesce(source, ''), coalesce(instrument_id, '') ORDER BY evaluated_at DESC, "
         "result_id DESC) = 1",
-        [target_date, _latest_run(duck, target_date)],
+        [target_date, _latest_run(duck, target_date, as_of), *bound_params],
     ).fetchall()
 
 
-def _latest_xchecks(duck: duckdb.DuckDBPyConnection, target_date: date) -> list[tuple[Any, ...]]:
+def _latest_xchecks(
+    duck: duckdb.DuckDBPyConnection, target_date: date, as_of: datetime | None = None
+) -> list[tuple[Any, ...]]:
     """Cross-check results of the latest run for ``target_date``."""
+    bound_sql, bound_params = _bound("at_time", as_of)
     return duck.execute(
-        "SELECT check_name, group_id, left_source, right_source, status, diff_bps, "
+        "SELECT check_name, group_id, left_source, right_source, status, diff_bps, "  # noqa: S608
         "warn_bps, fail_bps, left_instrument, right_instrument, details_json "
-        "FROM xchecks WHERE target_date = ? AND run_id = ? "
+        f"FROM xchecks WHERE target_date = ? AND run_id = ?{bound_sql} "
         "QUALIFY row_number() OVER (PARTITION BY check_name, coalesce(group_id, ''), "
         "left_instrument, right_instrument, left_source, right_source "
         "ORDER BY at_time DESC, result_id DESC) = 1",
-        [target_date, _latest_run(duck, target_date)],
+        [target_date, _latest_run(duck, target_date, as_of), *bound_params],
     ).fetchall()
 
 
-def instrument_flags(duck: duckdb.DuckDBPyConnection, target_date: date) -> dict[str, str]:
+def instrument_flags(
+    duck: duckdb.DuckDBPyConnection, target_date: date, *, as_of: datetime | None = None
+) -> dict[str, str]:
     """Worst check status per instrument for ``target_date``: ``fail`` > ``warn`` > ``pass``.
 
     Reads single-source results (by ``instrument_id``) and cross-checks (both instruments of
     the pair) of the latest run. ``skip`` counts as no result; an instrument with no
-    pass/warn/fail result is absent from the mapping (callers show ``none``).
+    pass/warn/fail result is absent from the mapping (callers show ``none``). ``as_of`` (when
+    given) ignores check rows evaluated after it, as in :func:`health_summary`.
     """
     worst: dict[str, str] = {}
 
@@ -622,9 +727,9 @@ def instrument_flags(duck: duckdb.DuckDBPyConnection, target_date: date) -> dict
         if iid and _FLAG_RANK.get(status, -1) > _FLAG_RANK.get(worst.get(iid, ""), -1):
             worst[iid] = status
 
-    for r in _latest_dq(duck, target_date):
+    for r in _latest_dq(duck, target_date, as_of):
         note(r[3], r[4])
-    for r in _latest_xchecks(duck, target_date):
+    for r in _latest_xchecks(duck, target_date, as_of):
         note(r[8], r[4])
         note(r[9], r[4])
     return worst
@@ -640,14 +745,19 @@ def _ref_date(details_json: str | None) -> date | None:
 
 
 def _source_health(
-    duck: duckdb.DuckDBPyConnection, target_date: date, expected: Collection[str] | None
+    duck: duckdb.DuckDBPyConnection,
+    target_date: date,
+    expected: Collection[str] | None,
+    as_of: datetime | None = None,
 ) -> tuple[SourceHealth, ...]:
     if expected is None:
         expected = [r[0] for r in duck.execute("SELECT DISTINCT source FROM dim_feed").fetchall()]
+    bound_sql, bound_params = _bound("requested_at", as_of)
     rows = duck.execute(
-        "SELECT source, status, count(*) FROM source_log WHERE "
-        "CAST(timezone('America/New_York', requested_at) AS DATE) = ? GROUP BY source, status",
-        [target_date],
+        "SELECT source, status, count(*) FROM source_log WHERE "  # noqa: S608
+        f"CAST(timezone('America/New_York', requested_at) AS DATE) = ?{bound_sql} "
+        "GROUP BY source, status",
+        [target_date, *bound_params],
     ).fetchall()
     stats: dict[str, dict[str, int]] = {}
     for source, status, n in rows:

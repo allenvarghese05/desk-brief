@@ -1,13 +1,19 @@
-# Refined dark (P-022, T57). The same tokens, and the CSS that uses them, live in app/theme.py.
+# Refined dark (P-022, T57), flat since T60 (P-023: no containers). The same tokens, and the CSS
+# that uses them, live in app/theme.py. secondaryBackgroundColor is the raised shade P-023 allows
+# on the search field and the selected segment; baseRadius matches its 6 px; dataframes are flat
+# (header on the page colour, hairline grid).
 [theme]
 base = "dark"
 primaryColor = "#5B9DFF"
 backgroundColor = "#0B0D10"
-secondaryBackgroundColor = "#13161B"
+secondaryBackgroundColor = "#181C22"
 textColor = "#E8EAED"
 borderColor = "#22262E"
 showWidgetBorder = false
-baseRadius = "12px"
+baseRadius = "6px"
+buttonRadius = "6px"
+dataframeHeaderBackgroundColor = "#0B0D10"
+dataframeBorderColor = "#22262E"
 font = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
 codeFont = "'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace"
 

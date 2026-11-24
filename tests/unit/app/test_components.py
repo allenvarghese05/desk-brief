@@ -196,37 +196,44 @@ def test_visible_drops_hidden_text_and_attributes() -> None:
 
 
 def test_theme_tokens_are_the_p022_palette_and_match_config() -> None:
+    """P-022 colours, P-023 type and geometry (T60), mirrored in config.toml."""
     assert (theme.PAGE, theme.PANEL, theme.RAISED, theme.DIVIDER) == (
         "#0B0D10", "#13161B", "#181C22", "#22262E",
     )  # fmt: skip
     assert (theme.TEXT, theme.SECONDARY, theme.META) == ("#E8EAED", "#9AA0A6", "#8A9099")
     assert (theme.UP, theme.DOWN, theme.ACCENT) == ("#2EBD85", "#F6465D", "#5B9DFF")
-    assert (theme.RADIUS, theme.PAD, theme.GAP) == (12, 24, 20)
+    assert theme.RADIUS == 6
     assert theme.SANS.startswith("Inter")
-    assert (theme.SIZE_HERO, theme.SIZE_FIGURE, theme.SIZE_BODY, theme.SIZE_META) == (
-        40,
-        26,
-        14,
-        12,
-    )
+    # P-023: four type sizes (the hero has a phone size of its own)
+    assert (theme.SIZE_HERO, theme.SIZE_LG, theme.SIZE_BODY, theme.SIZE_META) == (42, 15, 13, 11.5)
+    assert theme.SIZE_HERO_PHONE == 36
     cfg = tomllib.loads((REPO / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
     t = cfg["theme"]
     assert t["backgroundColor"] == theme.PAGE
-    assert t["secondaryBackgroundColor"] == theme.PANEL
+    # T60: native widgets match the flat theme: the raised shade P-023 allows on the search
+    # field and the selected segment, the exempt elements' radius, flat dataframes
+    assert t["secondaryBackgroundColor"] == theme.RAISED
+    assert t["baseRadius"] == f"{theme.RADIUS}px"
+    assert t["dataframeHeaderBackgroundColor"] == theme.PAGE
+    assert t["dataframeBorderColor"] == theme.DIVIDER
     assert t["textColor"] == theme.TEXT
     assert t["primaryColor"] == theme.ACCENT
     assert t["font"].startswith("Inter")
     assert cfg["client"]["showSidebarNavigation"] is False
 
 
-def test_cards_have_no_borders_and_tabular_figures() -> None:
-    cards = re.search(r"\.st-key-db-watch[^{]*\{([^}]*)\}", theme.CSS)
-    assert cards is not None
-    assert "border:" not in cards.group(1)
-    assert f"border-radius: {theme.RADIUS}px" in cards.group(1)
-    assert f"padding: {theme.PAD}px" in cards.group(1)
+def test_blocks_have_no_panels_and_figures_are_tabular() -> None:
+    """P-023 (T60): the containers T58 drew as cards are flat; figures use tabular numerals."""
+    from app.components import kit, panels
+
+    for css in (theme.CSS, kit.PAGE_CSS, panels.HOME_CSS):
+        for key in ("db-watch", "db-chart", "db-detail", "db-risk", "db-values", "db-tiles"):
+            for rule in re.findall(rf"\.st-key-{key}\b[^{{]*\{{([^}}]*)\}}", css):
+                assert "background: #" not in rule, (key, rule)
+                assert "border-radius" not in rule, (key, rule)
     assert "tabular-nums" in theme.CSS
     assert "#0b0e13" not in theme.CSS.lower()  # the T36 palette is gone
+    assert "db-tile" not in theme.CSS  # the T58 tiles became a one-line strip
 
 
 @pytest.mark.parametrize("tier", [1, 2, 3])
@@ -401,10 +408,13 @@ def test_rendered_t57_markup_has_no_title_or_link(run_home: Callable[..., AppTes
     cfg = load_config(__import__("os").environ["DESKBRIEF_CONFIG"])
     ov = data.overview(data.load_snapshot(cfg, frozenset()), data.LOCAL, frozenset())
     parts = [panels.brand(ov), panels.status(ov), panels.footer(ov, kit.glyph_legend())]
-    parts += [h for _, h in panels.tile_items(ov, "UST_10Y")]
+    parts += [panels.status(ov, (ov.as_of.date(), ov.as_of))]
+    lead, strip = panels.strip_items(ov, "UST_10Y")
+    parts += [panels.strip_lead(lead)] + [h for _, h in strip]
     sigs = {"SPY": ("3.1σ", "SPY moved 3.1σ")}  # T58: moves are sigma tags on the rows
     for g in panels.watchlist(ov.sections, ov.as_of, "SPY", sparks=ov.sparks, sigs=sigs):
-        parts += [panels.group_title(g.title)] + [h for _, h in g.rows + g.proxies]
+        parts += [panels.group_title(g.title, folded=False, count=len(g))]
+        parts += [h for _, h in g.rows + g.proxies]
     rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
     parts += [panels.chart_header(r, ov.as_of) for r in rows.values()]
     parts += [kit.glyph_legend(), kit.kpis([("Checks", "3", "fail", "x")]), kit.status_legend()]
@@ -494,7 +504,9 @@ def test_text_colours_reach_wcag_aa_on_every_surface_they_sit_on() -> None:
         pairs.append((f"{status} square", _rgb(kit._STATUS_INK[status]), _rgb(colour)))
     low = {name: round(_contrast(fg, bg), 2) for name, fg, bg in pairs if _contrast(fg, bg) < 4.5}
     assert low == {}
-    assert f"color: {theme.DOWN_PILL}" in theme.CSS  # the down pill really uses it
+    from app.components import panels
+
+    assert f"color: {theme.DOWN_PILL}" in panels.HOME_CSS  # the hero's down pill uses it
 
 
 def test_status_strip_gives_each_day_its_detail_for_screen_readers() -> None:
@@ -502,3 +514,93 @@ def test_status_strip_gives_each_day_its_detail_for_screen_readers() -> None:
     assert 'aria-label="16 Nov fail: SPY vs ES 31 bps"' in html
     assert 'aria-label="13 Nov pass"' in html
     assert "title=" not in html
+
+
+# --- T60 bug 6: the verdict -----------------------------------------------------------------
+
+
+def _quote(value: float, hours: float, tier: int) -> object:
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    at = datetime(2026, 11, 20, 20, tzinfo=UTC) - timedelta(hours=hours)
+    return SimpleNamespace(
+        value=value, unit="pct", as_of=at, tier=tier, source=f"s{tier}", field="yield",
+        kind="yield", is_proxy=False, dataset="d", is_fallback=False,
+    )  # fmt: skip
+
+
+def test_verdict_agrees_when_close_even_if_apart_in_time() -> None:
+    """The owner's case: two sources 0.8 bp apart, 15 h apart: "Agree", with a neutral note."""
+    from app.components import instrument
+
+    v = instrument.verdict([_quote(4.000, 0, 3), _quote(4.008, 15, 2)])  # type: ignore[list-item]
+    assert v is not None
+    assert (v.tone, v.headline) == ("ok", "Agree")
+    assert v.gap == "0.8 bp apart"
+    assert "15.0 h apart" in v.note
+    best = _quote(4.000, 0, 3)
+    gap = instrument._gap_text(_quote(4.008, 15, 2), best)  # type: ignore[arg-type]
+    assert "not comparable" not in gap
+    assert "15.0 h apart" in gap
+
+
+def test_verdict_agrees_at_the_same_moment_without_a_note() -> None:
+    from app.components import instrument
+
+    v = instrument.verdict([_quote(4.000, 0, 3), _quote(4.002, 0.1, 2)])  # type: ignore[list-item]
+    assert v is not None
+    assert (v.tone, v.headline, v.note) == ("ok", "Agree", "")
+
+
+def test_verdict_far_apart_in_value_and_time_is_not_comparable() -> None:
+    from app.components import instrument
+
+    v = instrument.verdict([_quote(4.00, 0, 3), _quote(4.20, 15, 2)])  # type: ignore[list-item]
+    assert v is not None
+    assert (v.tone, v.headline) == ("warn", "Not comparable")
+    assert v.gap == "15.0 h apart"
+    html = instrument.verdict_card_html([_quote(4.00, 0, 3), _quote(4.20, 15, 2)], "")  # type: ignore[list-item]
+    assert "db-mark-warn" in html  # the warn mark, only in the warn case
+
+
+def test_verdict_disagrees_at_the_same_moment() -> None:
+    from app.components import instrument
+
+    rows = [_quote(4.00, 0, 3), _quote(4.20, 0.1, 2)]
+    v = instrument.verdict(rows)  # type: ignore[arg-type]
+    assert v is not None
+    assert (v.tone, v.headline, v.gap) == ("fail", "No", "20.0 bp apart")
+    html = instrument.verdict_card_html(rows, "")  # type: ignore[arg-type]
+    assert "db-mark-warn" not in html
+    ok = instrument.verdict_card_html([_quote(4.000, 0, 3), _quote(4.008, 15, 2)], "")  # type: ignore[list-item]
+    assert "db-mark-warn" not in ok
+    assert '<b>Agree</b><span class="db-verdict-gap">0.8 bp apart</span>' in ok
+
+
+def test_verdict_judges_each_row_on_its_own() -> None:
+    """Round-1 review: the worst gap and the largest time apart must come from the same row.
+    A same-moment 20 bp gap is "No" even when a third, agreeing row is a day apart."""
+    from app.components import instrument
+
+    rows = [_quote(4.00, 0, 3), _quote(4.20, 0.1, 2), _quote(4.001, 24, 1)]
+    v = instrument.verdict(rows)  # type: ignore[arg-type]
+    assert v is not None
+    assert (v.tone, v.headline) == ("fail", "No")
+    # the far-apart row is the big gap and the same-moment row agrees: not comparable
+    rows = [_quote(4.00, 0, 3), _quote(4.001, 0.1, 2), _quote(4.20, 24, 1)]
+    v = instrument.verdict(rows)  # type: ignore[arg-type]
+    assert v is not None
+    assert (v.tone, v.headline) == ("warn", "Not comparable")
+
+
+def test_verdict_with_no_measurable_gap_is_not_comparable() -> None:
+    from app.components import instrument
+
+    zero = _quote(0.0, 0, 3)
+    object.__setattr__(zero, "unit", "USD")
+    other = _quote(1.0, 0.1, 2)
+    object.__setattr__(other, "unit", "USD")
+    v = instrument.verdict([zero, other])  # type: ignore[list-item]
+    assert v is not None
+    assert (v.tone, v.headline) == ("warn", "Not comparable")

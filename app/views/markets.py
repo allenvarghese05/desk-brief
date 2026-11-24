@@ -1,26 +1,26 @@
-"""Markets, the Home page v2 (P-022, T58; spec 10.3 as rewritten by T58).
+"""Markets, the Home page v3 (P-023, T60; spec 10.3 as rewritten by T60). No containers.
 
-One focal point, the chart of the selected instrument, and five blocks around it:
+* a top bar: brand and date, a compact search and one status line ("Last run Fri 07:00 · 14
+  checks ok"; the page tabs are ``st.navigation``'s, drawn by the router ``app/Home.py``);
+* a one-line market strip of five instruments as plain text, the shared basis said once;
+* two columns: the hero on the left (label, figure, the 1D pill, provenance line, range and
+  style controls with Compare and CSV in "More", the TradingView chart, the 1W to 1Y horizon
+  row with "Charts by TradingView" at its right, then "Do the sources agree?" and "Risk and
+  range" side by side), and the watchlist on the right: full length, no inner scroll, groups
+  that fold, a sigma tag on unusual moves and the same CSS hover content on every row;
+* below 960 px the watchlist drops under the hero; below 640 px sources and risk stack;
+* tabs under the main area: All values, Lineage, Checks, Corrections.
 
-* a slim top bar: brand and date, a compact search and one status dot (the page tabs are
-  ``st.navigation``'s, drawn by the router ``app/Home.py``);
-* a headline strip of five instruments: value, change pill, sparkline and tier glyph;
-* a watchlist rail grouped by asset class, with full names and a sigma tag on unusual moves;
-* the chart card: name, price, change pill and provenance in its header, range pills
-  (1M 3M 6M 1Y All) and a Candles/Line toggle, compare and CSV in a small menu, the
-  TradingView chart with its attribution, one row of 1D to 1Y changes and a footer line;
-* a right rail: "Do the sources agree?" and its sources, then risk and range;
-* tabs under the chart: All values, Lineage, Checks, Corrections.
-
+Blocks sit on the page background: each opens with a small uppercase label over a hairline
+(``panels.label``); no panel, border, radius or shadow (the flat-CSS checker in the tests).
 The display mode, withheld instruments and the glyph legend sit in the page footer. Every
-figure uses compact provenance (``compact=True``).
+figure uses compact provenance.
 
-Selection stays in the session (T57): each tile and watchlist row sits under a transparent
-button whose callback sets ``st.query_params["id"]``. The selected instrument, range and chart
-style are also kept in plain session-state keys, so they survive a visit to another page
-(Markets, then Macro, then Markets) even though Streamlit drops the widgets' own state and the
-URL's parameters on a page change. The chart card is an ``st.fragment``: a range, style or
-compare change reruns only the card.
+Selection stays in the session (T57): each strip item and watchlist row sits under a
+transparent button whose callback sets ``st.query_params["id"]``. The selected instrument,
+range, chart style and folded groups are also kept in plain session-state keys, so they survive
+a visit to another page (Markets, then Macro, then Markets). The hero is an ``st.fragment``: a
+range, style or compare change reruns only the hero.
 
 ``app/Home.py`` is the router and runs this page; start the app with
 ``DESKBRIEF_DISPLAY_MODE=local streamlit run app/Home.py``. Hosted (Streamlit Community Cloud)
@@ -66,13 +66,14 @@ MACRO_LINK = "Yield curve and 2s10s on Macro"
 NO_COMPARE = "Compare with…"
 #: the chart styles of the Home chart (candles only when the bars carry real OHLC)
 STYLES = (chart.CANDLES, chart.LINE)
-CHART_HEIGHT = 420
-WATCH_HEIGHT = 730
+CHART_HEIGHT = 380
 TABS = ("All values", "Lineage", "Checks", "Corrections")
 #: widget keys of the chart controls
 RNG_KEY, STYLE_KEY = "db-rng", "db-style"
 #: plain session-state keys (not widgets): they survive a visit to another page
 KEEP_ID, KEEP_RNG, KEEP_STYLE = "db-keep-id", "db-keep-rng", "db-keep-style"
+#: plain session-state key: the watchlist groups the user folded (groups start open)
+KEEP_FOLDED = "db-keep-folded"
 
 
 def _html(target: object, body: str) -> None:
@@ -126,28 +127,52 @@ def _names(ov: data.Overview) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _health(ov: data.Overview) -> None:
+def _health(ov: data.Overview, run: tuple[object, object] | None) -> None:
     with st.container(key="db-pick-health"):
-        _html(st, panels.status(ov))
+        _html(st, panels.status(ov, run))  # type: ignore[arg-type]
         # the counts are in the label, so they are read out without hovering (T57 review)
         if st.button(f"Open Data health: {ov.health.text}", key="pick-health"):
             st.switch_page(HEALTH_PAGE)
 
 
-def _tiles(ov: data.Overview, sel: str) -> None:
+def _strip(ov: data.Overview, sel: str) -> None:
+    """The one-line market strip; each item selects its instrument in-session."""
     names = _names(ov)
-    with st.container(horizontal=True, key="db-tiles"):
-        for iid, body in panels.tile_items(ov, sel):
-            _pick("tile", iid, body, names.get(iid, iid))
+    lead, items = panels.strip_items(ov, sel)
+    with st.container(horizontal=True, key="db-strip"):
+        if lead:
+            _html(st, panels.strip_lead(lead))
+        for iid, body in items:
+            _pick("strip", iid, body, names.get(iid, iid))
+
+
+def _fold(title: str) -> None:
+    """A click on a group header: fold or unfold it (kept for the session)."""
+    folded = set(st.session_state.get(KEEP_FOLDED, ()))
+    folded ^= {title}
+    st.session_state[KEEP_FOLDED] = sorted(folded)
 
 
 def _groups(groups: list[panels.WatchGroup], names: dict[str, str], sel: str) -> None:
+    """Every group with a header that folds it. A folded group still shows the selected row,
+    so the selection never folds away; groups start open."""
+    folded = set(st.session_state.get(KEEP_FOLDED, ()))
     for g in groups:
-        _html(st, panels.group_title(g.title))
-        for iid, body in g.rows:
+        is_folded = g.title in folded
+        with st.container(key=f"db-pick-grp-{g.key}"):
+            _html(st, panels.group_title(g.title, folded=is_folded, count=len(g)))
+            verb = "Unfold" if is_folded else "Fold"
+            st.button(f"{verb} {g.title}", key=f"fold-{g.key}", on_click=_fold, args=(g.title,))
+        rows = [(i, b) for i, b in g.rows if not is_folded or i == sel]
+        for iid, body in rows:
             _pick("wl", iid, body, names.get(iid, iid))
         if g.proxies:
             opened = any(iid == sel for iid, _ in g.proxies)
+            if is_folded:
+                for iid, body in g.proxies:
+                    if iid == sel:
+                        _pick("wl", iid, body, names.get(iid, iid))
+                continue
             with st.expander(g.fold_label, expanded=opened):
                 for iid, body in g.proxies:
                     _pick("wl", iid, body, names.get(iid, iid))
@@ -155,11 +180,13 @@ def _groups(groups: list[panels.WatchGroup], names: dict[str, str], sel: str) ->
 
 def _watchlist(ov: data.Overview, query: str, sel: str) -> None:
     names = _names(ov)
-    _html(st, '<div class="db-card-h">Watchlist</div>')
-    sparks, sigs = ov.sparks, panels.sigmas(ov)
+    n_all = sum(len(s.rows) for s in ov.sections)
+    _html(st, panels.label("Watchlist", f"{n_all} instruments"))
+    _html(st, '<div class="db-wl-head" aria-hidden="true"><i></i><span>Last</span>'
+              "<span>Chg</span></div>")  # fmt: skip
+    sigs = panels.sigmas(ov)
     if not query:
-        groups = panels.watchlist(ov.sections, ov.as_of, sel, sparks=sparks, sigs=sigs)
-        _groups(groups, names, sel)
+        _groups(panels.watchlist(ov.sections, ov.as_of, sel, sigs=sigs), names, sel)
         return
     found = panels.search(ov.sections, query)
     n = sum(len(s.rows) for s in found)
@@ -172,7 +199,7 @@ def _watchlist(ov: data.Overview, query: str, sel: str) -> None:
         return
     noun = "match" if n == 1 else "matches"
     _html(st, f'<div class="db-note">{n} {noun} for "{escape(query)}"</div>')
-    groups = panels.watchlist(found, ov.as_of, sel, fold_proxies=False, sparks=sparks, sigs=sigs)
+    groups = panels.watchlist(found, ov.as_of, sel, fold_proxies=False, sigs=sigs)
     _groups(groups, names, sel)
 
 
@@ -232,8 +259,9 @@ def _controls(row: Row, bars: pd.DataFrame, others: dict[str, str]) -> tuple[str
 def _draw(
     config: Config, row: Row, bars: pd.DataFrame, rng: str, style: str, vs: str,
     others: dict[str, str], hidden: frozenset[int],
-) -> str:  # fmt: skip
-    """The chart itself (with its attribution); returns the footer line."""
+) -> tuple[str, bool]:  # fmt: skip
+    """The chart itself; returns the footer line and whether the TradingView chart drew (its
+    attribution then goes at the right of the horizon row)."""
     name = panels.short(row)
     view = chart.window(bars, rng)
     if vs != NO_COMPARE:
@@ -241,31 +269,35 @@ def _draw(
         other = chart.window(data.load_bars(config, vs, hidden), rng)
         series = chart.tv_compare_series(view, other, name, other_name)
         if series and series[0]["points"]:
-            tvchart.chart(series, key="db-tv", height=CHART_HEIGHT, precision=2,
-                          label=f"{name} and {other_name} rebased to 100")  # fmt: skip
+            drawn = tvchart.chart(
+                series, key="db-tv", height=CHART_HEIGHT, precision=2,
+                label=f"{name} and {other_name} rebased to 100", with_attribution=False,
+            )  # fmt: skip
             return (
                 f"Both series set to 100 on the first common day; dashed: {others[vs]}. "
                 f"{name}: {chart.caption(view, latest_line=False)} "
                 f"{other_name}: {chart.caption(other, latest_line=False)}"
-            )
+            ), drawn
         _html(st, f'<div class="db-empty">No common days with {escape(other_name)} in this '
                   "range; showing this instrument alone.</div>")  # fmt: skip
     if len(view) < 2:
         _html(st, '<div class="db-empty">Fewer than two days in this range.</div>')
-        return chart.caption(view, latest_line=False)
+        return chart.caption(view, latest_line=False), False
     last = row.change.last.value if row.change is not None else None
     drawn = tvchart.chart(
         chart.tv_series(view, style=style), key="db-tv", height=CHART_HEIGHT,
         precision=chart.tv_precision(view), last=last, label=f"{name} price chart",
+        with_attribution=False,
     )  # fmt: skip
     # the Altair fallback draws no latest-value line, so its footer does not mention one
-    return chart.caption(view, latest_line=drawn and last is not None)
+    return chart.caption(view, latest_line=drawn and last is not None), drawn
 
 
 @st.fragment
 def _hero(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -> None:
-    """Header (name, price, change, provenance) with the controls on its right, the chart,
-    the row of changes over horizons and the footer line naming what the chart shows."""
+    """The hero (P-023): label, figure, pill and provenance line, the controls, the chart, the
+    1W-1Y horizon row with the TradingView attribution at its right (only when the TradingView
+    chart drew) and the footer line naming what the chart shows."""
     iid = row.instrument_id
     bars = data.load_bars(config, iid, hidden)
     wanted = st.query_params.get("r", "")
@@ -278,23 +310,24 @@ def _hero(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -
         for r in s.rows
         if r.available and r.instrument_id != iid
     }
-    left, right = st.columns([4, 5], vertical_alignment="top")
-    _html(left, panels.chart_header(row, ov.as_of))
-    with right:
-        rng, style, vs = _controls(row, bars, others)
+    _html(st, panels.chart_header(row, ov.as_of))
+    rng, style, vs = _controls(row, bars, others)
     st.query_params["r"] = rng
+    drawn = False
     if bars.empty:
         _html(st, '<div class="db-empty">No daily history for this instrument yet.</div>')
         foot = ""
     else:
-        foot = _draw(config, row, bars, rng, style, vs, others, hidden)
-    _html(st, tearsheet.horizons_html(tearsheet.horizons(row, bars)))
+        foot, drawn = _draw(config, row, bars, rng, style, vs, others, hidden)
+    attr = tvchart.attribution_html() if drawn else ""
+    hzs = tearsheet.horizons_html(tearsheet.horizons(row, bars), from_week=True)
+    _html(st, f'<div class="db-under">{hzs}{attr}</div>')
     if foot:
         _html(st, f'<div class="db-chfoot">{escape(foot)}</div>')
 
 
 # ---------------------------------------------------------------------------
-# tabs under the chart and the right rail
+# sources and risk under the chart, tabs under the main area
 # ---------------------------------------------------------------------------
 
 
@@ -341,24 +374,29 @@ def _tabs(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -
         )
 
 
-def _rail(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -> None:
+def _notes(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) -> None:
+    """The "Do the sources agree?" and "Risk and range" blocks side by side under the chart, as flat
+    label-value rows (they stack below 640 px); the links sit in their own block under the
+    range, so they never overlap its labels (T60 bug 1)."""
     iid = row.instrument_id
     ladder = instrument.ladder(config, iid, hidden, ov.as_of)
-    with st.container(key="db-detail"):
-        summary = tearsheet.xcheck_summary(config, iid, hidden, et_date(ov.as_of))
-        _html(st, instrument.verdict_card_html(ladder, summary))
-    with st.container(key="db-risk"):
-        bars = data.load_bars(config, iid, hidden)
-        _html(st, '<div class="db-card-h">Risk and range</div>' + tearsheet.risk_html(row, bars))
-        if ladder and st.button(
-            "Lineage: source, fetch and raw file", key=f"src-{iid}",
-            icon=":material/chevron_right:", type="tertiary",
-        ):  # fmt: skip
-            kit.details(
-                f"{panels.short(row)} · source and lineage",
-                instrument.lineage_html(config, ladder[0]),
-            )
-        st.page_link(MACRO_PAGE, label=MACRO_LINK, icon=":material/chevron_right:")
+    with st.container(key="db-notes"):
+        sources, risk = st.columns(2, gap="large")
+        with sources, st.container(key="db-detail"):
+            summary = tearsheet.xcheck_summary(config, iid, hidden, et_date(ov.as_of))
+            _html(st, instrument.verdict_card_html(ladder, summary))
+        with risk, st.container(key="db-risk"):
+            bars = data.load_bars(config, iid, hidden)
+            _html(st, panels.label("Risk and range") + tearsheet.risk_html(row, bars))
+            with st.container(key="db-links"):
+                if ladder and st.button(
+                    "Lineage: source, fetch and raw file", key=f"src-{iid}", type="tertiary",
+                ):  # fmt: skip
+                    kit.details(
+                        f"{panels.short(row)} · source and lineage",
+                        instrument.lineage_html(config, ladder[0]),
+                    )
+                st.page_link(MACRO_PAGE, label=MACRO_LINK)
 
 
 # ---------------------------------------------------------------------------
@@ -386,13 +424,13 @@ def main() -> None:
 
     # the URL carries the selection, range and search, so a click or a reload keeps them
     st.session_state.setdefault("q", st.query_params.get("q", ""))
-    left, mid, right = st.columns([3, 4, 3], vertical_alignment="center")
+    left, mid, right = st.columns([3, 3, 4], vertical_alignment="center")
     _html(left, panels.brand(ov))
     query = mid.text_input(
         "Search instruments", placeholder=SEARCH_HINT, label_visibility="collapsed", key="q"
     ).strip()
     with right:
-        _health(ov)
+        _health(ov, snap.last_run)
     sel = _selected(ov, query)
     if sel:
         st.query_params["id"] = sel
@@ -402,26 +440,22 @@ def main() -> None:
     elif "q" in st.query_params:
         del st.query_params["q"]
 
-    _tiles(ov, sel)
+    _strip(ov, sel)
 
     rows = _rows(ov)
-    col_l, col_c, col_r = st.columns([2.9, 8, 3.1], gap="small")
-    # the rail scrolls on its own, at about the chart card's height (P-022: one focal point,
-    # depth inside a block rather than down the page)
-    with col_l, st.container(key="db-watch", height=WATCH_HEIGHT, border=False):
-        _watchlist(ov, query, sel)
-    with col_c:
-        with st.container(key="db-chart"):
+    with st.container(key="db-main"):
+        hero_col, watch_col = st.columns([3, 1], gap="large")
+        with hero_col, st.container(key="db-hero"):
             if sel:
                 _hero(config, ov, rows[sel], hidden)
+                _notes(config, ov, rows[sel], hidden)
             else:
                 _html(st, '<div class="db-empty">No instruments to chart yet.</div>')
-        if sel:
-            with st.container(key="db-values"):
-                _tabs(config, ov, rows[sel], hidden)
-    with col_r:
-        if sel:
-            _rail(config, ov, rows[sel], hidden)
+        with watch_col, st.container(key="db-watch"):
+            _watchlist(ov, query, sel)
+    if sel:
+        with st.container(key="db-values"):
+            _tabs(config, ov, rows[sel], hidden)
 
     _html(st, panels.footer(ov, kit.glyph_legend(hidden)))
 

@@ -299,7 +299,11 @@ def _no_base(label: str, base: date, start: date) -> str:
     )
 
 
-def horizons_html(items: list[Horizon]) -> str:
+def horizons_html(items: list[Horizon], *, from_week: bool = False) -> str:
+    """The horizons as one flat row. ``from_week=True`` (Home, P-023) leaves out the 1D (or
+    WoW) change, which the hero pill already holds, so the row runs 1W to 1Y."""
+    if from_week:
+        items = [h for h in items if h.label not in ("1D", "WoW")]
     cells = "".join(
         f'<div class="db-hz"><span class="db-hz-label">{escape(h.label)}</span>{h.html}</div>'
         for h in items
@@ -588,13 +592,16 @@ def all_values_html(
             f"<tr><td>{escape(field)}<span class='db-tagline'>"
             f"{escape(_INTERVAL_TEXT.get(str(r.interval), str(r.interval)))}{flags}</span></td>"
             f"<td class='num'>{value_cell(text, p, compact=True)}</td>"
-            f"<td>{escape(str(r.source))}<span class='db-tagline'>{escape(str(r.dataset))}"
-            f" · {escape(str(r.symbol))}</span></td>"
+            f"<td class='db-c-src'>{escape(str(r.source))}<span class='db-tagline'>"
+            f"{escape(str(r.dataset))} · {escape(str(r.symbol))}</span></td>"
             f"<td class='num'>{when}<span class='db-tagline'>"
-            f"fetched {_age((now - fetched).total_seconds())}</span></td></tr>"
+            f"fetched {_age((now - fetched).total_seconds())}</span>"
+            # below 640 px the source column folds into this cell (P-023)
+            f"<span class='db-tagline db-src-m'>{escape(str(r.source))} · "
+            f"{TIER_NAME[int(r.tier)]}</span></td></tr>"
         )
     head = (
-        "<thead><tr><th>Field</th><th class='num'>Value</th><th>Source</th>"
+        "<thead><tr><th>Field</th><th class='num'>Value</th><th class='db-c-src'>Source</th>"
         "<th class='num'>As of (ET)</th></tr></thead>"
     )
     return f'<table class="db-table db-values">{head}<tbody>{"".join(rows)}</tbody></table>', len(
