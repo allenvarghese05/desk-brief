@@ -1054,9 +1054,9 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     4. On a day that isn't an XNYS session (a weekend or holiday), the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
        - **Cause:** `query.overnight_changes` takes the price baseline from `prev_business_day(report_date)`. On a Saturday that is Friday, the same day as the last close, so `_price_change` returns "no move yet".
        - **Fix:** when `report_date` is not an XNYS session, the rule is the same for every price-family last value, whatever its interval (tick, `1m` or `1d`):
-         - Let S be the ET date of the last value. If S is on or before the last session, the baseline is the `1d` close of `prev_business_day(S)`.
-         - If S is after the last session (a weekend tick), S is replaced by the last session, and the change reads against the close before it.
-         - The basis label names the weekday of the session the move belongs to (for example "Fri").
+         - Let L be the last XNYS session before `report_date`, and S the ET date of the last value.
+         - **If S is on or before L** (the Saturday case, including Friday ticks stored after the close): the baseline is the `1d` close of `prev_business_day(S)`, and the label names S's weekday (for example "Fri"). This is the new behaviour.
+         - **If S is after L** (a market that traded on an XNYS holiday: ES futures on MLK Monday, FX on Thanksgiving, N225 on Good Friday seen on Saturday): the baseline stays L's own `1d` close, as today, and the label says "since <L's weekday> close". So value, baseline and label always describe the same span.
        - Official-family changes, such as Treasury yields, are unchanged: they already compare the last official value with the one before.
        - On session days nothing changes, including before the morning run, when "no move yet" stays. So the morning email is unchanged.
        - `BriefModel.from_store` keeps `(et_date(now), now)`, so no value from after `now` is read.
@@ -1088,11 +1088,20 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
         - hosted, with only the tier-2 Yahoo quote.
 
         Each fails if only the `1d` branch is changed.
+      - **Holiday cases, where S is after L:** each expects the move since L's close with a "since … close" label, and fails if the S-on-or-before-L rule is applied to them:
+        - an ES futures tick on MLK Monday;
+        - an FX quote on Thanksgiving;
+        - an N225 close on Good Friday, seen on Saturday.
       - In hosted mode, the same holds for a price with only daily bars.
       - A Treasury yield keeps its official-to-official change.
       - On a weekday before the morning run, "no move yet" stays.
       - The status shows the latest run's checks.
       - With no run at all, the status shows "No checks yet".
+      - **Latest-run selection.** These tests tell the definition apart from simpler readings:
+        - a backfill run started later but for an earlier `target_date` is not chosen;
+        - check rows for a `target_date` after `et_date(now)` are ignored;
+        - check rows evaluated after a pinned `now` are ignored;
+        - a latest run whose checks were all skipped shows that, with its day.
     - The existing report and golden tests pass unchanged, which shows the email is unaffected.
     - Verdict tests cover agree-but-apart, not comparable and disagree.
     - A watchlist test shows that a folded group keeps the selected row reachable.
@@ -1104,7 +1113,7 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
   - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
   - **Timing:** on the T56 benchmark store, the median of five warm-cache first renders is within 10% of T59's median. Both are measured on the same machine in the same session, and the PR gives both times and the machine.
-- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route (every price interval), the run-status definition, the default-deny checker, the native-chrome overrides, the tooltip mechanism and the attribution placement were set after the [PR #95 round-1 to round-3 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
+- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route (every price interval, and holidays where the last value is dated after the last session), the run-status definition, the default-deny checker, the native-chrome overrides, the tooltip mechanism and the attribution placement were set after the [PR #95 round-1 to round-4 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
 
 #### T60B — Other pages without containers
 - **Depends:** T60 merged · **Owns:**
