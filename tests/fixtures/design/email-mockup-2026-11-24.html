@@ -1,0 +1,109 @@
+<!doctype html>
+<!-- SYNTHETIC FIXTURE: morning email v4 design approved with P-024 on 2026-11-24 (ET). Every value, change, date, time and event is invented sample data, not market data. "Example Corp (EXMP)" is fictional. Open in a browser. -->
+<!-- Desk Brief / morning email v4 mockup, 2026-11-24. Readable in 30 seconds on a phone: read, note, movers, today, snapshot, checks, footer. Light theme for mail clients; tables for layout (what email clients support). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desk Brief email v4 mockup (sample data)</title>
+<style>
+body{margin:0;background:#F3F4F6;font:14px/1.55 -apple-system,"SF Pro Text","Segoe UI",Helvetica,Arial,sans-serif;color:#111418}
+.client{max-width:640px;margin:24px auto;background:#fff;border:1px solid #E3E5E8}
+.chrome{padding:14px 28px;border-bottom:1px solid #E3E5E8;font-size:12.5px;color:#5F6670}
+.chrome b{color:#111418;font-weight:600}
+.sample{padding:6px 28px;font-size:12px;color:#9A6700;background:#FFF8E6;border-bottom:1px solid #F0E2B6}
+.wrap{padding:24px 28px 28px}
+.n{font-variant-numeric:tabular-nums}
+.up{color:#0E8A5F} .down{color:#C8283C} .flat{color:#5F6670} .warn{color:#9A6700}
+.meta{font-size:12px;color:#6B7280}
+h1{font-size:19px;line-height:1.35;margin:6px 0 0;font-weight:650}
+h1 .regime{color:#C8283C}
+p{margin:10px 0 0}
+.note b{font-weight:600}
+.ok{color:#0E8A5F}
+h2{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:#6B7280;font-weight:600;margin:28px 0 8px;padding-top:10px;border-top:1px solid #D9DCE0}
+table{width:100%;border-collapse:collapse}
+td{padding:7px 0;border-top:1px solid #EEF0F2;vertical-align:baseline}
+tr:first-child td{border-top:0}
+td.r{text-align:right;white-space:nowrap;padding-left:12px}
+td small{display:block;font-size:12px;color:#6B7280}
+.sig{font-size:12px;color:#5F6670}
+.stale td{color:#9AA0A8}
+.cat td{padding-top:12px;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;border-top:0}
+.btn{display:inline-block;margin-top:24px;color:#1F5FD1;font-weight:600;text-decoration:none}
+.foot{margin-top:24px;padding-top:12px;border-top:1px solid #D9DCE0;font-size:12px;color:#6B7280}
+</style>
+</head>
+<body>
+<div class="client">
+  <div class="chrome">
+    <div><b>Risk-off: credit wider, vol up, front end rallying</b></div>
+    <div>Desk Brief &lt;brief@…&gt; · Tue 9 Mar, 06:20 ET</div>
+  </div>
+  <div class="sample">Mockup with invented sample data. Not market data.</div>
+  <div class="wrap">
+    <div class="meta">Desk Brief · Tue 9 Mar · 06:20 ET</div>
+    <h1><span class="regime">Risk-off.</span> Credit wider, volatility up, short-dated Treasuries rallying.</h1>
+
+    <p class="note">S&amp;P futures fell <b class="n">0.9%</b> and the DAX <b class="n">1.0%</b>, with VIX up <b class="n">2.31</b> points to <b class="n">24.18</b>. Credit led: high-yield spreads widened <b class="n">27 bp</b> to <b class="n">4.12%</b>, a <b class="n">3.6σ</b> day. The 3-month bill fell <b class="n">19 bp</b> while the 10-year was flat. Brent fell <b class="n">2.9%</b> against <b class="n">0.4%</b> for WTI; check that gap before relying on it.</p>
+    <p class="meta"><span class="ok">✓</span> Every number above matches the stored data (11 of 11). Risk-off: 4 of 4 rules met (equity futures down, VIX up, high-yield wider, front-end yields down).</p>
+
+    <h2>Moved more than usual</h2>
+    <table>
+      <tr><td>High-yield spread<small>FRED · official · Mon</small></td><td class="r n">4.12%</td><td class="r n up">+27 bp</td><td class="r sig n">3.6σ</td></tr>
+      <tr><td>3-month bill <span class="warn">· check</span><small>Yahoo · delayed · 05:58</small></td><td class="r n">3.94%</td><td class="r n down">−19 bp</td><td class="r sig n">3.1σ</td></tr>
+      <tr><td>Brent crude <span class="warn">· check</span><small>Yahoo · delayed · 06:06</small></td><td class="r n">$74.10</td><td class="r n down">−2.9%</td><td class="r sig n">2.6σ</td></tr>
+      <tr><td>VIX<small>Yahoo · delayed · 06:01</small></td><td class="r n">24.18</td><td class="r n up">+2.31</td><td class="r sig n">2.4σ</td></tr>
+      <tr><td>Example Corp<small>Alpaca · IEX · Mon 19:58 · earnings today</small></td><td class="r n">$142.60</td><td class="r n down">−3.1%</td><td class="r sig n">2.2σ</td></tr>
+    </table>
+    <p class="meta">σ compares today's move with that market's last 30 daily moves. 43 others moved less.</p>
+
+    <h2>Today (ET)</h2>
+    <table>
+      <tr><td class="n" style="width:56px">08:30</td><td>Durable goods orders, Feb <span class="meta">· prior +1.4%</span></td></tr>
+      <tr><td class="n">10:00</td><td>Consumer confidence, Mar <span class="meta">· prior 98.3</span></td></tr>
+      <tr><td class="n">13:00</td><td>Treasury 7-year auction</td></tr>
+      <tr><td class="n">16:05</td><td>Example Corp earnings</td></tr>
+    </table>
+
+    <h2>Snapshot</h2>
+    <table>
+      <tr class="cat"><td colspan="3">Rates</td></tr>
+      <tr><td>2-year <span class="meta">official, Mon</span></td><td class="r n">4.07%</td><td class="r n down">−2 bp</td></tr>
+      <tr><td>10-year <span class="meta">delayed</span></td><td class="r n">4.31%</td><td class="r n flat">0 bp</td></tr>
+      <tr><td>30-year <span class="meta">official, Mon</span></td><td class="r n">4.66%</td><td class="r n up">+1 bp</td></tr>
+      <tr><td>2s10s</td><td class="r n">+24 bp</td><td class="r n up">+2 bp</td></tr>
+      <tr><td>10Y real yield <span class="meta">official, Fri</span></td><td class="r n">1.98%</td><td class="r n down">−3 bp</td></tr>
+      <tr class="cat"><td colspan="3">FX <span style="text-transform:none;letter-spacing:0;font-weight:400">· vs New York 5pm</span></td></tr>
+      <tr><td>EURUSD</td><td class="r n">1.0842</td><td class="r n up">+0.3%</td></tr>
+      <tr><td>USDJPY</td><td class="r n">147.21</td><td class="r n down">−0.6%</td></tr>
+      <tr class="cat"><td colspan="3">Commodities</td></tr>
+      <tr><td>WTI</td><td class="r n">$69.82</td><td class="r n down">−0.4%</td></tr>
+      <tr><td>Gold</td><td class="r n">$2,912.40</td><td class="r n up">+0.5%</td></tr>
+      <tr class="cat"><td colspan="3">Equities &amp; vol</td></tr>
+      <tr><td>S&amp;P 500 futures</td><td class="r n">6,482.50</td><td class="r n down">−0.9%</td></tr>
+      <tr><td>Nikkei 225 <span class="meta">closed 02:00</span></td><td class="r n">37,214</td><td class="r n down">−1.4%</td></tr>
+      <tr><td>VIX 3-month</td><td class="r n">22.70</td><td class="r n up">+1.12</td></tr>
+      <tr class="stale"><td>SPY, QQQ, GLD, bond ETFs</td><td class="r" colspan="2">no trades since Mon close</td></tr>
+      <tr class="cat"><td colspan="3">Positioning <span style="text-transform:none;letter-spacing:0;font-weight:400">· CFTC, weekly, as of Tue 2 Mar</span></td></tr>
+      <tr><td>S&amp;P futures, speculators net</td><td class="r n">−71,402</td><td class="r n up">+18,905</td></tr>
+      <tr><td>10Y note futures, speculators net</td><td class="r n">−812,330</td><td class="r n down">−41,116</td></tr>
+    </table>
+
+    <h2>Check before using</h2>
+    <table>
+      <tr><td><b class="warn">Brent vs WTI.</b> The two usually move within 1% of each other; today they are 2.5% apart. Possibly a contract roll or a bad print.</td></tr>
+      <tr><td><b class="warn">3-month bill.</b> Today's value is a delayed quote compared with yesterday's official close, so the move may be overstated.</td></tr>
+    </table>
+
+    <a class="btn" href="#">Open the dashboard →</a>
+
+    <div class="foot">
+      251 of 258 checks pass. 5 warnings don't affect anything above; details on the Data health page.<br>
+      ● live · ◐ delayed · ○ official. Proxies (SPY, GLD, bond ETFs) are shown only when the underlying market has no value.<br>
+      Personal project built on public data. Not investment advice.
+    </div>
+  </div>
+</div>
+</body>
+</html>
