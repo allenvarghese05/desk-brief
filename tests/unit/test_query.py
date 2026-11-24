@@ -668,3 +668,47 @@ def test_health_reads_with_as_of_ignore_a_rerun_stored_later(tmp_path: Path) -> 
     unbounded = query.health_summary(db, MON, expected_sources=["yahoo"])  # as before
     assert (unbounded.n_pass, unbounded.n_fail, unbounded.run_status) == (1, 0, "ok")
     assert query.instrument_flags(db, MON) == {"WTI": "pass", "SPY": "pass", "ES_F": "pass"}
+
+
+# ---------------------------------------------------------------------------
+# T61: `deskbrief diagnose changes` (read-only) on the synthetic store
+# ---------------------------------------------------------------------------
+
+
+def test_diagnose_changes_prints_last_value_and_baseline_and_writes_nothing(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from deskbrief import cli
+
+    root = world.store.root
+    text = (Path(__file__).resolve().parents[2] / "config.yaml").read_text(encoding="utf-8")
+    cfg = tmp_path / "diag-config.yaml"
+    cfg.write_text(text.replace("local_root: ./.data", f"local_root: {root}"), encoding="utf-8")
+    before = sorted(p.relative_to(root) for p in root.rglob("*"))
+
+    assert cli.main(["diagnose", "changes", "--date", "2026-11-16", "--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert sorted(p.relative_to(root) for p in root.rglob("*")) == before  # wrote nothing
+    lines = out.splitlines()
+    assert lines[0].startswith("# deskbrief diagnose changes: report date 2026-11-16, cut 07:00 ET")
+    es = lines.index(next(x for x in lines if x.startswith("ES_F ")))
+    assert 'status=ok basis="previous NYSE close"' in lines[es]
+    assert lines[es + 1].startswith("  last      yahoo/quote field=last interval=tick tier=2")
+    assert "as_of=2026-11-16 06:59 ET value=5976" in lines[es + 1]
+    assert lines[es + 2].startswith("  baseline  yahoo/history field=close interval=1d tier=2")
+    assert "as_of=2026-11-13 ET value=6000" in lines[es + 2]
+    assert "yahoo/history close 1d newest=2026-11-13 n=3" in lines[es + 4]
+    # an instrument with no value says so, and every configured instrument gets a block
+    assert any(x.startswith("N225 [index] no value as of the cut") for x in lines)
+    assert "# notable moves the brief scored" in out
+
+    assert (
+        cli.main(
+            ["diagnose", "changes", "--date", "2026-11-16", "--no-values", "--config", str(cfg)]
+        )
+        == 0
+    )
+    hidden = capsys.readouterr().out
+    assert "value=" not in hidden
+    assert "change=" not in hidden
+    assert "as_of=2026-11-13 ET" in hidden
