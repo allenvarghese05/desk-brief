@@ -981,6 +981,166 @@ Rules for the phase:
   - No `<a target="_self">` and no `title` attributes appear (test).
 - Changelog: card created from P-022.
 
+### Phase 4D — Dashboard v3, no containers (ruling P-023, 2026-11-23)
+
+The owner chose mockup direction B with five changes. The reference is the labelled synthetic fixture `tests/fixtures/design/home-mockup-2026-11-23.html`. Its numbers are invented, and its `title` attributes are for viewing only. The cards and P-023 describe the design in words and win where they differ from the fixture.
+
+Order: T60 → T60B, one after the other.
+- T60 does the shared theme, Home, and the bugs the owner reported.
+- T60B applies the look to the other five pages.
+
+The Phase 4C rules still apply:
+- provenance;
+- the synthetic store for screenshots;
+- tests outside Owns;
+- no regressions.
+
+Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 synthetic store, never real provider data.
+
+#### T60 — Home without containers, shared theme, reported bugs
+- **Depends:** T59 merged · **Owns:**
+  - `app/theme.py`, and `.streamlit/config.toml` (the `[theme]` keys only);
+  - `app/views/markets.py`;
+  - `app/components/{kit.py,values.py,panels.py,tearsheet.py,instrument.py}`;
+  - `app/components/data.py`, `build_snapshot` and its helpers only;
+  - `app/components/tvchart.py`, only to move the attribution;
+  - `src/deskbrief/query.py`, `overnight_changes`, `_price_change` and the health reads only;
+  - `src/deskbrief/report/model.py`, a keyword-only argument of `BriefModel.from_store` only;
+  - `tests/unit/test_query.py` and `tests/unit/report/test_model.py`;
+  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,test_data_layer.py,test_tvchart.py,conftest.py}`;
+  - `docs/specs/2026-11-15-desk-brief-design.md` §10.2 and §10.3 only.
+- Deliverables:
+  - **Theme (shared by every page).** It follows P-023:
+    - section labels over hairlines;
+    - the four type sizes;
+    - backgrounds only on the elements P-023 lists.
+
+    T60 flattens every shared surface:
+    - `theme.CSS`, including `.db-card`;
+    - `kit.PAGE_CSS`, including `kit.card`'s `st-key-db-card-*` containers and `.db-kpi` cells;
+    - `panels.HOME_CSS`;
+    - in `.streamlit/config.toml`, `secondaryBackgroundColor` and `baseRadius` set so native widgets match.
+
+    After T60, the only panel styles left are in `macro.MACRO_CSS` and CSS the page files inject, which belong to T60B.
+  - **Flat-CSS checker.** `tests/unit/app/conftest.py` gains a helper that parses a CSS string. It is default-deny: it fails on any rule, whatever its selector, that sets any of:
+    - a non-transparent background;
+    - a border other than one hairline top or bottom rule;
+    - a non-zero radius;
+    - a shadow.
+
+    The one exception is a selector on an explicit allowlist, which holds P-023's exempt elements.
+  - **Native chrome.** The theme includes global flat overrides for Streamlit's expander and tab panel, with no background, border, radius or shadow. `config.toml` cannot set those alone.
+  - **Home layout,** as in P-023 and the fixture:
+    - **Top bar,** then the one-line market strip, with the basis said once.
+    - **The hero.** The figure is 40–44 px. The pill holds the 1D change and its basis. Below it come:
+      - the provenance line;
+      - range and Line/Candles controls, with Compare and CSV in "More";
+      - the tvchart;
+      - the 1W–1Y horizon row, with "Charts by TradingView" at its right. `tvchart` exposes the attribution so the page can place it there. It shows only when the TradingView chart drew, as now.
+      - "Do the sources agree?" and "Risk and range" side by side, as flat rows.
+    - **The watchlist** sits on the right:
+      - It is about 340–360 px wide at 1500 px, full length, with no inner scroll.
+      - Its group headers fold the group. Fold state is kept in session state, the selected instrument's group never folds away, and groups start open.
+      - Rows keep the σ tag for notable moves.
+    - **Below 960 px,** the watchlist goes under the hero. **Below 640 px,** sources and risk stack, and the All values source moves into the date cell.
+    - **The tabs** keep their current content.
+  - **Bugs reported by the owner on 2026-11-21:**
+    1. The verdict section no longer overflows its column. The Lineage and Macro links no longer overlap the 52-week labels at any of the four widths.
+    2. Watchlist hover content is never clipped. It is not inside a scroll area, and it renders where neither a column nor an iframe can clip it. It has no `title` attribute.
+       - **Mechanism:** a CSS tooltip, as P-022 requires, that opens on hover and on keyboard focus. It is positioned so no column or scroll area clips it, for example `position: fixed`.
+       - Native `help=` tooltips are not used.
+       - On touch, tapping a row selects it, and the hero then shows the same content: full name, field, tier, source and as-of.
+    3. Watchlist names never break one letter per line at any width, including about 800 px. They truncate with an ellipsis only after the short id.
+    4. On a day that isn't an XNYS session (a weekend or holiday), the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
+       - **Cause:** `query.overnight_changes` takes the price baseline from `prev_business_day(report_date)`. On a Saturday that is Friday, the same day as the last close, so `_price_change` returns "no move yet".
+       - **Fix:** when `report_date` is not an XNYS session, the rule is the same for every price-family last value, whatever its interval (tick, `1m` or `1d`):
+         - Let L be the last XNYS session before `report_date`, and S the ET date of the last value.
+         - **If S is on or before L** (the Saturday case, including Friday ticks stored after the close): the baseline is the `1d` close of `prev_business_day(S)`, and the label names S's weekday (for example "Fri"). This is the new behaviour.
+         - **If S is after L** (a market that traded on an XNYS holiday: ES futures on MLK Monday, FX on Thanksgiving, N225 on Good Friday seen on Saturday): the baseline stays L's own `1d` close, as today, and the label says "since <L's weekday> close". So value, baseline and label always describe the same span.
+       - Official-family changes, such as Treasury yields, are unchanged: they already compare the last official value with the one before.
+       - On session days nothing changes, including before the morning run, when "no move yet" stays. So the morning email is unchanged.
+       - `BriefModel.from_store` keeps `(et_date(now), now)`, so no value from after `now` is read.
+    5. On a day without a run, the run status shows the latest run, not "No checks yet".
+       - **The latest run** is the run with the greatest `target_date` on or before `et_date(now)` that has check rows evaluated at or before `now`.
+       - `BriefModel.from_store` gains a keyword-only `health_date=None`. `health_summary` and `instrument_flags` read `health_date` when it is given. `None` keeps today's behaviour for every existing caller, and the dashboard passes the latest run's date.
+       - The status names that run's day (for example "Last run Fri 07:00 · 14 checks ok").
+       - "No checks yet" stays only when no such run exists. A run whose checks were all skipped says so with its day, as `_health` reports it.
+
+    No contract file changes. If the cause of 4 or 5 turns out to be elsewhere, the implementer stops and asks the planner before changing anything outside Owns.
+    6. **The verdict** (`instrument.verdict` and `_gap_text`):
+       - Within `AGREE_BP`: "Agree", tone ok, with the gap. If the values are more than `LIKE_FOR_LIKE_S` apart in time, a neutral note says so. This is the 0.8 bp, 41/41 case.
+       - Beyond `AGREE_BP` and more than `LIKE_FOR_LIKE_S` apart: "Not comparable", tone warn, with the time apart.
+       - Beyond `AGREE_BP` at the same moment: "No", tone fail, as today.
+       - The warn mark appears only in the warn case.
+  - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): `kit.feed_tier`'s docstring says when it falls back to the source's most live tier for the instrument, or for any instrument, and when it returns `None`.
+  - **Spec.** §10.2 and §10.3 are updated to match P-023.
+- Acceptance:
+  - **Theme and layout tests:**
+    - The flat-CSS checker passes on `theme.CSS`, `kit.PAGE_CSS` and `panels.HOME_CSS`.
+    - The checker is shown to fail on a sample `.db-kpi` panel rule and on a rule with an arbitrary unlisted selector.
+    - A test checks that the expander and tab-panel overrides exist.
+    - Tests pin every Home block in its new place, including the strip's single basis, the pill's 1D change and a 1W-first horizon row.
+  - **Bug tests:** each fails if its fix is removed.
+    - **Weekend and run-status tests** (in `test_query.py`, `test_model.py` and `test_data_layer.py`):
+      - On a Saturday, a price instrument shows Friday's close against Thursday's, labelled "Fri".
+      - The Saturday store also holds Friday ticks stored after Friday's close, plus Thursday's close. Two cases run on it, each expecting Friday against Thursday, labelled "Fri":
+        - local, with every tier;
+        - hosted, with only the tier-2 Yahoo quote.
+
+        Each fails if only the `1d` branch is changed.
+      - **Holiday cases, where S is after L:** each expects the move since L's close with a "since … close" label, and fails if the S-on-or-before-L rule is applied to them:
+        - an ES futures tick on MLK Monday;
+        - an FX quote on Thanksgiving;
+        - an N225 close on Good Friday, seen on Saturday.
+      - In hosted mode, the same holds for a price with only daily bars.
+      - A Treasury yield keeps its official-to-official change.
+      - On a weekday before the morning run, "no move yet" stays.
+      - The status shows the latest run's checks.
+      - With no run at all, the status shows "No checks yet".
+      - **Latest-run selection.** These tests tell the definition apart from simpler readings:
+        - a backfill run started later but for an earlier `target_date` is not chosen;
+        - check rows for a `target_date` after `et_date(now)` are ignored;
+        - check rows evaluated after a pinned `now` are ignored;
+        - a latest run whose checks were all skipped shows that, with its day.
+    - The existing report and golden tests pass unchanged, which shows the email is unaffected.
+    - Verdict tests cover agree-but-apart, not comparable and disagree.
+    - A watchlist test shows that a folded group keeps the selected row reachable.
+  - **Provenance:**
+    - Hosted-versus-local tests pass.
+    - The glyph-legend and tier-tooltip tests still pass.
+    - Watchlist hover content shows full name, field, tier, source and as-of. A test shows it opens on keyboard focus as well as hover.
+    - No `title` attribute and no `<a target="_self">` appear (test).
+    - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
+  - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
+  - **Timing:** on the T56 benchmark store, the median of five warm-cache first renders is within 10% of T59's median. Both are measured on the same machine in the same session, and the PR gives both times and the machine.
+- Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59. Owns, the weekend-fix route (every price interval, and holidays where the last value is dated after the last session), the run-status definition, the default-deny checker, the native-chrome overrides, the tooltip mechanism and the attribution placement were set after the [PR #95 round-1 to round-4 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
+
+#### T60B — Other pages without containers
+- **Depends:** T60 merged · **Owns:**
+  - `app/pages/*.py`;
+  - `app/components/{macro.py,incidents.py}`;
+  - `tests/unit/app/{test_pages.py,test_macro.py}`.
+- Deliverables:
+  - **The other pages.** Macro, Cross-checks, Data health, Sources and Runs use T60's theme with no panels:
+    - section labels over hairlines;
+    - flat tables with hairline rows;
+    - the four type sizes.
+
+    Each page keeps its 4–6 blocks and its tabs. The panel styles in `macro.MACRO_CSS` and in CSS that page files inject are removed. T60B does not edit `kit.py`, `theme.py` or `panels.py`. If a shared style needs changing, it goes back to the planner.
+  - **Fit.** At the four widths, nothing overflows, overlaps or wraps one letter per line. The Macro heatmap and tvcharts keep their attribution.
+  - **Run status on the system pages.** Data health, and Cross-checks if it shows a count for today, use T60's latest-run date when today has no run, and name that day (for example "Fri 07:00 run"). They no longer show "no run today yet" next to a green "Failing 0".
+  - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): the gold vs real-yield panel's "Gold vs 1M" label follows the gold series in use. It reads "GLD vs 1M", with "proxy" visible, when gold comes from GLD.
+- Acceptance:
+  - The page tests pass, updated for the new layout.
+  - A test pins the GLD label.
+  - A weekend test shows Data health naming the latest run's day.
+  - `test_pages.py` runs T60's flat-CSS checker on `macro.MACRO_CSS`, on `incidents.py`'s CSS if it has any, and on every CSS string a page file injects.
+  - T60's own checker tests still pass.
+  - Hosted-versus-local tests hold.
+  - No `title` attributes and no `<a target="_self">` appear (test).
+  - Each page has screenshots at about 1500 and 390 px in the PR.
+- Changelog: card created from P-023. The shared-file split, the checker use and the system-page run status were set after the [PR #95 round-1 and round-3 reviews](https://github.com/allenvarghese05/desk-brief/pull/95).
+
 ### Phase 5 — Stretch (only after DoD)
 
 - **T50** Claude-written morning narrative (`claude-sonnet-5-5`), every number in the text verified against `model.json` before inclusion; unverifiable sentence → dropped and logged.
