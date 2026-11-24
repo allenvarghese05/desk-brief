@@ -619,6 +619,30 @@ def test_latest_check_run_counts_a_run_of_skipped_checks(tmp_path: Path) -> None
     assert query.latest_check_run(w.connect(), SAT_1000) == query.RunRef(FRI, "R-FRI", None)
 
 
+def test_cross_checks_count_from_their_run_start_not_their_market_time(tmp_path: Path) -> None:
+    """``at_time`` is market time (here Fri 00:00), not when the check ran (review round 2 #1).
+
+    R-FRI starts Fri 06:55 and writes a cross-check fail stamped Fri 00:00. Read at Fri 06:00,
+    before R-FRI started, the earlier run is the one shown and the fail is not counted.
+    """
+    w = World(tmp_path)
+    w.dq(THU, [("fresh", "pass", "yahoo", None)], run_id="R-THU")  # Thu 07:00
+    _run_row(w, THU, "R-THU", et(THU, "06:55"))
+    w.dq(FRI, [("fresh", "pass", "yahoo", None)], run_id="R-FRI")  # Fri 07:00
+    w.xchecks(FRI, [("sp500_return", "fail", 12.0)], run_id="R-FRI", at="00:00")
+    _run_row(w, FRI, "R-FRI", et(FRI, "06:55"))
+    db = w.connect()
+    now = et(FRI, "06:00")
+    assert query.latest_check_run(db, now) == query.RunRef(THU, "R-THU", et(THU, "06:55"))
+    early = query.health_summary(db, FRI, expected_sources=["yahoo"], as_of=now)
+    assert (early.n_pass, early.n_xcheck_fail, early.issues) == (0, 0, ())
+    assert query.instrument_flags(db, FRI, as_of=now) == {}
+    later = et(FRI, "07:30")
+    assert query.latest_check_run(db, later) == query.RunRef(FRI, "R-FRI", et(FRI, "06:55"))
+    full = query.health_summary(db, FRI, expected_sources=["yahoo"], as_of=later)
+    assert (full.n_pass, full.n_xcheck_fail) == (1, 1)
+
+
 def test_health_reads_with_as_of_ignore_a_rerun_stored_later(tmp_path: Path) -> None:
     w = World(tmp_path)
     w.dq(MON, [("fresh_a", "fail", "stooq", "WTI")], run_id="R1")  # 07:00

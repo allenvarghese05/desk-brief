@@ -30,8 +30,9 @@ Health (``health_summary``, ``instrument_flags``, the cross-check items) reads o
 date: the newest run that wrote any row to ``dq_results`` or ``crosscheck_results`` (one run id
 for both tables). Re-runs keep every run's rows (P-008), but a check that failed in a superseded
 run does not count. ``health_summary`` and ``instrument_flags`` take an optional ``as_of``: when
-given, check rows evaluated after it, ``runs`` rows started after it and ``source_log`` rows
-requested after it are ignored, so a re-run stored later cannot change a brief written earlier.
+given, check rows evaluated after it (a cross-check row from its run's ``started_at``, since its
+``at_time`` is market time), ``runs`` rows started after it and ``source_log`` rows requested
+after it are ignored, so a re-run stored later cannot change a brief written earlier.
 ``None`` (the default) reads everything, as before. :func:`latest_check_run` finds the date to
 read on a day without a run of its own (a weekend or holiday).
 
@@ -625,6 +626,18 @@ def health_summary(
     )
 
 
+#: Cross-check rows with ``eval_at``, when the row was evaluated. ``at_time`` is the market time
+#: the check refers to (a fix, a close, midnight of the ref date), not when it ran, and
+#: ``crosscheck_results`` has no evaluation timestamp; so a row counts from the start of the run
+#: that wrote it (``runs.started_at``). A row whose run has no ``runs`` row falls back to
+#: ``at_time``.
+_XC_EVAL = (
+    "(SELECT x.*, coalesce(r.started_at, x.at_time) AS eval_at FROM xchecks x LEFT JOIN "
+    "(SELECT run_id, max(started_at) AS started_at FROM runs GROUP BY run_id) r "
+    "ON r.run_id = x.run_id)"
+)
+
+
 def _bound(column: str, as_of: datetime | None) -> tuple[str, list[Any]]:
     """`` AND <column> <= ?`` and its bound value (empty when ``as_of`` is None)."""
     if as_of is None:
@@ -637,18 +650,19 @@ def latest_check_run(duck: duckdb.DuckDBPyConnection, now: datetime) -> RunRef |
 
     The run with the greatest ``target_date`` on or before ``et_date(now)`` that has check rows
     (``dq_results`` or ``crosscheck_results``, skipped checks included) evaluated at or before
-    ``now``. Among that date's rows the newest run wins, as in ``health_summary``. A backfill run
-    started later for an earlier date is therefore not chosen. ``started_at`` comes from the
-    ``runs`` table (None when the run has no row there).
+    ``now`` (a cross-check counts from its run's ``started_at``; see ``_XC_EVAL``). Among that
+    date's rows the newest run wins, as in ``health_summary``. A backfill run started later for
+    an earlier date is therefore not chosen. ``started_at`` comes from the ``runs`` table (None
+    when the run has no row there).
     """
     now = ensure_utc(now)
     today = et_date(now)
     row = duck.execute(
-        "SELECT target_date, run_id FROM ("
+        "SELECT target_date, run_id FROM ("  # noqa: S608
         "SELECT target_date, run_id, evaluated_at AS ts, result_id FROM dq "
         "WHERE target_date <= ? AND evaluated_at <= ? "
-        "UNION ALL SELECT target_date, run_id, at_time, result_id FROM xchecks "
-        "WHERE target_date <= ? AND at_time <= ?"
+        f"UNION ALL SELECT target_date, run_id, eval_at, result_id FROM {_XC_EVAL} "
+        "WHERE target_date <= ? AND eval_at <= ?"
         ") ORDER BY target_date DESC, ts DESC, result_id DESC LIMIT 1",
         [today, now, today, now],
     ).fetchone()
@@ -666,14 +680,16 @@ def _latest_run(
     One run id serves both tables, so the DQ counts, the cross-check items and the instrument
     flags always describe the same run. A newer run that wrote only one of the two tables still
     wins: the other table then contributes nothing for that date. Rows evaluated after
-    ``as_of`` (when given) are ignored.
+    ``as_of`` (when given) are ignored; a cross-check counts from its run's ``started_at``
+    (see ``_XC_EVAL``).
     """
     dq_sql, dq_params = _bound("evaluated_at", as_of)
-    xc_sql, xc_params = _bound("at_time", as_of)
+    xc_sql, xc_params = _bound("eval_at", as_of)
     row = duck.execute(
         "SELECT run_id FROM ("  # noqa: S608
         f"SELECT run_id, evaluated_at AS ts, result_id FROM dq WHERE target_date = ?{dq_sql} "
-        f"UNION ALL SELECT run_id, at_time, result_id FROM xchecks WHERE target_date = ?{xc_sql}"
+        f"UNION ALL SELECT run_id, eval_at, result_id FROM {_XC_EVAL} "
+        f"WHERE target_date = ?{xc_sql}"
         ") ORDER BY ts DESC, result_id DESC LIMIT 1",
         [target_date, *dq_params, target_date, *xc_params],
     ).fetchone()
@@ -699,11 +715,11 @@ def _latest_xchecks(
     duck: duckdb.DuckDBPyConnection, target_date: date, as_of: datetime | None = None
 ) -> list[tuple[Any, ...]]:
     """Cross-check results of the latest run for ``target_date``."""
-    bound_sql, bound_params = _bound("at_time", as_of)
+    bound_sql, bound_params = _bound("eval_at", as_of)
     return duck.execute(
         "SELECT check_name, group_id, left_source, right_source, status, diff_bps, "  # noqa: S608
         "warn_bps, fail_bps, left_instrument, right_instrument, details_json "
-        f"FROM xchecks WHERE target_date = ? AND run_id = ?{bound_sql} "
+        f"FROM {_XC_EVAL} WHERE target_date = ? AND run_id = ?{bound_sql} "
         "QUALIFY row_number() OVER (PARTITION BY check_name, coalesce(group_id, ''), "
         "left_instrument, right_instrument, left_source, right_source "
         "ORDER BY at_time DESC, result_id DESC) = 1",

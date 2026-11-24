@@ -347,7 +347,10 @@ def build_snapshot(
     Health describes the latest run with checks (T60 bug 5, ``query.latest_check_run``: the
     greatest target date on or before today with check rows evaluated by ``now``), passed to
     ``BriefModel.from_store(health_date=...)``, so a weekend or a morning before the run shows
-    the last run's checks rather than none. With no such run the model reads today, as before.
+    the last run's checks rather than none. With no such run the model reads today's checks,
+    still bounded by ``now`` (a ``health_date`` is always passed, so ``from_store`` bounds every
+    check read): a run that starts later cannot colour the dot or the flags while the status line
+    says "No checks yet".
     """
     with shared_connection(config, env) as conn:
         latest = latest_check_run(conn, now)
@@ -357,7 +360,7 @@ def build_snapshot(
             et_date(now),
             now,
             exclude_tiers=exclude_tiers,
-            health_date=latest.target_date if latest is not None else None,
+            health_date=latest.target_date if latest is not None else et_date(now),
         )
         history = series_all(conn, SPARK_DAYS, now)
     return Snapshot(

@@ -439,6 +439,32 @@ def test_status_without_any_run_says_no_checks_yet(tmp_path: Path) -> None:
     assert panels.NO_CHECKS in panels.status(ov, snap.last_run)
 
 
+def test_now_before_the_only_run_reads_no_checks(tmp_path: Path) -> None:
+    """Review round 2 #2: with no run known at ``now`` the health reads are still bounded.
+
+    The first-ever run starts Fri 06:55 and records fails; read at Fri 06:00 the status line,
+    the health dot and the per-instrument flags all agree there are no checks yet.
+    """
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(monday_rows())
+    w.dq(FRI, [("fresh_a", "fail", "yahoo", "SPY")], run_id="RF")  # Fri 07:00
+    w.xchecks(FRI, [("sp500_return", "fail", 12.0)], run_id="RF", at="00:00")
+    started = et(FRI, "06:55")
+    run = {"run_id": "RF", "job": "morning", "trigger": "manual", "target_date": FRI,
+           "started_at": started, "finished_at": started, "status": "ok", "git_sha": "deadbeef",
+           "config_hash": "cafe", "n_fetch": 1, "n_fetch_failed": 0, "n_obs": 1,
+           "n_dq_fail": 1, "n_dq_warn": 0}  # fmt: skip
+    w._append("runs", [run], lambda r: r["target_date"])
+    snap = _snapshot(w, et(FRI, "06:00"))
+    assert snap.last_run is None
+    assert snap.model.health.status == "unknown"
+    assert {r.dq_flag for r in snap.model.rows()} == {"none"}
+    ov = data.overview(snap, "local", frozenset())
+    assert panels.NO_CHECKS in panels.status(ov, snap.last_run)
+
+
 @pytest.mark.parametrize(
     ("iid", "rows", "now", "label"),
     [
