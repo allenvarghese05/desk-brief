@@ -999,19 +999,32 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
 
 #### T60 — Home without containers, shared theme, reported bugs
 - **Depends:** T59 merged · **Owns:**
-  - `app/theme.py`;
+  - `app/theme.py`, and `.streamlit/config.toml` (the `[theme]` keys only);
   - `app/views/markets.py`;
   - `app/components/{kit.py,values.py,panels.py,tearsheet.py,instrument.py}`;
-  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,conftest.py}`;
+  - `app/components/data.py`, `build_snapshot` and its helpers only;
+  - `tests/unit/app/{test_home.py,test_tearsheet.py,test_components.py,test_navigation.py,test_data_layer.py,conftest.py}`;
   - `docs/specs/2026-11-15-desk-brief-design.md` §10.2 and §10.3 only.
 - Deliverables:
   - **Theme (shared by every page).** It follows P-023:
-    - no card or panel surfaces, borders around blocks, radii on blocks, or shadows;
     - section labels over hairlines;
     - the four type sizes;
     - backgrounds only on the elements P-023 lists.
 
-    Page-specific panel styles left for T60B may remain until T60B removes them, and the PR lists them.
+    T60 flattens every shared surface:
+    - `theme.CSS`, including `.db-card`;
+    - `kit.PAGE_CSS`, including `kit.card`'s `st-key-db-card-*` containers and `.db-kpi` cells;
+    - `panels.HOME_CSS`;
+    - in `.streamlit/config.toml`, `secondaryBackgroundColor` and `baseRadius` set so native widgets match.
+
+    After T60, the only panel styles left are in `macro.MACRO_CSS` and CSS the page files inject, which belong to T60B.
+  - **Flat-CSS checker.** `tests/unit/app/conftest.py` gains a helper that parses a CSS string and fails on a block container (as P-023 defines it) that has any of:
+    - a non-transparent background;
+    - a border other than one hairline top or bottom rule;
+    - a non-zero radius;
+    - a shadow.
+
+    The helper's explicit selector allowlist holds P-023's exempt elements.
   - **Home layout,** as in P-023 and the fixture:
     - **Top bar,** then the one-line market strip, with the basis said once.
     - **The hero.** The figure is 40–44 px. The pill holds the 1D change and its basis. Below it come:
@@ -1030,8 +1043,14 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     1. The verdict section no longer overflows its column. The Lineage and Macro links no longer overlap the 52-week labels at any of the four widths.
     2. Watchlist hover content is never clipped. It is not inside a scroll area, and it renders where neither a column nor an iframe can clip it. It has no `title` attribute.
     3. Watchlist names never break one letter per line at any width, including about 800 px. They truncate with an ellipsis only after the short id.
-    4. On weekends and holidays, the strip and watchlist show the last session's change, labelled with its day (for example "Fri"), not a dash.
+    4. On weekends and holidays, the strip and watchlist show the last session's change, labelled with that session's weekday (for example "Fri"), not a dash.
     5. The run status on weekends shows the latest run and its check counts, not "No checks yet". "No checks yet" appears only when no run has been stored.
+
+    **The likely cause of 4 and 5:** `data.build_snapshot` builds `BriefModel.from_store` for `et_date(now)`, and on a day with no run there are no session changes and no health. The fix is in `data.py`:
+    - The report date is today's ET date when a run is stored for it. Otherwise it is the date of the latest stored run.
+    - The point-in-time `now` is unchanged, so no value from after `now` is read.
+
+    No file under `src/` and no contract file changes. If the implementer finds the cause is elsewhere, they stop and ask the planner before changing anything outside Owns.
     6. **The verdict** (`instrument.verdict` and `_gap_text`):
        - Within `AGREE_BP`: "Agree", tone ok, with the gap. If the values are more than `LIKE_FOR_LIKE_S` apart in time, a neutral note says so. This is the 0.8 bp, 41/41 case.
        - Beyond `AGREE_BP` and more than `LIKE_FOR_LIKE_S` apart: "Not comparable", tone warn, with the time apart.
@@ -1041,7 +1060,8 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
   - **Spec.** §10.2 and §10.3 are updated to match P-023.
 - Acceptance:
   - **Theme and layout tests:**
-    - A test fails if the theme CSS gives a block container a background, border, radius or shadow outside P-023's list.
+    - The flat-CSS checker passes on `theme.CSS`, `kit.PAGE_CSS` and `panels.HOME_CSS`.
+    - The checker is shown to fail on a sample `.db-kpi` panel rule.
     - Tests pin every Home block in its new place, including the strip's single basis, the pill's 1D change and a 1W-first horizon row.
   - **Bug tests:** each fails if its fix is removed.
     - A weekend fixture shows Friday's change and the latest run's checks.
@@ -1049,10 +1069,12 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     - A watchlist test shows that a folded group keeps the selected row reachable.
   - **Provenance:**
     - Hosted-versus-local tests pass.
+    - The glyph-legend and tier-tooltip tests still pass.
+    - Watchlist hover content shows full name, field, tier, source and as-of.
     - No `title` attribute and no `<a target="_self">` appear (test).
     - "proxy", "IEX", "fallback" and "HYPOTHETICAL" stay visible beside their figures, once each.
   - **Screenshots:** Home at all four widths beside the fixture's. The PR states for each bug the width where it was fixed and checked.
-  - **Timing:** a warm-cache first render is no slower than at T59 on the T56 benchmark (the PR gives both times).
+  - **Timing:** on the T56 benchmark store, the median of five warm-cache first renders is within 10% of T59's median. Both are measured on the same machine in the same session, and the PR gives both times and the machine.
 - Changelog: card created from P-023 and the owner's 2026-11-21 test of T58 and T59.
 
 #### T60B — Other pages without containers
@@ -1066,13 +1088,14 @@ Screenshots are taken at about 1500, 1100, 800 and 390 px wide, against the T56 
     - flat tables with hairline rows;
     - the four type sizes.
 
-    Each page keeps its 4–6 blocks and its tabs, and the page-specific panel styles T60 listed are removed.
+    Each page keeps its 4–6 blocks and its tabs. The panel styles in `macro.MACRO_CSS` and in CSS that page files inject are removed. T60B does not edit `kit.py`, `theme.py` or `panels.py`. If a shared style needs changing, it goes back to the planner.
   - **Fit.** At the four widths, nothing overflows, overlaps or wraps one letter per line. The Macro heatmap and tvcharts keep their attribution.
   - **Review follow-up** from [PR #90 round 2](https://github.com/allenvarghese05/desk-brief/pull/90): the gold vs real-yield panel's "Gold vs 1M" label follows the gold series in use. It reads "GLD vs 1M", with "proxy" visible, when gold comes from GLD.
 - Acceptance:
   - The page tests pass, updated for the new layout.
   - A test pins the GLD label.
-  - The T60 theme test still passes with every page loaded.
+  - `test_pages.py` runs T60's flat-CSS checker on `macro.MACRO_CSS`, on `incidents.py`'s CSS if it has any, and on every CSS string a page file injects.
+  - T60's own checker tests still pass.
   - Hosted-versus-local tests hold.
   - No `title` attributes and no `<a target="_self">` appear (test).
   - Each page has screenshots at about 1500 and 390 px in the PR.

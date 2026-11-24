@@ -190,12 +190,21 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
 
 ## P-023 · 2026-11-23 · Dashboard v3: no containers, editorial layout
 - Decision:
-  - **No containers.** Blocks sit on the page background. A section opens with a small uppercase label over a hairline rule, and sections are separated by hairlines and whitespace. Panels, card surfaces, rounded boxes, outlines around blocks and shadows are removed from every page. **This supersedes P-022's "panels one shade lighter; cards separate by shade".** Only these elements may have a background different from the page:
-    - the hero change pill;
-    - the selected watchlist row;
-    - tooltips, popovers and dialogs;
-    - the search field;
-    - the selected segment of a segmented control.
+  - **No containers.** Blocks sit on the page background. A section opens with a small uppercase label over a hairline rule, and sections are separated by hairlines and whitespace. **This supersedes P-022's "panels one shade lighter; cards separate by shade".**
+    - **Removed from every page:** panels, card surfaces, rounded boxes, outlines around blocks and shadows.
+    - **What counts as a block container:** any element that wraps a section or a group of rows or figures. That includes keyed Streamlit containers, KPI cells, column and tab bodies, and expanders.
+    - **What a block container may not have:**
+      - a background other than transparent;
+      - a border other than one hairline top or bottom rule;
+      - a radius;
+      - a shadow.
+    - **Elements that may have a background different from the page:**
+      - the hero change pill;
+      - the selected watchlist row, and the hover highlight of a clickable row;
+      - tooltips, popovers and dialogs;
+      - the search field;
+      - the selected segment of a segmented control;
+      - inline markers and data encodings: tier glyphs, σ tags, status dots, the failed-check and warn markers, stale tags, check squares, heatmap cells and chart canvases.
   - **Type.** Four type sizes:
     - the hero figure, 40–44 px on desktop and 36 px on phones;
     - 15 px for strip values, the verdict answer and the brand;
@@ -221,7 +230,7 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
       - It is grouped by asset class, and each group's header folds and unfolds the group.
       - Rows have full names.
       - Changes are coloured text, not pills.
-      - Every row has the same hover content: full name, source and as-of. It is shown so that no scroll area or column can clip it.
+      - Every row has the same hover content: full name, field, tier, source and as-of. It is shown so that no scroll area, column or iframe can clip it.
       - It is wide enough that names never wrap one letter per line.
     - **Below 960 px,** the watchlist drops under the hero at full width.
     - **Below 640 px,** the sources and risk sections stack. The All values table puts the source and its tier word on a second line in the date cell, instead of in its own column.
@@ -229,7 +238,14 @@ Rulings that change the spec or plan. Each has an id, a date, the decision, the 
   - **The other pages** follow the same rules: no panels; sections with labels and hairlines; tables flat with hairline rows; the same four type sizes.
   - **Kept from P-022:**
     - the colours: one blue accent for the selected state, muted green and red for up and down, and the failed-check marker;
-    - the provenance rules: tier glyphs, the visible words "proxy", "IEX", "fallback" and "HYPOTHETICAL", no `title` attributes, and tier 1 never shown in hosted mode;
+    - every P-022 Provenance bullet, unchanged. That covers:
+      - source, tier, as-of and field in each figure's markup and accessible label;
+      - the tier glyph with a CSS tooltip on hover, keyboard focus and tap;
+      - the details panel;
+      - the glyph legend on each page;
+      - the words "proxy", "IEX", "fallback" and "HYPOTHETICAL" always visible beside their figures;
+      - no `title` attributes;
+      - tier 1 never shown or read in hosted mode;
     - TradingView charts and their attribution;
     - in-session navigation;
     - "no contract files change".
