@@ -646,7 +646,7 @@ def _css() -> str:
 .st-key-db-ctrls > div:last-child {{ margin-left: auto; }}
 .st-key-db-ctrls [data-testid="stButtonGroup"] button {{ background: transparent; border: 0;
   color: {t.SECONDARY}; min-height: 28px; padding: 0 10px; font-size: {t.SIZE_BODY}px; }}
-[data-testid="stButtonGroup"] button[kind="segmented_controlActive"] {{
+[data-testid="stButtonGroup"] button[aria-checked="true"] {{
   background: {t.RAISED}; color: {t.TEXT}; border-radius: {t.RADIUS}px; }}
 .st-key-db-ctrls [data-testid="stPopover"] button {{ background: transparent; border: 0;
   color: {t.SECONDARY}; font-size: {t.SIZE_BODY}px; }}

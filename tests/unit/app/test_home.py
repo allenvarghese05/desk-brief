@@ -977,34 +977,71 @@ def test_shared_stylesheets_are_flat(name: str, flat_css: Callable[[str], list[s
 
 
 def test_flat_checker_is_default_deny(flat_css: Callable[[str], list[str]]) -> None:
-    """The checker fails on the T59 KPI panel and on any selector it has never heard of."""
-    assert flat_css(".db-kpi { background: #13161B; border-radius: 12px; padding: 18px; }")
-    assert flat_css(".brand-new-thing { box-shadow: 0 8px 24px rgba(0,0,0,.4); }")
-    assert flat_css(".x { border: 1px solid #22262E; }")  # a box, not a hairline
-    assert flat_css(".x { border-left: 1px solid #22262E; }")
-    assert flat_css(".x { border-top: 1px solid #222; border-bottom: 1px solid #222; }")
-    assert flat_css("@media (max-width: 640px) { .x { background: #13161B; } }")
-    assert flat_css(".db-kpi .db-x, .db-tip { background: #20252D; }")  # one denied selector
-    assert not flat_css(".x { border-top: 1px solid #22262E; background: transparent; }")
-    assert not flat_css(".db-tip { background: #20252D; border-radius: 6px; }")  # exempt
+    """The checker fails on the T59 KPI panel, on any selector it has never heard of, and on
+    every way of drawing a box: borders by shorthand or longhand, outlines, prefixed shadows."""
+    denied = [
+        ".db-kpi { background: #13161B; border-radius: 12px; padding: 18px; }",
+        ".brand-new-thing { box-shadow: 0 8px 24px rgba(0,0,0,.4); }",
+        ".x { -webkit-box-shadow: 0 1px 2px #000; }",
+        ".x { filter: drop-shadow(0 1px 2px #000); }",
+        ".x { border: 1px solid #22262E; }",  # a box, not a hairline
+        ".x { border-left: 1px solid #22262E; }",
+        ".x { border-right-width: 1px; }",
+        ".x { border-width: 1px; }",
+        ".x { border-color: #22262E; }",
+        ".x { border-inline-start: 2px solid #fff; }",
+        ".x { border-top: 2px solid #222; }",  # not a hairline
+        ".x { border-top: 1px dashed #222; }",
+        ".x { border-top: 1px solid #222; border-bottom: 1px solid #222; }",
+        ".x { border-top-width: 1px; border-bottom-width: 1px; }",  # two edges by longhands
+        ".x { border-top: 1px solid #222; border-bottom-style: solid; }",
+        ".x { border-top-left-radius: 4px; }",
+        ".x { outline: 1px solid #22262E; }",  # an outline is a box too
+        ".x:focus-within { outline: 2px solid #5B9DFF; }",  # not one of the listed indicators
+        "@media (max-width: 640px) { .x { background: #13161B; } }",
+        ".db-kpi .db-x, .db-tip { background: #20252D; }",  # one denied selector in the list
+        ".db-kpi .db-tip { background: #20252D; }",  # a tooltip name inside a container rule
+    ]
+    for css in denied:
+        assert flat_css(css), css
+    allowed = [
+        ".x { border-top: 1px solid #22262E; background: transparent; }",
+        ".x { border-bottom-width: 1px; border-bottom-style: solid; border-left: 0; }",
+        ".x { border: 0; outline: none; box-shadow: none; border-radius: 0; }",
+        ".x { border-collapse: collapse; border-spacing: 0; }",
+        ".db-tip { background: #20252D; border-radius: 6px; }",  # exempt: tooltip
+        ".db-prov:focus-visible { box-shadow: 0 0 0 2px #5B9DFF; }",  # exempt: focus
+    ]
+    for css in allowed:
+        assert not flat_css(css), css
 
 
 def test_native_expander_tab_panel_and_dataframe_are_flat() -> None:
+    """The Streamlit 1.67 DOM (react-aria tabs: stTab, stTabPanel, the selection indicator and
+    the tab list's ::after hairline; checked in a rendered page)."""
     from app import theme
 
     css = theme.CSS
     for sel in (
         '[data-testid="stExpander"] details',
         '[data-testid="stExpanderDetails"]',
-        '[data-testid="stTabs"] [data-baseweb="tab-panel"]',
+        '[data-testid="stTabs"] [data-testid="stTabPanel"]',
         '[data-testid="stDataFrame"]',
+        'div[data-testid="stVerticalBlock"]:not([class*="st-key-db-"])',
     ):
         rule = _rule(css, sel)
         assert "border: 0" in rule, sel
         assert "border-radius: 0" in rule, sel
-    for sel in ('[data-testid="stExpander"] details', '[data-testid="stTabs"] [data-baseweb='
-                '"tab-panel"]'):  # fmt: skip
+    for sel in (
+        '[data-testid="stExpander"] details',
+        '[data-testid="stTabs"] [data-testid="stTabPanel"]',
+        '[data-testid="stTabs"] [data-testid="stTab"]',
+    ):
         assert "background: transparent" in _rule(css, sel)
+    assert "height: 1px" in _rule(css, '[data-testid="stTabs"] .react-aria-SelectionIndicator')
+    assert "height: 1px" in _rule(css, '[data-testid="stTabs"] [role="tablist"]::after')
+    assert "baseweb" not in css  # Streamlit 1.67 renders no BaseWeb tabs
+    assert "stVerticalBlockBorderWrapper" not in css
 
 
 def test_four_type_sizes() -> None:

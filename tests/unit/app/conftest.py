@@ -96,31 +96,36 @@ def run_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., A
 # element's name: ``.db-kpi .db-tip`` styles a tooltip, ``.db-kpi`` is still a container).
 
 _PICK_RE = r'div\[class\*="st-key-db-pick-[\w-]*"\]'
-#: P-023's exempt elements, as full-selector regular expressions
+#: P-023's exempt elements, as full-selector regular expressions (checked against the
+#: Streamlit 1.67 DOM: react-aria tabs and segmented controls)
 FLAT_ALLOW: tuple[tuple[str, str], ...] = (
-    ("hero change pill", r"\.db-pill(-[\w-]+)?( \.db-[\w-]+)?"),
+    ("hero change pill", r"\.db-pill(-(up|down|flat))?"),
     ("selected watchlist row", r"\.db-wl-row\.is-sel(::before)?"),
-    ("hover highlight of a clickable row", _PICK_RE + r":hover \.db-(wl-row|mx-row|grp-h)"),
-    ("tooltips, popovers and dialogs", r"(.* )?\.db-(tip|wl-tip)"),
-    ("search field", r'div\[data-testid="stTextInput"\]( input| > div)'),
+    ("hover highlight of a clickable row", _PICK_RE + r":hover \.db-(wl-row|mx-row)"),
+    ("tooltips, popovers and dialogs", r"\.db-tip|\.db-tip\.db-wl-tip"),
+    ("search field", r'div\[data-testid="stTextInput"\] input'),
     (
         "selected segment of a segmented control",
-        r'\[data-testid="stButtonGroup"\] button\[aria-checked="true"\]|'
-        r'\[data-testid="stButtonGroup"\] button\[kind="segmented_controlActive"\]',
+        r'\[data-testid="stButtonGroup"\] button\[aria-checked="true"\]',
     ),
     ("tier glyph", r"\.db-prov"),
-    ("sigma tag", r"(.* )?\.db-sig"),
-    ("status dots", r"\.db-dot(-[\w]+)?|\.db-dot-[\w]+, \.db-dot-[\w]+"),
-    ("check markers and stale tags", r"\.db-mark(-[\w]+)?"),
-    ("check squares", r"\.db-sq(-[\w]+)?|\.db-sq:focus-visible"),
-    ("52-week range track and marker", r"\.db-range( span| \.db-range-(fill|mk))?"),
-    ("selected-tab underline", r'(.* )?\[data-baseweb="tab-highlight"\]'),
-    ("hairline under the tab row", r'(.* )?\[data-baseweb="tab-border"\]'),
-    ("keyboard focus indicator", r".*:(focus|focus-visible|focus-within)\)?( [\w.-]+)?"),
+    ("sigma tag", r"\.db-sig"),
+    ("status dots", r"\.db-dot(-(ok|warn|fail|unknown|muted))?"),
+    ("check markers and stale tags", r"\.db-mark(-(fail|warn|pass|stale|skip))?"),
+    ("check squares", r"\.db-sq"),
+    ("52-week range track and marker", r"\.db-range( span| \.db-range-fill)?"),
+    ("selected-tab underline", r'\[data-testid="stTabs"\] \.react-aria-SelectionIndicator'),
+    ("hairline under the tab row", r'\[data-testid="stTabs"\] \[role="tablist"\]::after'),
+    (
+        "keyboard focus indicators",
+        r"\.db-(prov|sq):focus-visible|" + _PICK_RE + r":has\(button:focus-visible\)",
+    ),
     ("opaque app header in the page colour", r'header\[data-testid="stHeader"\]'),
 )
 
-_TRANSPARENT = {"transparent", "none", "0", "inherit", "initial", "unset", "rgba(0,0,0,0)"}
+_NONE = {"0", "0px", "none", "transparent", "inherit", "initial", "unset", "rgba(0,0,0,0)"}
+#: border properties that are not drawing: table layout only
+_LAYOUT = {"border-collapse", "border-spacing"}
 
 
 def _rules(css: str) -> list[tuple[str, str]]:
@@ -162,42 +167,57 @@ def _zero(val: str) -> bool:
     return all(re.fullmatch(r"0(\.0+)?(px|em|rem|%)?", v) for v in val.split())
 
 
-def _hairline(val: str) -> bool:
-    return bool(re.fullmatch(r"1px solid \S+", val)) or val in ("0", "none")
+def _off(val: str) -> bool:
+    return val.replace(" ", "") in _NONE or _zero(val)
 
 
 def _problems(decls: list[tuple[str, str]]) -> list[str]:
+    """What draws a container in one rule: any background, any shadow (prefixed ones too), any
+    outline, any radius, and any border except one 1 px top or bottom hairline. Edges count
+    whether set by the shorthand or by its longhands."""
     bad: list[str] = []
-    edges = []
+    edges: set[str] = set()
     for prop, val in decls:
-        if prop in ("background", "background-color", "background-image"):
-            if val.replace(" ", "") not in _TRANSPARENT:
+        bare = re.sub(r"^-(webkit|moz|ms|o)-", "", prop)
+        drawn = bare in ("background", "background-color", "background-image", "box-shadow")
+        drawn |= bare == "text-shadow" or (bare == "filter" and "shadow" in val)
+        if drawn:
+            if not _off(val):
                 bad.append(f"{prop}: {val}")
-        elif prop in ("box-shadow", "text-shadow"):
-            if val not in ("none", "0"):
+        elif bare.startswith("outline"):
+            if bare != "outline-offset" and not _off(val):
                 bad.append(f"{prop}: {val}")
-        elif prop == "filter" and "drop-shadow" in val:
-            bad.append(f"{prop}: {val}")
-        elif re.fullmatch(r"border(-[a-z]+)*-radius", prop):
-            if not _zero(val):
-                bad.append(f"{prop}: {val}")
-        elif prop in ("border", "border-left", "border-right", "border-width", "border-style",
-                      "border-color", "border-left-width", "border-right-width",
-                      "border-left-style", "border-right-style", "border-inline",
-                      "border-inline-start", "border-inline-end", "border-block"):  # fmt: skip
-            if val not in ("0", "none", "0px") and not (
-                prop.endswith("color") or prop.endswith("style")
-            ):
-                bad.append(f"{prop}: {val}")
-        elif prop in ("border-top", "border-bottom"):
-            if not _hairline(val):
-                bad.append(f"{prop}: {val}")
-            elif val not in ("0", "none"):
-                edges.append(prop)
-        elif prop in ("border-top-width", "border-bottom-width") and val not in ("0", "0px", "1px"):
-            bad.append(f"{prop}: {val}")
+        elif bare.startswith("border") and bare not in _LAYOUT:
+            if bare.endswith("radius"):
+                if not _zero(val):
+                    bad.append(f"{prop}: {val}")
+                continue
+            m = re.fullmatch(r"border-(top|bottom)(-(width|style|color))?", bare)
+            if m is None:  # border, border-left/right, -width/-style/-color, -inline, -block, ...
+                if not _off(val):
+                    bad.append(f"{prop}: {val}")
+                continue
+            edge, part = m.group(1), m.group(3)
+            if part is None:  # the shorthand: one solid 1 px line, or nothing
+                if _off(val):
+                    continue
+                if not re.fullmatch(r"1px solid \S+", val):
+                    bad.append(f"{prop}: {val}")
+                edges.add(edge)
+            elif part == "width":
+                if _off(val):
+                    continue
+                if val != "1px":
+                    bad.append(f"{prop}: {val}")
+                edges.add(edge)
+            elif part == "style":
+                if _off(val):
+                    continue
+                if val != "solid":
+                    bad.append(f"{prop}: {val}")
+                edges.add(edge)
     if len(edges) > 1:
-        bad.append("more than one hairline rule (" + ", ".join(edges) + ")")
+        bad.append("more than one hairline rule (" + ", ".join(sorted(edges)) + ")")
     return bad
 
 

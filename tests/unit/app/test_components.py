@@ -576,3 +576,31 @@ def test_verdict_disagrees_at_the_same_moment() -> None:
     ok = instrument.verdict_card_html([_quote(4.000, 0, 3), _quote(4.008, 15, 2)], "")  # type: ignore[list-item]
     assert "db-mark-warn" not in ok
     assert '<b>Agree</b><span class="db-verdict-gap">0.8 bp apart</span>' in ok
+
+
+def test_verdict_judges_each_row_on_its_own() -> None:
+    """Round-1 review: the worst gap and the largest time apart must come from the same row.
+    A same-moment 20 bp gap is "No" even when a third, agreeing row is a day apart."""
+    from app.components import instrument
+
+    rows = [_quote(4.00, 0, 3), _quote(4.20, 0.1, 2), _quote(4.001, 24, 1)]
+    v = instrument.verdict(rows)  # type: ignore[arg-type]
+    assert v is not None
+    assert (v.tone, v.headline) == ("fail", "No")
+    # the far-apart row is the big gap and the same-moment row agrees: not comparable
+    rows = [_quote(4.00, 0, 3), _quote(4.001, 0.1, 2), _quote(4.20, 24, 1)]
+    v = instrument.verdict(rows)  # type: ignore[arg-type]
+    assert v is not None
+    assert (v.tone, v.headline) == ("warn", "Not comparable")
+
+
+def test_verdict_with_no_measurable_gap_is_not_comparable() -> None:
+    from app.components import instrument
+
+    zero = _quote(0.0, 0, 3)
+    object.__setattr__(zero, "unit", "USD")
+    other = _quote(1.0, 0.1, 2)
+    object.__setattr__(other, "unit", "USD")
+    v = instrument.verdict([zero, other])  # type: ignore[list-item]
+    assert v is not None
+    assert (v.tone, v.headline) == ("warn", "Not comparable")

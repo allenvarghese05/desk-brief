@@ -139,43 +139,68 @@ class Verdict:
     note: str = ""  # a neutral note: the values agree but are from different moments
 
 
+def _row_tone(r: ValueRow, best: ValueRow) -> tuple[str, float | None, float]:
+    """One non-reference row against the reference, on its own: ``(tone, |gap| bp, seconds
+    apart)``. Beyond :data:`AGREE_BP` at the same moment is ``fail``; beyond it between moments
+    more than :data:`LIKE_FOR_LIKE_S` apart, or with no gap to measure, is ``warn``; else
+    ``ok``."""
+    g = _gap_bp(r, best)
+    apart = abs((r.as_of - best.as_of).total_seconds())
+    if g is None:
+        return "warn", None, apart
+    gap = abs(g)
+    if gap <= AGREE_BP:
+        return "ok", gap, apart
+    return ("warn" if apart > LIKE_FOR_LIKE_S else "fail"), gap, apart
+
+
 def verdict(rows: list[ValueRow]) -> Verdict | None:
     """Compare each visible tier's latest value with the official (highest) tier's (T60 bug 6).
 
-    * every gap within :data:`AGREE_BP`: "Agree" (ok) with the gap; when the values are more
+    Each non-reference row is judged against the reference on its own (:func:`_row_tone`), and
+    the answer is the most severe row's:
+
+    * every row within :data:`AGREE_BP`: "Agree" (ok) with the largest gap; when a row is more
       than :data:`LIKE_FOR_LIKE_S` apart in time a neutral note says so (two sources 0.8 bp
       apart, a day apart, still agree);
-    * a gap beyond :data:`AGREE_BP` between values more than :data:`LIKE_FOR_LIKE_S` apart:
-      "Not comparable" (warn), with the time apart: a move between two moments is not a
-      disagreement;
-    * a gap beyond :data:`AGREE_BP` at the same moment: "No" (fail).
+    * a row beyond :data:`AGREE_BP` at the same moment: "No" (fail), whatever the other rows;
+    * otherwise a row beyond :data:`AGREE_BP` between different moments, or a row whose gap
+      cannot be measured: "Not comparable" (warn), with the time apart: a move between two
+      moments is not a disagreement.
     """
     if not rows:
         return None
     best = rows[0]
     if len(rows) == 1:
         return Verdict("muted", "–", "One source only", "Nothing to cross-check yet.")
-    gaps = [abs(g) for r in rows[1:] if (g := _gap_bp(r, best)) is not None]
-    worst = max(gaps, default=0.0)
-    apart = max(abs((x.as_of - best.as_of).total_seconds()) for x in rows[1:])
+    judged = [_row_tone(r, best) for r in rows[1:]]
     n = len(rows)
-    if worst <= AGREE_BP:
-        note = f"The values are {_apart(apart)} apart in time." if apart > LIKE_FOR_LIKE_S else ""
-        when = "" if note else " at the same moment"
+    fails = [(g, a) for t, g, a in judged if t == "fail"]
+    if fails:
+        worst = max(g or 0.0 for g, _ in fails)
         return Verdict(
-            "ok", "✓", "Agree", f"{n} sources within {AGREE_BP:g} bp{when}.",
-            f"{worst:.1f} bp apart", note,
-        )  # fmt: skip
-    if apart > LIKE_FOR_LIKE_S:
+            "fail", "✕", "No", f"{n} sources disagree at the same moment.", f"{worst:.1f} bp apart"
+        )
+    warns = [(g, a) for t, g, a in judged if t == "warn"]
+    if warns:
+        g, apart = max(warns, key=lambda w: (w[0] is None, w[0] or 0.0))
+        size = "a gap that cannot be measured" if g is None else f"{g:.1f} bp apart"
         return Verdict(
             "warn", "!", "Not comparable",
-            f"{n} sources, {worst:.1f} bp apart, but their values are {_apart(apart)} apart "
-            "in time, so the gap may be a move rather than a disagreement.",
+            f"{n} sources, {size}, but their values are {_apart(apart)} apart in time, so the "
+            "gap may be a move rather than a disagreement."
+            if g is not None
+            else f"{n} sources, one with {size} (a zero reference value).",
             f"{_apart(apart)} apart",
         )  # fmt: skip
+    worst = max(g or 0.0 for _, g, _ in judged)
+    apart = max(a for _, _, a in judged)
+    note = f"The values are {_apart(apart)} apart in time." if apart > LIKE_FOR_LIKE_S else ""
+    when = "" if note else " at the same moment"
     return Verdict(
-        "fail", "✕", "No", f"{n} sources disagree at the same moment.", f"{worst:.1f} bp apart"
-    )
+        "ok", "✓", "Agree", f"{n} sources within {AGREE_BP:g} bp{when}.",
+        f"{worst:.1f} bp apart", note,
+    )  # fmt: skip
 
 
 def _gap_text(r: ValueRow, best: ValueRow) -> str:

@@ -405,7 +405,7 @@ def overnight_changes(
             if session:
                 out.append(_price_change(last, history, nyse_prev))
             else:
-                out.append(_off_session_price_change(last, history, nyse_prev))
+                out.append(_off_session_price_change(last, history))
         else:
             out.append(_official_change(last, history))
     return tuple(out)
@@ -422,12 +422,11 @@ def _price_change(last: ValueRow, history: list[ValueRow], nyse_prev: date) -> C
     )
 
 
-def _off_session_price_change(
-    last: ValueRow, history: list[ValueRow], last_session: date
-) -> ChangeRow:
+def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
     """Price change on a day that is not an XNYS session (module docstring, T60 bug 4)."""
-    day = _et(last)
-    base = prev_business_day("XNYS", day) if day <= last_session else last_session
+    # S <= L: the session before S. S > L (a holiday trade): L itself, which is also the
+    # session before S, since no session lies between L and the report date.
+    base = prev_business_day("XNYS", _et(last))
     closes = [r for r in history if r.field == "close" and r.interval == "1d" and _et(r) == base]
     return _change(
         last,

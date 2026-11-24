@@ -437,3 +437,45 @@ def test_status_without_any_run_says_no_checks_yet(tmp_path: Path) -> None:
     assert snap.last_run is None
     ov = data.overview(snap, "local", frozenset())
     assert panels.NO_CHECKS in panels.status(ov, snap.last_run)
+
+
+@pytest.mark.parametrize(
+    ("iid", "rows", "now", "label"),
+    [
+        (  # FX traded on Thanksgiving (an XNYS holiday): since Wednesday's close
+            "EURUSD",
+            [
+                daily("EURUSD", date(2026, 11, 24), 1.00, source="yahoo", dataset="history",
+                      tier=2, unit="fx_rate"),
+                daily("EURUSD", date(2026, 11, 25), 1.05, source="yahoo", dataset="history",
+                      tier=2, unit="fx_rate"),
+                tick("EURUSD", et(date(2026, 11, 26), "06:00"), 1.071, unit="fx_rate"),
+            ],
+            et(date(2026, 11, 26), "07:00"),
+            "since Wed close",
+        ),
+        (  # N225 closed on Good Friday (an XNYS holiday), seen on Saturday: since Thursday
+            "N225",
+            [
+                daily("N225", date(2026, 4, 1), 30000.0, unit="index_pts"),
+                daily("N225", date(2026, 4, 2), 31000.0, unit="index_pts"),
+                daily("N225", date(2026, 4, 3), 31620.0, unit="index_pts"),
+            ],
+            et(date(2026, 4, 4), "10:00"),
+            "since Thu close",
+        ),
+    ],
+    ids=["thanksgiving_fx", "good_friday_n225"],
+)  # fmt: skip
+def test_holiday_trades_say_since_the_last_session_close(
+    tmp_path: Path, iid: str, rows: list[dict[str, Any]], now: Any, label: str
+) -> None:
+    """Bug 4, S after L: the label is "since <L's weekday> close", never S's own weekday
+    ("Thu", "Fri"), which the S-on-or-before-L rule would give."""
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(rows)
+    row = _row(_snapshot(w, now), iid)
+    assert row.change.status == "ok"
+    assert panels.move_label(row) == label

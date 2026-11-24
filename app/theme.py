@@ -102,15 +102,18 @@ header[data-testid="stHeader"] {{ background: {PAGE}; }}
   padding-left: 0; color: {META}; font-size: {SIZE_BODY}px; }}
 [data-testid="stExpanderDetails"] {{ background: transparent; border: 0; border-radius: 0;
   padding-left: 0; padding-right: 0; }}
-[data-testid="stTabs"] [data-baseweb="tab-panel"] {{ background: transparent; border: 0;
+/* Streamlit 1.67 tabs (react-aria): stTab, stTabPanel, the selection indicator and the
+   tab list's ::after hairline (checked against the rendered DOM) */
+[data-testid="stTabs"] [data-testid="stTabPanel"] {{ background: transparent; border: 0;
   border-radius: 0; box-shadow: none; padding: 18px 0 0 0; }}
-[data-testid="stTabs"] [data-baseweb="tab-list"] {{ background: transparent; gap: 28px; }}
-[data-testid="stTabs"] [data-baseweb="tab"] {{ background: transparent; padding: 0 0 11px 0; }}
-[data-testid="stTabs"] [data-baseweb="tab"] p {{ font-size: {SIZE_BODY}px; font-weight: 500; }}
-[data-testid="stTabs"] [data-baseweb="tab-highlight"] {{ background: {TEXT}; height: 1px; }}
-[data-testid="stTabs"] [data-baseweb="tab-border"] {{ background: {DIVIDER}; height: 1px; }}
+[data-testid="stTabs"] [role="tablist"] {{ background: transparent; gap: 28px; }}
+[data-testid="stTabs"] [data-testid="stTab"] {{ background: transparent; padding: 0 0 11px 0; }}
+[data-testid="stTabs"] [data-testid="stTab"] p {{ font-size: {SIZE_BODY}px; font-weight: 500; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator {{ background: {TEXT}; height: 1px; }}
+[data-testid="stTabs"] [role="tablist"]::after {{ background: {DIVIDER}; height: 1px; }}
 [data-testid="stDataFrame"] {{ border: 0; border-radius: 0; box-shadow: none; }}
-[data-testid="stVerticalBlockBorderWrapper"] {{ background: transparent; border-radius: 0;
+/* a bordered st.container (border=True) draws no box; keyed db-* blocks set their own rules */
+div[data-testid="stVerticalBlock"]:not([class*="st-key-db-"]) {{ border: 0; border-radius: 0;
   box-shadow: none; }}
 div[data-testid="stVegaLiteChart"] {{ background: transparent; }}
 
