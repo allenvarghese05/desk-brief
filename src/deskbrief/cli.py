@@ -270,6 +270,8 @@ def diagnose_changes_lines(
             out.append(f"  last      {side(ch.last)}")
             out.append(f"  baseline  {side(ch.previous)}")
             out.append(f"  note      {ch.note or '-'}")
+            ranked = "yes" if ch.rankable else f"no ({ch.unranked_reason or 'no change'})"
+            out.append(f"  rankable  {ranked}")
         series = stored.get(inst.id, [])
         out.append("  series    " + ("; ".join(series) if series else "none stored"))
     model = BriefModel.from_store(duck, config, report_date, cut)

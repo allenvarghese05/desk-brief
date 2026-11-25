@@ -468,30 +468,33 @@ def test_now_before_the_only_run_reads_no_checks(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("iid", "rows", "now", "label"),
     [
-        (  # FX traded on Thanksgiving (an XNYS holiday): since Wednesday's close
-            "EURUSD",
+        (  # ES futures traded on Thanksgiving (an XNYS holiday): since Wednesday's close.
+            # FX and N225 have their own bases since T61 (NY close, Tokyo close: test_query.py)
+            "ES_F",
             [
-                daily("EURUSD", date(2026, 11, 24), 1.00, source="yahoo", dataset="history",
-                      tier=2, unit="fx_rate"),
-                daily("EURUSD", date(2026, 11, 25), 1.05, source="yahoo", dataset="history",
-                      tier=2, unit="fx_rate"),
-                tick("EURUSD", et(date(2026, 11, 26), "06:00"), 1.071, unit="fx_rate"),
+                daily("ES_F", date(2026, 11, 24), 6000.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                daily("ES_F", date(2026, 11, 25), 6100.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                tick("ES_F", et(date(2026, 11, 26), "06:00"), 6161.0, unit="index_pts"),
             ],
             et(date(2026, 11, 26), "07:00"),
             "since Wed close",
         ),
-        (  # N225 closed on Good Friday (an XNYS holiday), seen on Saturday: since Thursday
-            "N225",
+        (  # ES futures traded on MLK Monday (an XNYS holiday): since Friday's close
+            "ES_F",
             [
-                daily("N225", date(2026, 4, 1), 30000.0, unit="index_pts"),
-                daily("N225", date(2026, 4, 2), 31000.0, unit="index_pts"),
-                daily("N225", date(2026, 4, 3), 31620.0, unit="index_pts"),
+                daily("ES_F", date(2026, 1, 15), 6000.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                daily("ES_F", date(2026, 1, 16), 6100.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                tick("ES_F", et(date(2026, 1, 19), "06:59"), 6161.0, unit="index_pts"),
             ],
-            et(date(2026, 4, 4), "10:00"),
-            "since Thu close",
+            et(date(2026, 1, 19), "07:00"),
+            "since Fri close",
         ),
     ],
-    ids=["thanksgiving_fx", "good_friday_n225"],
+    ids=["thanksgiving_es", "mlk_es"],
 )  # fmt: skip
 def test_holiday_trades_say_since_the_last_session_close(
     tmp_path: Path, iid: str, rows: list[dict[str, Any]], now: Any, label: str

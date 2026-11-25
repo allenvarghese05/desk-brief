@@ -1,4 +1,4 @@
-"""Business-day calendars for the three markets the pipeline cares about.
+"""Business-day calendars for the markets the pipeline cares about.
 
 * ``XNYS``     - NYSE equities, via ``pandas_market_calendars`` (early closes included).
 * ``SIFMA_US`` - US bond market, via ``pandas_market_calendars`` ``SIFMA_US`` (verified present in
@@ -7,6 +7,9 @@
 * ``TARGET``   - ECB payment system. ``pandas_market_calendars`` has no such calendar, so the fixed
   rules are implemented here: weekends, Jan 1, Good Friday, Easter Monday, May 1, Dec 25, Dec 26.
   TARGET has no early closes.
+* ``XTKS``, ``XLON``, ``XETR`` - the Tokyo, London and Frankfurt (Xetra) exchanges, via
+  ``pandas_market_calendars`` (T61): a foreign index's change is measured against its own
+  exchange's previous session, not the NYSE's (P-024).
 
 All datetimes returned are timezone-aware UTC. Callers pass plain ``date`` objects; anything else
 (``str``, ``None``, ``datetime``, ``pandas.Timestamp``) is rejected with ``TypeError`` because

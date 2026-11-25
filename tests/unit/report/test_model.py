@@ -642,3 +642,57 @@ def test_health_date_ignores_a_rerun_stored_after_report_time(world: World) -> N
     assert (m.health.status, m.health.text) == ("fail", "0/1 checks pass (1 fail, 0 warn)")
     # without health_date nothing is bounded, as before (the scheduled email's behaviour)
     assert build(world).health.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# T61 (P-024): the brief scores sigma only for rankable changes
+# ---------------------------------------------------------------------------
+
+_TUE24, _MON23, _FRI20 = date(2026, 11, 24), date(2026, 11, 23), date(2026, 11, 20)
+
+
+def _steady_daily(iid: str, last_day: date, start: float, **kw: Any) -> list[dict[str, Any]]:
+    """40 weekdays up to ``last_day`` moving 1-2 hundredths a day (1-2 bp of a pct series)."""
+    days: list[date] = []
+    d = last_day
+    while len(days) < 40:
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
+    v, rows = start, []
+    for n, day in enumerate(days):
+        v += (0.01, 0.02)[n % 2] if n else 0.0
+        rows.append(daily(iid, day, v, **kw))
+    return rows
+
+
+def _tuesday_notable(w: World) -> list[str]:
+    model = BriefModel.from_store(w.connect(), w.config, _TUE24, et(_TUE24, "07:00"))
+    return [n.instrument_id or "" for n in model.notable if n.kind == "move"]
+
+
+def test_ust_3m_basis_gap_against_treasury_is_not_scored(tmp_path: Path) -> None:
+    # the 24 Nov email: a Yahoo ^IRX quote ~22bp under Treasury's par yield read as a 3.2 sigma
+    # move. A quote against another series is shown with its note but never scored
+    rows = _steady_daily("UST_3M", _MON23, 4.00, **_TSY)
+    official = rows[-1]["value"]
+    rows.append(tick("UST_3M", et(_MON23, "14:59"), official - 0.22, unit="pct"))
+    w = World(tmp_path)
+    w.observations(rows)
+    assert "UST_3M" not in _tuesday_notable(w)
+
+
+def test_fred_move_dated_before_the_previous_brief_is_not_scored(tmp_path: Path) -> None:
+    fred = {"source": "fred", "dataset": "series", "field": "rate", "unit": "pct"}
+    stale = _steady_daily("HY_OAS", _FRI20, 3.00, **fred)
+    stale[-1]["value"] += 0.24  # a big move, but dated Friday: Monday's brief came after it
+    w = World(tmp_path / "stale")
+    w.observations(stale)
+    assert _tuesday_notable(w) == []
+    # control: the same jump dated Monday (the previous brief's day) is new and scored
+    fresh = _steady_daily("HY_OAS", _MON23, 3.00, **fred)
+    fresh[-1]["value"] += 0.24
+    w2 = World(tmp_path / "fresh")
+    w2.observations(fresh)
+    assert _tuesday_notable(w2) == ["HY_OAS"]

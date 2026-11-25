@@ -481,22 +481,27 @@ def test_mlk_monday_futures_tick_moves_since_friday_close(tmp_path: Path) -> Non
     assert es.change == pytest.approx(1.0)
 
 
-def test_thanksgiving_fx_quote_moves_since_wednesday_close(tmp_path: Path) -> None:
+def test_thanksgiving_fx_quote_moves_since_wednesday_ny_close(tmp_path: Path) -> None:
+    # T61: FX compares with its own quote at the previous New York close (17:00 ET), whatever the
+    # NYSE does; a Yahoo daily FX bar is never the baseline (its close is the London-day open)
     tue, wed, thanksgiving = date(2026, 11, 24), date(2026, 11, 25), date(2026, 11, 26)
     w = World(tmp_path)
     w.observations(
         [
-            daily("EURUSD", tue, 1.00, unit="fx_rate", **YH_HIST),
-            daily("EURUSD", wed, 1.05, unit="fx_rate", **YH_HIST),
+            daily("EURUSD", wed, 1.20, unit="fx_rate", **YH_HIST),  # decoy: not the NY close
+            tick("EURUSD", et(tue, "17:30"), 1.00, unit="fx_rate"),  # Tuesday's close: too old
+            tick("EURUSD", et(wed, "16:00"), 1.04, unit="fx_rate"),
+            tick("EURUSD", et(wed, "17:30"), 1.05, unit="fx_rate"),  # nearest 17:00 Wednesday
             tick("EURUSD", et(thanksgiving, "06:00"), 1.071, unit="fx_rate"),
         ]
     )
     fx = change_of(
         query.overnight_changes(w.connect(), thanksgiving, et(thanksgiving, "07:00")), "EURUSD"
     )
-    assert (fx.family, fx.status, fx.basis) == ("price", "ok", "Wed close")
+    assert (fx.family, fx.status) == ("price", "ok")
+    assert fx.basis == "previous NY close, 17:30 ET quote"
     assert fx.previous is not None
-    assert fx.previous.as_of == et(wed)
+    assert fx.previous.as_of == et(wed, "17:30")
     assert fx.change == pytest.approx(2.0)
 
 
@@ -510,7 +515,8 @@ def test_good_friday_n225_close_seen_saturday_moves_since_thursday_close(tmp_pat
     )
     n225 = change_of(query.overnight_changes(w.connect(), sat, et(sat, "10:00")), "N225")
     assert et_date(n225.last.as_of) == good_friday
-    assert (n225.status, n225.basis) == ("ok", "Thu close")
+    # T61: Tokyo traded on Good Friday; its previous Tokyo session is Thursday
+    assert (n225.status, n225.basis) == ("ok", "previous Tokyo close")
     assert n225.previous is not None
     assert n225.previous.as_of == et(thu)
     assert n225.change == pytest.approx(2.0)
@@ -697,7 +703,8 @@ def test_diagnose_changes_prints_last_value_and_baseline_and_writes_nothing(
     assert "as_of=2026-11-16 06:59 ET value=5976" in lines[es + 1]
     assert lines[es + 2].startswith("  baseline  yahoo/history field=close interval=1d tier=2")
     assert "as_of=2026-11-13 ET value=6000" in lines[es + 2]
-    assert "yahoo/history close 1d newest=2026-11-13 n=3" in lines[es + 4]
+    assert lines[es + 4] == "  rankable  yes"
+    assert "yahoo/history close 1d newest=2026-11-13 n=3" in lines[es + 5]
     # an instrument with no value says so, and every configured instrument gets a block
     assert any(x.startswith("N225 [index] no value as of the cut") for x in lines)
     assert "# notable moves the brief scored" in out
@@ -712,3 +719,201 @@ def test_diagnose_changes_prints_last_value_and_baseline_and_writes_nothing(
     assert "value=" not in hidden
     assert "change=" not in hidden
     assert "as_of=2026-11-13 ET" in hidden
+
+
+# ---------------------------------------------------------------------------
+# T61 (P-024): own-market baselines, like-for-like ranking, values new since the last brief.
+# The dates are real calendar days (Tokyo's Labour Thanksgiving Day, the UK summer bank holiday,
+# MLK day); every value is made up.
+# ---------------------------------------------------------------------------
+
+TUE24, MON23, FRI20, THU19 = (date(2026, 11, d) for d in (24, 23, 20, 19))
+TUE24_0700 = et(TUE24, "07:00")
+FRED = {"source": "fred", "dataset": "series", "tier": 3}
+
+
+def test_fx_compares_with_its_own_ny_close(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("EURUSD", MON23, 1.30, field="rate", unit="fx_rate", source="ecb",
+                  dataset="eurofxref"),  # decoy: the ECB fix is another series
+            tick("EURUSD", et(MON23, "16:00"), 1.09, unit="fx_rate"),
+            tick("EURUSD", et(MON23, "17:30"), 1.10, unit="fx_rate"),  # nearest 17:00 ET
+            tick("EURUSD", et(MON23, "17:00"), 1.40, unit="fx_rate", tier=1,
+                 source="twelvedata", dataset="fx_quote"),  # decoy: another source's quote
+            tick("EURUSD", et(TUE24, "06:16"), 1.111, unit="fx_rate"),
+        ]
+    )  # fmt: skip
+    fx = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "EURUSD")
+    assert (fx.family, fx.status) == ("price", "ok")
+    assert fx.basis == "previous NY close, 17:30 ET quote"
+    assert fx.previous is not None
+    assert (fx.previous.source, fx.previous.as_of) == ("yahoo", et(MON23, "17:30"))
+    assert fx.change == pytest.approx(1.0)
+    assert fx.rankable
+
+
+def test_fx_without_a_quote_near_the_ny_close_has_no_baseline(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            tick("EURUSD", et(MON23, "12:00"), 1.09, unit="fx_rate"),  # midday: not a close
+            tick("EURUSD", et(TUE24, "06:16"), 1.111, unit="fx_rate"),
+        ]
+    )
+    fx = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "EURUSD")
+    assert (fx.status, fx.basis, fx.previous) == ("no_baseline", query.BASIS_NY_CLOSE, None)
+
+
+def test_n225_on_a_tokyo_holiday_uses_tokyos_previous_session(tmp_path: Path) -> None:
+    assert is_business_day("XNYS", MON23)
+    assert not is_business_day("XTKS", MON23)  # Labour Thanksgiving Day
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("N225", THU19, 1000.0, unit="index_pts", **YH_HIST),  # decoy
+            daily("N225", FRI20, 40000.0, unit="index_pts", **YH_HIST),
+            tick("N225", et(TUE24, "01:45"), 40400.0, unit="index_pts"),  # after Tokyo's close
+        ]
+    )
+    n225 = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "N225")
+    assert (n225.status, n225.basis) == ("ok", "previous Tokyo close")
+    assert n225.previous is not None
+    assert n225.previous.as_of == et(FRI20)
+    assert n225.change == pytest.approx(1.0)
+    assert n225.rankable
+
+
+def test_ftse_on_a_london_holiday_uses_londons_previous_session(tmp_path: Path) -> None:
+    fri, bank_holiday, tue = date(2026, 8, 28), date(2026, 8, 31), date(2026, 9, 1)
+    assert is_business_day("XNYS", bank_holiday)
+    assert not is_business_day("XLON", bank_holiday)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("FTSE", date(2026, 8, 27), 1000.0, unit="index_pts", **YH_HIST),  # decoy
+            daily("FTSE", fri, 8000.0, unit="index_pts", **YH_HIST),
+            tick("FTSE", et(tue, "06:00"), 8080.0, unit="index_pts"),
+        ]
+    )
+    ftse = change_of(query.overnight_changes(w.connect(), tue, et(tue, "07:00")), "FTSE")
+    assert (ftse.status, ftse.basis) == ("ok", "previous London close")
+    assert ftse.previous is not None
+    assert ftse.previous.as_of == et(fri)
+    assert ftse.change == pytest.approx(1.0)
+
+
+def test_dax_after_an_nyse_holiday_uses_frankfurts_own_previous_session(tmp_path: Path) -> None:
+    # MLK day: Xetra traded, the NYSE did not. The NYSE basis would span two Xetra sessions
+    fri, mlk, tue = date(2026, 1, 16), date(2026, 1, 19), date(2026, 1, 20)
+    assert is_business_day("XETR", mlk)
+    assert not is_business_day("XNYS", mlk)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("DAX", fri, 20000.0, unit="index_pts", **YH_HIST),
+            daily("DAX", mlk, 25000.0, unit="index_pts", **YH_HIST),
+            tick("DAX", et(tue, "06:00"), 25250.0, unit="index_pts"),
+        ]
+    )
+    dax = change_of(query.overnight_changes(w.connect(), tue, et(tue, "07:00")), "DAX")
+    assert (dax.status, dax.basis) == ("ok", "previous Frankfurt close")
+    assert dax.previous is not None
+    assert dax.previous.as_of == et(mlk)
+    assert dax.change == pytest.approx(1.0)
+
+
+_TSY_3M = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+
+
+def test_ust_3m_quote_against_the_treasury_yield_is_shown_but_not_ranked(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_3M", FRI20, 4.36, **_TSY_3M),
+            daily("UST_3M", MON23, 4.37, **_TSY_3M),
+            tick("UST_3M", et(MON23, "14:59"), 4.147, unit="pct"),  # ^IRX: a discount rate
+        ]
+    )
+    y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
+    assert (y.status, y.basis) == ("ok", query.BASIS_OFFICIAL)
+    assert y.change == pytest.approx(-22.3)
+    assert y.note == "yahoo tick value against an official treasury baseline"
+    assert not y.rankable
+    assert y.unranked_reason is not None
+    assert "another series (treasury par_curve yield)" in y.unranked_reason
+
+
+def test_ust_3m_quote_ranks_against_yahoos_own_previous_close(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_3M", FRI20, 4.36, **_TSY_3M),
+            daily("UST_3M", MON23, 4.37, **_TSY_3M),
+            daily("UST_3M", FRI20, 4.10, unit="pct", **YH_HIST),
+            daily("UST_3M", MON23, 4.147, unit="pct", **YH_HIST),  # the quote's own day
+            tick("UST_3M", et(MON23, "14:59"), 4.147, unit="pct"),
+        ]
+    )
+    y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
+    assert (y.status, y.basis, y.note) == ("ok", "previous yahoo close", None)
+    assert y.previous is not None
+    assert (y.previous.source, y.previous.dataset, y.previous.as_of) == (
+        "yahoo",
+        "history",
+        et(FRI20),
+    )
+    assert y.change == pytest.approx(4.7)
+    assert y.rankable
+
+
+def test_fred_value_dated_before_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("HY_OAS", THU19, 3.52, field="rate", unit="pct", **FRED),
+            daily("HY_OAS", FRI20, 3.76, field="rate", unit="pct", **FRED),
+            daily("UST_2Y", FRI20, 4.63, **_TSY_3M),
+            daily("UST_2Y", MON23, 4.60, **_TSY_3M),  # dated the previous brief's day: new
+        ]
+    )
+    changes = query.overnight_changes(w.connect(), TUE24, TUE24_0700)
+    hy = change_of(changes, "HY_OAS")
+    assert (hy.status, hy.change) == ("ok", pytest.approx(0.24))  # shown in pp, with its date
+    assert not hy.rankable
+    assert hy.unranked_reason == ("value dated 20 Nov, not new since the previous brief (23 Nov)")
+    assert change_of(changes, "UST_2Y").rankable
+
+
+def test_tick_older_than_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("ES_F", MON23, 6000.0, unit="index_pts", **YH_HIST),
+            tick("ES_F", et(MON23, "06:30"), 6060.0, unit="index_pts"),  # before Monday's brief
+        ]
+    )
+    es = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "ES_F")
+    assert es.status == "ok"
+    assert not es.rankable
+    assert es.unranked_reason is not None
+    assert "not new since the previous brief" in es.unranked_reason
+
+
+def test_brent_baseline_is_never_fred_spot(tmp_path: Path) -> None:
+    oil = {"unit": "USD"}
+    spot = daily("BRENT", MON23, 70.0, symbol="DCOILBRENTEU", **FRED, **oil)  # tier 3 ranks first
+    quote = tick("BRENT", et(TUE24, "06:06"), 86.70, symbol="BZ=F", **oil)
+    w = World(tmp_path / "with_own_close")
+    w.observations([spot, quote, daily("BRENT", MON23, 85.0, symbol="BZ=F", **YH_HIST, **oil)])
+    brent = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "BRENT")
+    assert brent.previous is not None
+    assert (brent.previous.source, brent.previous.dataset) == ("yahoo", "history")
+    assert brent.change == pytest.approx(2.0)
+    assert brent.rankable
+    # no Yahoo close of its own: no baseline at all, never the spot series
+    w2 = World(tmp_path / "spot_only")
+    w2.observations([spot, quote])
+    brent = change_of(query.overnight_changes(w2.connect(), TUE24, TUE24_0700), "BRENT")
+    assert (brent.status, brent.previous, brent.change) == ("no_baseline", None, None)
