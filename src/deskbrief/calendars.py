@@ -24,12 +24,18 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from functools import cache
 from types import MappingProxyType
-from typing import get_args
+from typing import Literal, get_args
 
 import pandas_market_calendars as mcal
 
 from deskbrief.config import CalendarName
 from deskbrief.timeutil import ensure_utc
+
+#: exchange calendars used only in code (T61): config never names them, so they are not part of
+#: the ``CalendarName`` contract in ``config.py``
+ExchangeCalendar = Literal["XTKS", "XLON", "XETR"]
+type Calendar = CalendarName | ExchangeCalendar
+_CALENDARS: frozenset[str] = frozenset((*get_args(CalendarName), *get_args(ExchangeCalendar)))
 
 _MAX_SCAN_DAYS = 400  # no calendar has a closure streak anywhere near this long
 
@@ -44,7 +50,7 @@ def _check_date(d: date) -> date:
 
 
 def _check_cal(cal: str) -> None:
-    if cal not in get_args(CalendarName):
+    if cal not in _CALENDARS:
         raise ValueError(f"unknown calendar {cal!r}")
 
 
@@ -104,7 +110,7 @@ def _early_closes(cal: str, year: int) -> frozenset[date]:
     return frozenset(ts.date() for ts in lib.early_closes(sched).index)
 
 
-def is_business_day(cal: CalendarName, d: date) -> bool:
+def is_business_day(cal: Calendar, d: date) -> bool:
     """True if ``cal`` is open (or has any recommended trading) on ``d``."""
     _check_cal(cal)
     _check_date(d)
@@ -115,7 +121,7 @@ def is_business_day(cal: CalendarName, d: date) -> bool:
     return d in _schedule(cal, d.year)
 
 
-def prev_business_day(cal: CalendarName, d: date) -> date:
+def prev_business_day(cal: Calendar, d: date) -> date:
     """Latest business day strictly before ``d``."""
     _check_cal(cal)
     _check_date(d)
@@ -126,7 +132,7 @@ def prev_business_day(cal: CalendarName, d: date) -> date:
     raise RuntimeError(f"no business day found before {d} for {cal}")  # pragma: no cover
 
 
-def next_business_day(cal: CalendarName, d: date) -> date:
+def next_business_day(cal: Calendar, d: date) -> date:
     """Earliest business day strictly after ``d``."""
     _check_cal(cal)
     _check_date(d)
@@ -137,7 +143,7 @@ def next_business_day(cal: CalendarName, d: date) -> date:
     raise RuntimeError(f"no business day found after {d} for {cal}")  # pragma: no cover
 
 
-def business_days(cal: CalendarName, start: date, end: date) -> list[date]:
+def business_days(cal: Calendar, start: date, end: date) -> list[date]:
     """Business days in ``[start, end]`` inclusive, ascending. Empty if ``end < start``."""
     _check_cal(cal)  # before the empty-range shortcut below
     _check_date(start)
@@ -157,7 +163,7 @@ def session_bounds_utc(d: date) -> Session | None:
     return _schedule("XNYS", d.year).get(d)
 
 
-def add_business_days(cal: CalendarName, d: date, n: int) -> date:
+def add_business_days(cal: Calendar, d: date, n: int) -> date:
     """``d`` moved ``n`` business days: forward for ``n > 0``, back for ``n < 0``.
 
     ``n == 0`` returns ``d`` unchanged (it is not rolled to a business day), so
@@ -173,7 +179,7 @@ def add_business_days(cal: CalendarName, d: date, n: int) -> date:
     return d
 
 
-def is_early_close(d: date, *, cal: CalendarName = "XNYS") -> bool:
+def is_early_close(d: date, *, cal: Calendar = "XNYS") -> bool:
     """True if ``cal`` has a shortened session on ``d`` (XNYS by default). TARGET never does."""
     _check_cal(cal)
     _check_date(d)

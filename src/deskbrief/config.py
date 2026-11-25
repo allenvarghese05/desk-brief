@@ -33,7 +33,7 @@ AssetClass = Literal["equity", "rates", "fx", "commodity", "index", "vol", "macr
 Kind = Literal["etf", "stock", "future", "index", "yield", "fx", "macro"]
 Unit = Literal["USD", "pct", "fx_rate", "index_pts", "index", "contracts"]
 Relation = Literal["same", "return", "inverse_duration", "level"]
-CalendarName = Literal["XNYS", "SIFMA_US", "TARGET", "XTKS", "XLON", "XETR"]
+CalendarName = Literal["XNYS", "SIFMA_US", "TARGET"]
 
 
 class _Model(BaseModel):

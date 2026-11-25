@@ -101,8 +101,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
-from deskbrief.calendars import is_business_day, prev_business_day
-from deskbrief.config import CalendarName
+from deskbrief.calendars import ExchangeCalendar, is_business_day, prev_business_day
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
 
@@ -138,7 +137,7 @@ FX_CLOSE_LOOKBACK = 4
 class HomeExchange:
     """A foreign index's own exchange: its calendar, time zone and basis text."""
 
-    calendar: CalendarName
+    calendar: ExchangeCalendar
     tz: str
     basis: str
 
