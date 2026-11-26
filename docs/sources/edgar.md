@@ -28,15 +28,23 @@ page) and is tested on INVENTED documents for the fictional "Example Corp (EXMP)
 ## Requests
 
 All under the source's rate limiter (`rate_per_min: 300` = 5/s, half SEC's 10/s; config refuses
-more than 600). Planned in the `morning` job only. User-Agent: `secret_headers` only.
+more than 600). Planned in the `morning` job only, and fetched only when the run's target date
+is today (ET): a manual run for a past date leaves the stored filings alone. User-Agent:
+`secret_headers` only.
 
 | Dataset | One fetch per | HTTP requests inside the fetch |
 |---|---|---|
 | `company` | `filings.companies` entry | `data.sec.gov/submissions/CIK##########.json`, then each Form 4 / 4/A XML filed in the last `filings.insider_days` (`www.sec.gov/Archives/edgar/data/<cik>/<accession>/<doc>.xml`, the raw XML behind the `xslF345...` view) |
 | `holders` | `filings.holders` entry (only when a company has a `cusip`) | the holder's submissions, then for its latest 13F period and the one before: each 13F-HR / 13F-HR/A `index.json`, its information table, and for an amendment the cover page `primary_doc.xml` |
 
-A fetch is all or nothing: if any request inside it fails, the fetch is logged with that
-request's status and error and writes no rows. The body stored in `raw/` is a JSON bundle of
+A fetch is all or nothing: if a request inside it fails, the fetch is logged with that
+request's status and error and writes no rows. One exception: a 404 on a document of one filing
+(a Form 4 XML, a 13F `index.json`, information table or cover page) skips that filing instead
+(logged `edgar.document_skipped`, listed under `skipped` in the bundle), so one missing
+document does not hold back a company every day. Each accession is still written whole or not
+at all: a skipped Form 4 gets no rows, and a holder with a skipped filing in its latest or
+previous 13F period gets no rows that run. A 404 on the submissions JSON, and any 5xx or 429,
+still fail the whole fetch. The body stored in `raw/` is a JSON bundle of
 every document read (`bundle: edgar-bundle/1`), parsed purely by `parse_table`. 13F information
 tables are kept only for the configured CUSIPs, with the full document's byte size and sha256
 alongside (large filers' tables are tens of MB).
@@ -60,7 +68,11 @@ Only share positions count (`sshPrnamtType = SH`, no put/call). 13F values are w
 **Amendments** (`amends_accession`, seq 0 only, only for a full restatement):
 
 - Form 4/A is a complete amended form: it names the Form 4 of the same reporting owner filed on
-  its `dateOfOriginalSubmission`, when exactly one such filing is in the fetch.
+  its `dateOfOriginalSubmission`, when exactly one such filing is in the fetch; failing that,
+  the one Form 4 of that owner filed no later than the amendment, on that date or with the same
+  `periodOfReport`. When that is still not exactly one, `amends_accession` stays null and the
+  seq 0 `details_json` has `amendment_unmatched: true` and `amends_candidates`; the reader drops
+  those candidates, so only the amendment is counted, never both.
 - 13F-HR/A with cover `amendmentType = RESTATEMENT` carries the period and names the period's
   original 13F-HR. A `NEW HOLDINGS` amendment adds positions, amends nothing: its positions are
   added to the period's holdings (on the original's accession) and it gets a filing row only
@@ -68,6 +80,12 @@ Only share positions count (`sshPrnamtType = SH`, no put/call). 13F values are w
 - 10-K/A and 10-Q/A are not fetched (often partial); the latest original is shown.
 - Readers drop an amended filing (`schemas.current_rows`) and keep only the latest amendment of
   each original (`query.latest_amendments_only`), so two amendments never double-count.
+
+**Holders in the Company section** (`query.company_filings`): each holder is shown at its own
+latest 13F period, so during the 45-day filing window a holder that has not filed the new
+quarter yet keeps its previous one (`HolderChange.period`, shown "as of" per holder when the
+periods differ). A holder whose latest period has missed two later filing deadlines
+(`HOLDER_STALE_QUARTERS = 2`, deadline = quarter end + 45 days) is left out as stale.
 
 **10b5-1 flag:** true when a transaction's footnotes mention Rule 10b5-1, or when the form's
 10b5-1 checkbox (`aff10b5One`, on forms since 2023) is ticked and the transaction is an

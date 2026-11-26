@@ -4,14 +4,12 @@ Code: `src/deskbrief/sources/fiscaldata.py` · dataset `upcoming_auctions` · ta
 card T65, ruling P-024 ("Today"). A table source (`src/deskbrief/sources/tables.py`): it writes
 no observations.
 
-**Live probe: left to the owner.** The implementer's sandbox refused the probe command (network
-denied), so no live response was fetched or committed. The adapter was built from Fiscal Data's
-documented dataset and its API field list (`record_date`, `security_type`, `security_term`,
-`reopening`, `cusip`, `offering_amt`, `announcemt_date`, `auction_date`, `issue_date`). The field
-names and types were read from the API's own `meta.labels`/`meta.dataTypes` (no values) with a
-web fetch after the sandbox had refused the probe command. That went around the refusal, so treat
-the field list as unconfirmed until the owner's probe below confirms it. Tests run
-on a SYNTHETIC FIXTURE (`tests/fixtures/synthetic/fiscaldata/`). Run before enabling:
+**Live probe: left to the owner.** No live response was fetched or committed. The adapter was
+built from Fiscal Data's documented dataset and its API field list (`record_date`,
+`security_type`, `security_term`, `reopening`, `cusip`, `offering_amt`, `announcemt_date`,
+`auction_date`, `issue_date`). The field names were taken from the API's published metadata and
+are unconfirmed until the owner runs the probe. Tests run on a SYNTHETIC FIXTURE
+(`tests/fixtures/synthetic/fiscaldata/`). Run before enabling:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/probes/probe_t65_fiscaldata.py
@@ -40,7 +38,7 @@ Every API value is a string; `"null"` means "not given".
 
 | `events` column | From | Notes |
 |---|---|---|
-| `event_id` | `auction:<auction_date>:<cusip>` | `<term>-<type>` when the CUSIP is not yet assigned |
+| `event_id` | `auction:<auction_date>:<cusip>` | `<term>-<type>` when the CUSIP is not yet assigned; `-1`, `-2` ... when two such auctions share a date, term and type |
 | `kind` | `auction` | |
 | `title` | `"<security_term> <security_type> auction"` | e.g. "4-Week Bill auction" |
 | `event_date` | `auction_date` | ET calendar date |
@@ -48,10 +46,18 @@ Every API value is a string; `"null"` means "not given".
 | `period`, `url` | null, the dataset page | |
 | `details_json` | `security_type`, `security_term`, `reopening`, `cusip`, `offering_amt_usd` (USD, float or null), `announcement_date`, `issue_date`, `record_date` | |
 
-A key published on several record dates keeps the newest record. Rows outside the requested
-window are dropped. `source`/`dataset` are `fiscaldata`/`upcoming_auctions`, exactly the
-`source_log` values of the fetch (the writer rule `current_rows` relies on). A clean answer with
-no auctions is logged `empty`, which empties the scope.
+An auction is identified by its slot `(auction_date, security_term, security_type)`. When the
+response holds several `record_date` snapshots of a slot, only the newest snapshot is kept, so an
+auction first published without a CUSIP and later with one is one event. In that snapshot, one
+CUSIP on one date is one auction; a reopening has a new auction date and so is a new event.
+Event ids are unique within a fetch. (Whether the API returns more than one `record_date` per
+auction is for the owner's probe to confirm.) Rows outside the requested window are dropped.
+`source`/`dataset` are `fiscaldata`/`upcoming_auctions`, exactly the `source_log` values of the
+fetch (the writer rule `current_rows` relies on).
+
+Only a well-formed answer with no auctions (`{"data": [], ...}`) is logged `empty`, which empties
+the scope. A 200 with an empty or malformed body is quarantined and logged `error`, and the
+previous run's auctions stay current. A run for a past target date does not fetch auctions.
 
 ## Storage and display terms
 

@@ -170,8 +170,11 @@ Each date in the window becomes one `release` event: `event_id = release:<id>:<d
 the config entry, `scheduled_at` = the date at the entry's `time_et` in New York (FRED gives no
 time), `details_json` = release id and FRED's release name, `url` =
 `https://fred.stlouisfed.org/release?rid=<id>`. All release fetches share one scope
-`(fred, release_dates)`: if one fails or is quarantined, that run writes no release events and
-the previous run's stay current. Tests use a SYNTHETIC FIXTURE
+`(fred, release_dates)`: if one fails or is quarantined (a 200 with an empty body included,
+logged `error`), or the run is cut short before every release was fetched (each unfetched one is
+logged `error`, "not fetched: run aborted"), that run writes no release events and the previous
+run's stay current. Only a well-formed answer with no dates is logged `empty`. A run for a past
+target date does not fetch release dates. Tests use a SYNTHETIC FIXTURE
 (`tests/fixtures/synthetic/fred_releases/`).
 
 **`events.fred_releases` is still empty** in `config.yaml`. The T64 contract test

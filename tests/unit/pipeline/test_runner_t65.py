@@ -32,6 +32,7 @@ from deskbrief.pipeline.jobs import JobSteps
 from deskbrief.pipeline.runner import RunEnv, execute_run, make_context
 from deskbrief.schemas import current_rows, validate
 from deskbrief.sources.edgar import EdgarSource
+from deskbrief.sources.fiscaldata import FiscalDataSource
 from deskbrief.sources.fred import RELEASE_DATASET, FredSource
 from deskbrief.store.datasets import Datasets
 from deskbrief.store.duck import connect
@@ -344,3 +345,138 @@ def test_due_session_rolls_back_over_weekends_and_before_seven() -> None:
     assert due_session(MON) == date(2026, 11, 20)  # 06:20 Monday: Friday's
     assert due_session(MON + timedelta(hours=1)) == date(2026, 11, 23)  # 07:20 Monday
     assert due_session(datetime(2026, 11, 28, 15, 0, tzinfo=UTC)) == date(2026, 11, 27)  # Sat
+
+
+# --------------------------------------------------------------------------------------------
+# PR #102 review batch 4: empty bodies, interrupted runs, past target dates
+# --------------------------------------------------------------------------------------------
+
+
+def _with_zero_byte(base: Answer, rid: str) -> Answer:
+    """``base``, except release ``rid`` answers 200 with an empty body (an upstream glitch)."""
+
+    def answer(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        if req.dataset == RELEASE_DATASET and req.params["release_id"] == rid:
+            return 200, b""
+        return base(req, url)
+
+    return answer
+
+
+def test_a_zero_byte_200_withholds_the_release_scope(tmp_path: Path) -> None:
+    cfg = _config()
+    good = releases({"10": [1], "50": [2]})
+    env = _env(tmp_path, cfg, [FredSource(cfg)], good, MON)
+    ctx1, _ = _run(env, good, MON)
+    ctx2, m2 = _run(env, _with_zero_byte(releases({"10": [2], "50": [3]}), "50"), TUE)
+    events, log = _tables(env)
+    assert ctx2.run_id not in set(events["run_id"])  # release 10's rows held back too
+    cur = current_rows("events", events, log)
+    assert sorted(cur["event_id"]) == ["release:10:2026-11-24", "release:50:2026-11-25"]
+    assert set(cur["run_id"]) == {ctx1.run_id}
+    run2 = log[(log["run_id"] == ctx2.run_id) & (log["dataset"] == RELEASE_DATASET)]
+    assert sorted(run2["status"]) == ["error", "ok"]  # never a clean "empty"
+    bad = run2[run2["status"] == "error"].iloc[0]
+    assert bad["bytes"] == 0
+    assert "parse_error" in bad["error"]
+    assert m2.status is RunStatus.DEGRADED
+    q = Datasets(env.store).read("quarantine")
+    assert list(q["run_id"]) == [ctx2.run_id]
+
+
+def test_a_zero_byte_200_never_empties_the_auction_scope(tmp_path: Path) -> None:
+    cfg = _config()
+    record = {
+        "record_date": "2026-11-20",
+        "security_type": "Bill",
+        "security_term": "4-Week",
+        "reopening": "No",
+        "cusip": "EXMPB0011",
+        "offering_amt": "null",
+        "announcemt_date": "2026-11-20",
+        "auction_date": "2026-11-24",
+        "issue_date": "2026-11-26",
+    }
+    body = json.dumps({"data": [record], "meta": {"total-pages": 1}}).encode()
+
+    def full(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        return 200, body
+
+    env = _env(tmp_path, cfg, [FiscalDataSource(cfg)], full, MON)
+    ctx1, _ = _run(env, full, MON)
+    events, log = _tables(env)
+    assert len(current_rows("events", events, log)) == 1
+    ctx2, m2 = _run(env, lambda req, url: (200, b""), TUE)
+    events, log = _tables(env)
+    cur = current_rows("events", events, log)
+    assert list(cur["run_id"]) == [ctx1.run_id]  # yesterday's auction is still current
+    assert list(log[log["run_id"] == ctx2.run_id]["status"]) == ["error"]
+    assert m2.status is not RunStatus.OK
+    # a well-formed answer with no rows is the only "nothing scheduled"
+    nothing = json.dumps({"data": [], "meta": {"total-pages": 1}}).encode()
+    ctx3, _ = _run(env, lambda req, url: (200, nothing), WED)
+    events, log = _tables(env)
+    assert list(log[log["run_id"] == ctx3.run_id]["status"]) == ["empty"]
+    assert current_rows("events", events, log).empty
+
+
+@pytest.mark.parametrize("stop_at", ["10", "50"])
+@pytest.mark.parametrize("before", ["rows", "nothing scheduled"])
+def test_an_interrupted_release_loop_writes_nothing_and_keeps_the_last_run(
+    tmp_path: Path, stop_at: str, before: str
+) -> None:
+    """The job is cancelled (KeyboardInterrupt) while fetching release ``stop_at``: whatever
+    the releases fetched before it said, the scope is not written and not emptied."""
+    cfg = _config()
+    good = releases({"10": [1], "50": [2]})
+    env = _env(tmp_path, cfg, [FredSource(cfg)], good, MON)
+    ctx1, _ = _run(env, good, MON)
+    base = releases({"10": [2], "50": [3]} if before == "rows" else {})
+
+    def cancel(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        if req.dataset == RELEASE_DATASET and req.params["release_id"] == stop_at:
+            raise KeyboardInterrupt
+        return base(req, url)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(env, cancel, TUE)
+    events, log = _tables(env)
+    assert set(events["run_id"]) == {ctx1.run_id}  # nothing partial was written
+    cur = current_rows("events", events, log)
+    assert sorted(cur["event_id"]) == ["release:10:2026-11-24", "release:50:2026-11-25"]
+    run2 = log[(log["run_id"] != ctx1.run_id) & (log["dataset"] == RELEASE_DATASET)]
+    aborted = run2[run2["status"] == "error"]
+    unprocessed = ["10", "50"][["10", "50"].index(stop_at) :]
+    assert len(aborted) == len(unprocessed)
+    assert all("run aborted (KeyboardInterrupt)" in e for e in aborted["error"])
+    runs = Datasets(env.store).read("runs")
+    assert sorted(runs["status"]) == ["failed", "ok"]
+    # freshness does not count the aborted run as a complete fetch
+    res = _freshness(env, JobKind.EOD, TUE + timedelta(hours=11))
+    assert res[("fred", "release_dates")].status is DQStatus.FAIL
+
+
+def test_a_morning_run_for_a_past_date_leaves_the_calendar_alone(tmp_path: Path) -> None:
+    cfg = _config()
+    good = releases({"10": [1], "50": [2]})
+    env = _env(tmp_path, cfg, [FredSource(cfg)], good, MON)
+    ctx1, _ = _run(env, good, MON)
+    seen: list[str] = []
+
+    def record(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        seen.append(req.dataset)
+        return releases({"10": [5]})(req, url)
+
+    clock = FakeClock(WED)
+    env.clock = clock
+    env.http = FakeHttp(clock, record)
+    ctx2 = make_context(env, JobKind.MORNING, Trigger.MANUAL, et_date(MON), WED)  # past date
+    m2 = execute_run(env, ctx2)
+    assert seen  # observations fetched
+    assert RELEASE_DATASET not in seen  # release dates not
+    events, log = _tables(env)
+    assert set(events["run_id"]) == {ctx1.run_id}
+    assert log[(log["run_id"] == ctx2.run_id) & (log["dataset"] == RELEASE_DATASET)].empty
+    assert sorted(current_rows("events", events, log)["run_id"]) == [ctx1.run_id] * 2
+    assert any("is not today" in n for n in m2.notes)
+    assert m2.status is RunStatus.OK

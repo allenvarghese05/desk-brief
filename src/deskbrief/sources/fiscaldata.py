@@ -14,10 +14,18 @@ Fields used (every value arrives as a string; ``"null"`` means not given): ``rec
 ``issue_date``. The dataset gives no auction close time, so ``scheduled_at`` is null.
 
 Rows (``events``): ``kind = auction``, ``event_date`` = ``auction_date``, title
-``"<term> <type> auction"`` ("4-Week Bill auction"), ``event_id =
-auction:<auction_date>:<cusip or term-type>``, ``details_json`` with the type, term, reopening,
-CUSIP, offering amount (USD), announcement, issue and record dates. A key published on several
-record dates keeps the newest record. Rows outside the requested window are dropped.
+``"<term> <type> auction"`` ("4-Week Bill auction"), ``details_json`` with the type, term,
+reopening, CUSIP, offering amount (USD), announcement, issue and record dates. Rows outside the
+requested window are dropped.
+
+Identity (PR #102 review): an auction is a slot ``(auction_date, security_term,
+security_type)``. When the response holds several ``record_date`` snapshots of a slot, only the
+newest snapshot is kept, so an auction published first without a CUSIP and later with one is
+one event, not two. Within that snapshot one CUSIP on one date is one auction (the last record
+wins). ``event_id = auction:<auction_date>:<cusip or term-type>``; two CUSIP-less auctions in
+one slot get ``-1``, ``-2`` ... in a stable order. A reopening has a new auction date, so it is
+a new event even with the same CUSIP. Ids are unique within a fetch, which is all the writer
+rules need (readers replace the whole ``(source, dataset)`` scope per run).
 
 Probe status and terms: ``docs/sources/fiscaldata.md``. Payloads in tests are SYNTHETIC.
 """
@@ -149,7 +157,7 @@ class FiscalDataSource:
         if isinstance(pages, int) and pages > 1:
             raise ParseError(f"fiscaldata answered {pages} pages; only one page is read")
         lo, hi = _window(dict(raw.request.params))
-        best: dict[str, tuple[date | None, dict[str, Any]]] = {}
+        slots: dict[tuple[date, str, str], list[tuple[date | None, dict[str, Any]]]] = {}
         for record in doc["data"]:
             if not isinstance(record, dict):
                 raise ParseError(f"fiscaldata record is not an object: {record!r}")
@@ -157,12 +165,16 @@ class FiscalDataSource:
             day = row["event_date"]
             if (lo is not None and day < lo) or (hi is not None and day > hi):
                 continue
-            recorded = _date(record, "record_date")
-            prior = best.get(row["event_id"])
-            if prior is None or (recorded or date.min) >= (prior[0] or date.min):
-                best[row["event_id"]] = (recorded, row)
-        ordered = sorted(best.values(), key=lambda v: (v[1]["event_date"], v[1]["event_id"]))
-        return table_frame("events", [row for _, row in ordered])
+            details = json.loads(row["details_json"])
+            slot = (day, details["security_term"], details["security_type"])
+            slots.setdefault(slot, []).append((_date(record, "record_date"), row))
+        rows: list[dict[str, Any]] = []
+        for (_day, term, sec_type), found in slots.items():
+            newest = max((rec or date.min) for rec, _ in found)
+            snapshot = [r for rec, r in found if (rec or date.min) == newest]
+            rows.extend(_identify(snapshot, f"{term}-{sec_type}".replace(" ", "")))
+        rows.sort(key=lambda r: (r["event_date"], r["event_id"]))
+        return table_frame("events", rows)
 
     def _row(self, record: dict[str, Any]) -> dict[str, Any]:
         day = _date(record, "auction_date", required=True)
@@ -172,7 +184,6 @@ class FiscalDataSource:
         if sec_type is None or term is None:
             raise ParseError("fiscaldata: record needs security_type and security_term")
         cusip = _text(record, "cusip")
-        ident = cusip or f"{term}-{sec_type}".replace(" ", "")
         details = {
             "security_type": sec_type,
             "security_term": term,
@@ -184,7 +195,7 @@ class FiscalDataSource:
             "record_date": _iso(_date(record, "record_date")),
         }
         return {
-            "event_id": f"auction:{day.isoformat()}:{ident}",
+            "event_id": "",  # set by _identify once the whole slot is known
             "source": SOURCE,
             "dataset": DATASET,
             "kind": EventKind.AUCTION.value,
@@ -199,6 +210,26 @@ class FiscalDataSource:
 
 def _iso(d: date | None) -> str | None:
     return d.isoformat() if d is not None else None
+
+
+def _identify(snapshot: list[dict[str, Any]], term_type: str) -> list[dict[str, Any]]:
+    """Event ids for the records of one slot's newest snapshot (see the module docstring)."""
+    by_cusip: dict[str, dict[str, Any]] = {}
+    no_cusip: list[dict[str, Any]] = []
+    for row in snapshot:
+        cusip = json.loads(row["details_json"])["cusip"]
+        if cusip:
+            by_cusip[cusip] = row  # one CUSIP on one date is one auction: the last record wins
+        else:
+            no_cusip.append(row)
+    out: list[dict[str, Any]] = []
+    for cusip, row in by_cusip.items():
+        out.append({**row, "event_id": f"auction:{row['event_date'].isoformat()}:{cusip}"})
+    no_cusip.sort(key=lambda r: r["details_json"])
+    for n, row in enumerate(no_cusip, start=1):
+        ident = term_type if len(no_cusip) == 1 else f"{term_type}-{n}"
+        out.append({**row, "event_id": f"auction:{row['event_date'].isoformat()}:{ident}"})
+    return out
 
 
 register(SOURCE, FiscalDataSource)

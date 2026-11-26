@@ -20,9 +20,14 @@ JSON bundle of every document it read (``{"bundle": ..., "documents": [{"role", 
 "accession", "text"}, ...]}``); ``parse_table`` is a pure function of that bundle. The bundle
 keeps each document's text as fetched, except 13F information tables, which are reduced to the
 ``infoTable`` entries of the configured CUSIPs (large filers' tables run to tens of MB); the
-full document's size and sha256 are recorded next to it. If any request fails, the fetch fails
-as a whole (its status and error are those of the failed request), so a company or holder is
-written all or nothing.
+full document's size and sha256 are recorded next to it. If a request fails, the fetch fails as
+a whole (its status and error are those of the failed request), with one exception: a 404 on a
+document of one filing (a Form 4 XML, a 13F ``index.json``, information table or cover page) skips
+that filing, logged (``edgar.document_skipped``) and listed under ``skipped`` in the bundle,
+instead of failing the company or holder every day (PR #102 review). Each accession is still
+written whole or not at all: a skipped Form 4 gets no rows, and a holder whose latest or previous
+13F period has a skipped filing gets no rows that run (its holdings would be wrong). The
+submissions JSON itself, and any other failure (5xx, 429), still fail the whole fetch.
 
 User-Agent (SEC fair access): read from the environment variable named by
 ``sources.edgar.user_agent_env`` (``DESKBRIEF_SEC_USER_AGENT``) and passed ONLY as
@@ -35,7 +40,12 @@ Rules for the rows (``schemas`` writer rules):
 
 * ``amends_accession`` only for a full restatement, on seq 0 only: a Form 4/A (a complete
   amended form) names the Form 4 of the same reporting owner filed on its
-  ``dateOfOriginalSubmission`` when exactly one is in the bundle; a 13F-HR/A whose cover says
+  ``dateOfOriginalSubmission`` when exactly one is in the bundle, else the one Form 4 of that
+  owner filed on that date or with the same ``periodOfReport`` (never one filed after the
+  amendment). When that is still not exactly one, ``amends_accession`` stays null and the seq 0
+  ``details_json`` carries ``amendment_unmatched: true`` and ``amends_candidates`` (the owner's
+  possible originals in the bundle); ``query.latest_amendments_only`` then drops those
+  candidates, so only the amendment is counted, never both. A 13F-HR/A whose cover says
   ``RESTATEMENT`` names its period's original 13F-HR. A 13F-HR/A ``NEW HOLDINGS`` amendment
   adds positions to the original, so it amends nothing: its positions are added to the
   period's holdings and it gets a filing row only (``details_json.merged_into``). 10-K/A and
@@ -398,7 +408,7 @@ class EdgarSource:
                 url = ARCHIVE_URL.format(
                     cik=int(cik), nodash=_nodash(f.accession), name=_strip_xsl(f.primary_document)
                 )
-                bundle.get_text("form4", url, accession=f.accession)
+                bundle.get_text("form4", url, accession=f.accession)  # None: 404, skipped
 
     def _fetch_holder(self, req: FetchRequest, bundle: _Bundle) -> None:
         cik = pad_cik(req.params["cik"])
@@ -417,11 +427,14 @@ class EdgarSource:
                 continue
             base = ARCHIVE_URL.format(cik=int(cik), nodash=_nodash(f.accession), name="")
             index = bundle.get_json("index", base + "index.json", accession=f.accession)
+            if f.accession in bundle.skipped_accessions:
+                continue  # 404: the holder gets no rows this run (see _holder_rows)
             table = _info_table_name(index, f.primary_document)
             if table is None:
                 bundle.incomplete = f"{f.accession}: no information table in index.json"
                 return
-            bundle.get_info_table(base + table, f.accession, cusips)
+            if not bundle.get_info_table(base + table, f.accession, cusips):
+                continue
             if f.form.endswith("/A") and f.primary_document:
                 bundle.get_text(
                     "cover", base + _strip_xsl(f.primary_document), accession=f.accession
@@ -436,7 +449,7 @@ class EdgarSource:
     def parse_table(self, raw: RawResponse) -> pd.DataFrame:
         if not raw.ok:
             raise ParseError(f"EDGAR fetch failed: {raw.error or raw.http_status}")
-        docs = _read_bundle(raw)
+        docs, skipped = _read_bundle(raw)
         submissions = _one(docs, "submissions")
         try:
             subs = json.loads(submissions["text"])
@@ -448,7 +461,7 @@ class EdgarSource:
             rows = self._company_rows(req, filings, docs)
         elif req.dataset == HOLDERS_DATASET:
             name = subs.get("name") if isinstance(subs.get("name"), str) else None
-            rows = self._holder_rows(req, filings, docs, name)
+            rows = self._holder_rows(req, filings, docs, name, skipped)
         else:
             raise ParseError(f"edgar has no dataset {req.dataset!r}")
         return table_frame("filings", rows)
@@ -501,8 +514,10 @@ class EdgarSource:
             parsed.append((filing, parse_form4(doc["text"], filing)))
         originals = [(f, p) for f, p in parsed if f.form == "4"]
         for filing, form4 in parsed:
-            amends = _form4_original(filing, form4, originals) if filing.form == "4/A" else None
-            rows.extend(form4.rows(self._base(req, instrument, cik, filing), amends))
+            amends, candidates = None, None
+            if filing.form == "4/A":
+                amends, candidates = _form4_original(filing, form4, originals)
+            rows.extend(form4.rows(self._base(req, instrument, cik, filing), amends, candidates))
         return rows
 
     def _holder_rows(
@@ -511,12 +526,25 @@ class EdgarSource:
         filings: list[Filing],
         docs: list[dict[str, Any]],
         filer_name: str | None,
+        skipped: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         holder_cik = pad_cik(req.params.get("cik", req.symbols[0] if req.symbols else "0"))
         holder = self._holders.get(holder_cik)
         party = holder.name if holder is not None else (filer_name or holder_cik)
         latest, previous = thirteen_f_periods(filings)
         if latest is None:
+            return []
+        missing = sorted(
+            f.accession
+            for f in filings
+            if f.form in FORM13F
+            and f.period in (latest, previous)
+            and f.accession in (skipped or ())
+        )
+        if missing:  # a 13F document was not found: these periods' holdings would be wrong
+            get_logger(source=self.name, dataset=req.dataset).warning(
+                "edgar.holder_skipped", holder_cik=holder_cik, accessions=missing
+            )
             return []
         tables = {str(d["accession"]): d["text"] for d in docs if d["role"] == "infotable"}
         covers = {str(d["accession"]): d["text"] for d in docs if d["role"] == "cover"}
@@ -600,35 +628,61 @@ class _Bundle:
         self.responses: list[RawResponse] = []
         self.documents: list[dict[str, Any]] = []
         self.incomplete: str | None = None
+        #: documents of one filing that answered 404: that filing is skipped, not the fetch
+        self.skipped: list[dict[str, Any]] = []
 
-    def _get(self, role: str, url: str) -> RawResponse:
+    @property
+    def skipped_accessions(self) -> set[str]:
+        return {str(d["accession"]) for d in self.skipped}
+
+    def _get(self, role: str, url: str, accession: str | None = None) -> RawResponse | None:
+        """The response, or ``None`` when a filing's document is not found (404, skipped).
+
+        Any other failure, and any failure of a request that belongs to no single filing (the
+        submissions JSON), fails the whole fetch.
+        """
         raw = self.http.get(self.req, url, secret_headers={"User-Agent": self._ua})
         self.responses.append(raw)
-        if not raw.ok:
-            raise _FetchFailedError(role, raw)
-        return raw
+        if raw.ok:
+            return raw
+        if accession is not None and raw.http_status == 404:
+            self.skipped.append(
+                {"role": role, "accession": accession, "url": raw.url_redacted, "http_status": 404}
+            )
+            get_logger(source=SOURCE, dataset=self.req.dataset).warning(
+                "edgar.document_skipped", role=role, accession=accession, http_status=404
+            )
+            return None
+        raise _FetchFailedError(role, raw)
 
     def _doc(self, role: str, raw: RawResponse, accession: str | None, text: str) -> None:
         self.documents.append(
             {"role": role, "url": raw.url_redacted, "accession": accession, "text": text}
         )
 
-    def get_text(self, role: str, url: str, *, accession: str | None = None) -> str:
-        raw = self._get(role, url)
+    def get_text(self, role: str, url: str, *, accession: str | None = None) -> str | None:
+        raw = self._get(role, url, accession)
+        if raw is None:
+            return None
         text = raw.body.decode("utf-8", "replace")
         self._doc(role, raw, accession, text)
         return text
 
     def get_json(self, role: str, url: str, *, accession: str | None = None) -> Any:
         text = self.get_text(role, url, accession=accession)
+        if text is None:
+            return None
         try:
             return json.loads(text)
         except ValueError:
             self.incomplete = f"{role} is not valid JSON"
             return None
 
-    def get_info_table(self, url: str, accession: str, cusips: list[str]) -> None:
-        raw = self._get("infotable", url)
+    def get_info_table(self, url: str, accession: str, cusips: list[str]) -> bool:
+        """Read and filter one information table; ``False`` when it was skipped (404)."""
+        raw = self._get("infotable", url, accession)
+        if raw is None:
+            return False
         try:
             text = filter_info_table(raw.body, cusips)
         except ParseError as exc:
@@ -644,6 +698,7 @@ class _Bundle:
             "full_sha256": hashlib.sha256(raw.body).hexdigest(),
         }
         self.documents.append(doc)
+        return True
 
     def _span(self) -> tuple[Any, Any, int]:
         first, last = self.responses[0], self.responses[-1]
@@ -675,6 +730,7 @@ class _Bundle:
             "cik": self.req.params.get("cik"),
             "incomplete": self.incomplete,
             "documents": self.documents,
+            "skipped": self.skipped,
         }
         return RawResponse(
             request=self.req,
@@ -689,7 +745,8 @@ class _Bundle:
         )
 
 
-def _read_bundle(raw: RawResponse) -> list[dict[str, Any]]:
+def _read_bundle(raw: RawResponse) -> tuple[list[dict[str, Any]], set[str]]:
+    """The bundle's documents and the accessions it skipped (a document answered 404)."""
     try:
         doc = json.loads(raw.body)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -704,7 +761,12 @@ def _read_bundle(raw: RawResponse) -> list[dict[str, Any]]:
         for d in docs
     ):
         raise ParseError("EDGAR bundle documents are malformed")
-    return docs
+    skipped = doc.get("skipped") or []
+    if not isinstance(skipped, list) or not all(
+        isinstance(d, dict) and isinstance(d.get("accession"), str) for d in skipped
+    ):
+        raise ParseError("EDGAR bundle skipped list is malformed")
+    return docs, {d["accession"] for d in skipped}
 
 
 def _one(docs: list[dict[str, Any]], role: str) -> dict[str, Any]:
@@ -777,8 +839,19 @@ class Form4:
     other_owners: list[str]
     skipped: int
 
-    def rows(self, base: dict[str, Any], amends: str | None) -> list[dict[str, Any]]:
+    def rows(
+        self, base: dict[str, Any], amends: str | None, candidates: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Seq 0 filing row and one row per trade. ``candidates`` is set for a Form 4/A that
+        matched no single original (see :func:`_form4_original`)."""
         party = {"party": self.owner, "party_cik": self.owner_cik, "party_role": self.role}
+        info: dict[str, Any] = {
+            "other_owners": self.other_owners,
+            "skipped_transactions": self.skipped,
+            "date_of_original_submission": self.original_submission,
+        }
+        if candidates is not None:
+            info.update(amendment_unmatched=True, amends_candidates=candidates)
         head = {
             **base,
             **party,
@@ -786,13 +859,7 @@ class Form4:
             "seq": 0,
             "row_kind": FilingRowKind.FILING.value,
             "amends_accession": amends,
-            "details_json": _json(
-                {
-                    "other_owners": self.other_owners,
-                    "skipped_transactions": self.skipped,
-                    "date_of_original_submission": self.original_submission,
-                }
-            ),
+            "details_json": _json(info),
         }
         out = [head]
         for i, trade in enumerate(self.trades, start=1):
@@ -880,19 +947,38 @@ def parse_form4(text: str, filing: Filing) -> Form4:
 
 def _form4_original(
     filing: Filing, form4: Form4, originals: list[tuple[Filing, Form4]]
-) -> str | None:
-    """The accession a Form 4/A restates: the one Form 4 of the same owner filed on its
-    ``dateOfOriginalSubmission``; ``None`` when that is not exactly one filing."""
-    if form4.original_submission is None:
-        return None
-    hits = [
-        f.accession
-        for f, p in originals
-        if f.filed == form4.original_submission
-        and f.accession != filing.accession
-        and (p.owner_cik == form4.owner_cik if form4.owner_cik else p.owner == form4.owner)
-    ]
-    return hits[0] if len(hits) == 1 else None
+) -> tuple[str | None, list[str] | None]:
+    """``(accession it restates, None)``, or ``(None, candidates)`` when that is not one filing.
+
+    The original is the one Form 4 of the same reporting owner filed on the amendment's
+    ``dateOfOriginalSubmission``; failing that, the one Form 4 of that owner, filed no later
+    than the amendment, either on that date or with the same ``periodOfReport``. Otherwise
+    ``candidates`` lists those possible originals (possibly none): the reader drops them, so
+    the amendment is counted alone and never next to its original (PR #102 review).
+    """
+
+    def same_owner(p: Form4) -> bool:
+        return p.owner_cik == form4.owner_cik if form4.owner_cik else p.owner == form4.owner
+
+    mine = [(f, p) for f, p in originals if f.accession != filing.accession and same_owner(p)]
+    on_date = form4.original_submission
+    strict = [f.accession for f, _ in mine if on_date is not None and f.filed == on_date]
+    if len(strict) == 1:
+        return strict[0], None
+    loose = sorted(
+        {
+            f.accession
+            for f, p in mine
+            if f.filed <= filing.filed
+            and (
+                (on_date is not None and f.filed == on_date)
+                or (form4.period is not None and p.period == form4.period)
+            )
+        }
+    )
+    if len(loose) == 1:
+        return loose[0], None
+    return None, loose
 
 
 # ---------------------------------------------------------------------------------------------

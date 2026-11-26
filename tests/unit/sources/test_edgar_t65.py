@@ -18,6 +18,7 @@ from fakes_t65 import (
     FAKE_UA,
     HOLDER_CIK,
     NOW,
+    Route,
     RoutedHttp,
     ctx_for,
     edgar_route,
@@ -380,3 +381,97 @@ def test_rows_validate_against_the_filings_schema(source: EdgarSource, dataset: 
     validate("filings", result.rows)
     assert set(result.rows["fetch_id"]) == {raw.fetch_id}
     assert not result.rows.duplicated(["instrument_id", "accession", "seq"]).any()
+
+
+# --------------------------------------------------------------------------------------------
+# PR #102 review batch 4: a 404 skips one filing; unmatched Form 4/A
+# --------------------------------------------------------------------------------------------
+
+
+def _route_404(missing: str) -> Route:
+    def route(url: str) -> tuple[int, bytes]:
+        return (404, b"not found") if missing in url else edgar_route()(url)
+
+    return route
+
+
+@pytest.mark.usefixtures("with_ua")
+def test_a_missing_form4_skips_that_filing_not_the_company(source: EdgarSource) -> None:
+    http = RoutedHttp(_route_404("form4_buy.xml"))  # the original of the 4/A
+    raw = source.fetch(_req(source, COMPANY_DATASET), http)
+    assert raw.fetch_status is FetchStatus.OK
+    assert json.loads(raw.body)["skipped"] == [
+        {
+            "role": "form4",
+            "accession": "0009999999-26-000009",
+            "url": json.loads(raw.body)["skipped"][0]["url"],
+            "http_status": 404,
+        }
+    ]
+    rows = source.parse_table(raw)
+    accs = set(rows["accession"])
+    assert "0009999999-26-000009" not in accs  # skipped whole: no rows for it
+    assert {"0009999999-26-000010", "0009999999-26-000008", "0009999999-26-000007"} <= accs
+    head = rows[(rows["accession"] == "0009999999-26-000008") & (rows["seq"] == 0)].iloc[0]
+    assert pd.isna(head["amends_accession"])  # its original is not in the bundle
+    assert json.loads(head["details_json"])["amends_candidates"] == []
+    validate("filings", clean_table_response(source, raw, "RUN1", "filings").rows)
+
+
+@pytest.mark.usefixtures("with_ua")
+@pytest.mark.parametrize(
+    "missing", ["000777777726000003/infotable.xml", "000777777726000003/index"]
+)
+def test_a_missing_13f_document_gives_the_holder_no_rows(source: EdgarSource, missing: str) -> None:
+    raw = source.fetch(_req(source, HOLDERS_DATASET), RoutedHttp(_route_404(missing)))
+    assert raw.fetch_status is FetchStatus.OK
+    assert [d["accession"] for d in json.loads(raw.body)["skipped"]] == ["0007777777-26-000003"]
+    assert source.parse_table(raw).empty  # never holdings computed from part of a quarter
+
+
+@pytest.mark.usefixtures("with_ua")
+def test_a_missing_submissions_still_fails_the_fetch(source: EdgarSource) -> None:
+    raw = source.fetch(_req(source, COMPANY_DATASET), RoutedHttp(_route_404("submissions/")))
+    assert raw.fetch_status is FetchStatus.ERROR
+    assert raw.http_status == 404
+
+
+def _rewrite(edits: dict[str, list[tuple[str, str]]]) -> Route:
+    """``edgar_route`` with text replacements in the named documents (invented changes)."""
+
+    def route(url: str) -> tuple[int, bytes]:
+        status, body = edgar_route()(url)
+        for name, pairs in edits.items():
+            if url.endswith(name):
+                for old, new in pairs:
+                    body = body.replace(old.encode(), new.encode())
+        return status, body
+
+    return route
+
+
+@pytest.mark.usefixtures("with_ua")
+def test_form4_amendment_falls_back_to_the_owner_and_period(source: EdgarSource) -> None:
+    late = [("2026-11-10</dateOfOriginalSubmission>", "2026-11-11</dateOfOriginalSubmission>")]
+    raw = source.fetch(
+        _req(source, COMPANY_DATASET), RoutedHttp(_rewrite({"form4a_buy.xml": late}))
+    )
+    rows = source.parse_table(raw)
+    head = rows[(rows["accession"] == "0009999999-26-000008") & (rows["seq"] == 0)].iloc[0]
+    assert head["amends_accession"] == "0009999999-26-000009"  # same owner, same period
+
+
+@pytest.mark.usefixtures("with_ua")
+def test_an_ambiguous_form4_amendment_names_its_candidates(source: EdgarSource) -> None:
+    late = [("2026-11-10</dateOfOriginalSubmission>", "2026-11-11</dateOfOriginalSubmission>")]
+    twin = [  # an earlier Form 4 of the same owner for the same period
+        ("0008888888</rptOwnerCik>", "0008888889</rptOwnerCik>"),
+        ("2026-09-29</periodOfReport>", "2026-11-09</periodOfReport>"),
+    ]
+    route = _rewrite({"form4a_buy.xml": late, "form4_grant.xml": twin})
+    rows = source.parse_table(source.fetch(_req(source, COMPANY_DATASET), RoutedHttp(route)))
+    head = rows[(rows["accession"] == "0009999999-26-000008") & (rows["seq"] == 0)].iloc[0]
+    assert pd.isna(head["amends_accession"])
+    info = json.loads(head["details_json"])
+    assert info["amendment_unmatched"] is True
+    assert info["amends_candidates"] == ["0009999999-26-000006", "0009999999-26-000009"]

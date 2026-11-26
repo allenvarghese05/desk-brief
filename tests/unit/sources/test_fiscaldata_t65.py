@@ -113,3 +113,68 @@ def test_failed_fetch_raises(source: FiscalDataSource) -> None:
     assert raw.fetch_status is FetchStatus.ERROR
     with pytest.raises(ParseError):
         source.parse_table(raw)
+
+
+def _record(**over: str) -> dict[str, str]:
+    """One invented upcoming-auction record (every value made up)."""
+    rec = {
+        "record_date": "2026-11-25",
+        "security_type": "Bill",
+        "security_term": "6-Week",
+        "reopening": "No",
+        "cusip": "null",
+        "offering_amt": "null",
+        "announcemt_date": "2026-11-25",
+        "auction_date": "2026-11-27",
+        "issue_date": "2026-12-01",
+    }
+    return {**rec, **over}
+
+
+def _ids(source: FiscalDataSource, records: list[dict[str, str]]) -> list[str]:
+    body = json.dumps({"data": records, "meta": {"total-pages": 1}}).encode()
+    raw = _raw(_req(source), body)
+    cleaned = clean_table_response(source, raw, "RUN1", "events")
+    assert cleaned.ok, cleaned.detail  # natural key unique within the fetch
+    return list(cleaned.rows["event_id"])
+
+
+def test_an_auction_that_gains_its_cusip_is_one_event(source: FiscalDataSource) -> None:
+    ids = _ids(
+        source,
+        [
+            _record(record_date="2026-11-24"),  # announced without a CUSIP
+            _record(record_date="2026-11-25", cusip="EXMPB0042"),  # the newer snapshot has it
+        ],
+    )
+    assert ids == ["auction:2026-11-27:EXMPB0042"]
+
+
+def test_event_ids_never_collide(source: FiscalDataSource) -> None:
+    ids = _ids(
+        source,
+        [
+            # two CUSIP-less auctions of one term and type on one day (e.g. a cash bill)
+            _record(issue_date="2026-12-01"),
+            _record(issue_date="2026-12-02"),
+            # a reopening: same CUSIP, a later auction date
+            _record(security_term="10-Year", security_type="Note", cusip="EXMPN0050"),
+            _record(
+                security_term="10-Year",
+                security_type="Note",
+                cusip="EXMPN0050",
+                reopening="Yes",
+                auction_date="2026-12-02",
+            ),
+            # the same CUSIP twice on one date is one auction
+            _record(security_term="13-Week", cusip="EXMPB0061", offering_amt="1000"),
+            _record(security_term="13-Week", cusip="EXMPB0061", offering_amt="2000"),
+        ],
+    )
+    assert sorted(ids) == [
+        "auction:2026-11-27:6-Week-Bill-1",
+        "auction:2026-11-27:6-Week-Bill-2",
+        "auction:2026-11-27:EXMPB0061",
+        "auction:2026-11-27:EXMPN0050",
+        "auction:2026-12-02:EXMPN0050",
+    ]
