@@ -47,6 +47,12 @@ def _shares(x: float) -> str:
     return f"{sign}{abs(x):,.0f}"
 
 
+def _count(n: int, noun: str, tone: str) -> str:
+    """ "4 sells", "1 buy", "0 buys" (coloured only when non-zero)."""
+    text = f"{n} {noun}{'' if n == 1 else 's'}"
+    return f'<span class="{tone}">{text}</span>' if n else text
+
+
 def _row(label: str, value: str, note: str) -> str:
     return (
         f'<div class="db-co-row"><dt>{escape(label)}</dt><dd>{value}</dd>'
@@ -88,8 +94,8 @@ def section_html(co: CompanyFilings | None, insider_days: int) -> str:
     else:
         rows.append(_row("Latest filing", "none stored", "SEC EDGAR · 10-Q and 10-K"))
     ins = co.insiders
-    sells = f'<span class="db-down">{ins.n_sells} sells</span>' if ins.n_sells else "0 sells"
-    buys = f'<span class="db-up">{ins.n_buys} buys</span>' if ins.n_buys else "0 buys"
+    sells = _count(ins.n_sells, "sell", "db-down")
+    buys = _count(ins.n_buys, "buy", "db-up")
     n_trades = ins.n_buys + ins.n_sells
     plans = f" · {ins.n_10b5_1} of {n_trades} under 10b5-1 plans" if n_trades else ""
     unpriced = f" · {ins.n_unpriced} without a price" if ins.n_unpriced else ""
@@ -130,7 +136,8 @@ def _css() -> str:
     return f"""
 <style>
 /* ---- T67 the Company section (P-024): flat label-value rows, two columns ---- */
-.db-co {{ margin-top: 30px; }}
+.db-co {{ margin-top: 30px; font-size: {t.SIZE_BODY}px; }}
+.db-co li {{ font-size: inherit; }}
 .db-co-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   column-gap: 32px; margin: 0; }}
 .db-co-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px;

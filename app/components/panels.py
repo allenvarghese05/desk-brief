@@ -416,6 +416,7 @@ def wl_row(
     sig: tuple[str, str] | None = None,
     sub: str = "",
     check: bool = False,
+    mover: bool = False,
 ) -> str:
     """One watchlist row (P-023): the short name (never truncated) with a sigma tag for an
     unusual move, the full name under it (truncated with an ellipsis), then the value and the
@@ -425,14 +426,22 @@ def wl_row(
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy and not row.available else ""
     hover = "; ".join((row.label, *row.qualifiers))
     cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
+    cls += " db-wl-mover" if mover else ""
     mark = check_mark() if check else ""
+    in_name = "" if mover else sigma_tag(sig)
     name = (
-        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}{sigma_tag(sig)}{mark}</b>'
+        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}{in_name}{mark}</b>'
         f"<small>{escape(sub or row.name)}</small>"
         f'<span class="db-sr"> ({escape(hover)})</span></span>'
     )
     if not row.available:
         cells = f'<span class="db-wl-gap db-unavailable">{NO_DATA}</span>'
+    elif mover:  # P-024 "Moved more than usual": the change, then sigma in its own column
+        p = provenance_of(row, now)
+        cells = (
+            f'<span class="db-wl-chg">{_change(row, p)}</span>'
+            f'<span class="db-wl-sigcol">{sigma_tag(sig)}</span>'
+        )
     else:
         p = provenance_of(row, now)
         cells = (
@@ -528,7 +537,7 @@ def movers_group(ov: Overview, sel: str) -> WatchGroup:
             continue
         body = wl_row(
             row, ov.as_of, sel, (), sigs.get(m.instrument_id), mover_sub(row, ov.as_of),
-            m.instrument_id in checked,
+            m.instrument_id in checked, mover=True,
         )  # fmt: skip
         items.append((m.instrument_id, body))
     return WatchGroup(MOVERS_TITLE, items, [], tuple(i for i, _ in items))
@@ -719,7 +728,8 @@ def _css() -> str:
 .st-key-db-wl-switch {{ margin: -4px 0 6px 0; }}
 .st-key-db-wl-switch [data-testid="stButtonGroup"] button {{ background: transparent; border: 0;
   color: {t.META}; min-height: 26px; padding: 0 10px; font-size: {t.SIZE_META}px; }}
-.db-wl-since {{ padding: 0 10px 4px 10px; color: {t.META}; font-size: {t.SIZE_META}px; }}
+.db-wl-since {{ padding: 0 10px 8px 10px; margin-top: -2px; color: {t.META};
+  font-size: {t.SIZE_META}px; }}
 .db-check {{ background: transparent; padding: 0; margin-left: 6px; }}
 
 /* the hero: label, figure, pill, provenance line */
@@ -819,6 +829,7 @@ def _css() -> str:
 .db-wl-head {{ display: grid; grid-template-columns: minmax(0, 1fr) auto 64px; column-gap: 12px;
   padding: 0 10px; color: {t.META}; font-size: {t.SIZE_META}px; margin-top: -4px; }}
 .db-wl-head span {{ text-align: right; }}
+.db-wl-head.db-wl-head-mv {{ grid-template-columns: minmax(0, 1fr) auto 40px; }}
 .db-wl-grp {{ padding: 18px 10px 6px 10px; }}
 .db-grp-h {{ display: flex; align-items: baseline; gap: 6px; }}
 .db-grp-chev {{ display: inline-block; width: 10px; }}
@@ -843,6 +854,9 @@ def _css() -> str:
 .db-wl-val .db-flags {{ display: block; line-height: 1.2; }}
 .db-wl-val .db-flag {{ margin-left: 4px; }}
 .db-wl-gap {{ grid-column: 2 / 4; text-align: right; }}
+/* a mover row (P-024): name, change, then sigma in its own narrow column */
+.db-wl-row.db-wl-mover {{ grid-template-columns: minmax(0, 1fr) auto 40px; }}
+.db-wl-sigcol {{ text-align: right; white-space: nowrap; }}
 .db-sig {{ color: {t.AMBER}; font-size: {t.SIZE_META}px; font-weight: 500; }}
 /* every row's hover content: fixed, so no column, scroll area or iframe clips it; it opens
    on hover and on keyboard focus of the row's button (T60 bug 2) */

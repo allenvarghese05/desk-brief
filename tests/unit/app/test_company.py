@@ -79,7 +79,7 @@ def test_the_section_shows_each_fact_with_its_source_and_date() -> None:
     assert "10-Q, 4 Nov 2026" in html
     assert "SEC EDGAR · filed 4 Nov 2026 · period 30 Sep 2026" in html
     assert f'href="{URL}" target="_blank" rel="noopener noreferrer"' in html
-    assert '<span class="db-down">2 sells</span> · <span class="db-up">1 buys</span>' in html
+    assert '<span class="db-down">2 sells</span> · <span class="db-up">1 buy</span>' in html
     assert "Form 4 · net −$130.0K · 1 of 3 under 10b5-1 plans · filed since 18 Aug 2026" in html
     assert "1 added · 1 cut" in html
     assert "13F · as of 30 Jun 2026, 13F runs about 45 days behind" in html

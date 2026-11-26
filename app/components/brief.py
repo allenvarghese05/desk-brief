@@ -154,7 +154,9 @@ def _css() -> str:
     return f"""
 <style>
 /* ---- T62 the brief pane (P-024): flat, labels over hairlines ---- */
-.db-brief {{ display: block; }}
+.db-brief {{ display: block; font-size: {t.SIZE_BODY}px; line-height: 1.5;
+  color: {t.TEXT}; }}
+.db-brief li, .db-brief p, .db-brief div {{ font-size: inherit; }}
 .db-read {{ font-size: {t.SIZE_LG}px; font-weight: 600; line-height: 1.45; margin: 0 0 10px 0;
   color: {t.TEXT}; }}
 .db-regime.db-down {{ color: {t.DOWN}; }}

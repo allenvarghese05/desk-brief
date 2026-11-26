@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
 import duckdb
@@ -40,12 +40,14 @@ from deskbrief.query import (
     CompanyFilings,
     Lineage,
     company_filings_from_frame,
+    current_events,
     latest_check_run,
     series_all,
 )
 from deskbrief.report.model import (
     BriefModel,
     Caveat,
+    Event,
     HealthBlock,
     KnownLimit,
     Mover,
@@ -54,6 +56,7 @@ from deskbrief.report.model import (
     Read,
     Row,
     Section,
+    today_events,
 )
 from deskbrief.report.note import stored_note
 from deskbrief.store import duck
@@ -384,6 +387,7 @@ def build_snapshot(
             health_date=latest.target_date if latest is not None else et_date(now),
         )
         history = series_all(conn, SPARK_DAYS, now)
+    model = replace(model, today=_today(config, env, now, model))
     return Snapshot(
         model,
         {
@@ -393,6 +397,26 @@ def build_snapshot(
         (latest.target_date, latest.started_at) if latest is not None else None,
         _stored_note(config, env, et_date(now)),
     )
+
+
+#: Today reads the events (and their fetch log) stored in the last this many days: every run
+#: that fetches a calendar replaces its scope, so older partitions hold only replaced rows
+EVENTS_READ_DAYS = 7
+
+
+def _today(
+    config: Config, env: Mapping[str, str], now: datetime, model: BriefModel
+) -> tuple[Event, ...]:
+    """Today's stored releases and auctions (T65). Never raises: the page goes on without."""
+    try:
+        store = _store(config, env)
+        events = _recent_table(store, "events", EVENTS_READ_DAYS, now)
+        log = _recent_table(store, "source_log", EVENTS_READ_DAYS, now)
+        items = current_events(events, log, now, config.events.horizon_days)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard events unreadable: %s", type(exc).__name__)
+        return ()
+    return today_events(items, model.report_date)
 
 
 def _stored_note(config: Config, env: Mapping[str, str], day: date) -> Note:
@@ -630,6 +654,7 @@ class Overview:
     caveats: tuple[Caveat, ...] = ()
     previous_brief: datetime | None = None
     note: Note | None = None  # T66: the stored note (or why there is none)
+    today: tuple[Event, ...] = ()  # T65: today's scheduled releases and auctions
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -681,4 +706,5 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         caveats=tuple(c for c in model.caveats if all(i in by_id for i in c.instrument_ids)),
         previous_brief=model.previous_brief,
         note=snap.note,
+        today=model.today,
     )

@@ -29,7 +29,7 @@ import smtplib
 import ssl
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from email.message import EmailMessage
 from pathlib import Path
@@ -39,9 +39,10 @@ import duckdb
 
 from deskbrief.logging import get_logger, redact, redact_text
 from deskbrief.models import RunContext, Trigger
+from deskbrief.query import events_today
 from deskbrief.report.excel import write_workbook
 from deskbrief.report.html import dashboard_url, render_html, render_text
-from deskbrief.report.model import BriefModel
+from deskbrief.report.model import BriefModel, Event, today_events
 from deskbrief.report.note import with_note
 from deskbrief.store.backend import (
     REPORTS_PREFIX,
@@ -50,7 +51,7 @@ from deskbrief.store.backend import (
     report_key,
     table_prefix,
 )
-from deskbrief.store.datasets import current_clean_version
+from deskbrief.store.datasets import Datasets, current_clean_version
 from deskbrief.store.duck import connect
 
 DEFAULT_SMTP_HOST = "smtp.gmail.com"
@@ -264,6 +265,18 @@ def _workbook_bytes(model: BriefModel) -> bytes:
 # ---------------------------------------------------------------------------------------------
 
 
+def _today(ctx: RunContext, model: BriefModel) -> tuple[Event, ...]:
+    """Today's events for the brief; an unreadable events table costs only this section."""
+    try:
+        items = events_today(Datasets(ctx.store), model.report_time, ctx.config.events.horizon_days)
+    except Exception as exc:
+        get_logger(run_id=ctx.run_id).warning(
+            "report.events_unreadable", error=redact(f"{type(exc).__name__}: {exc}")
+        )
+        return ()
+    return today_events(items, model.report_date)
+
+
 @dataclass
 class _Built:
     subject: str
@@ -292,6 +305,8 @@ def report_steps(
                 )
         finally:
             duck.close()
+        # P-024 (T65): Today's releases and auctions, from the stored events
+        model = replace(model, today=_today(ctx, model))
         # P-024 (T66): the note, written once here and stored in model.json; never raises
         model = with_note(model, ctx.config, os.environ, ctx.store)
         link = dashboard_url(os.environ)

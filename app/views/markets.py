@@ -231,10 +231,10 @@ def _watchlist(ov: data.Overview, query: str, sel: str, window: int = 30) -> Non
     names = _names(ov)
     _html(st, panels.label("Watchlist", f"σ vs last {window} moves"))
     mode = panels.BY_GROUP if query else _mode()
-    _html(st, '<div class="db-wl-head" aria-hidden="true"><i></i><span>Last</span>'
-              "<span>Chg</span></div>")  # fmt: skip
     sigs = panels.sigmas(ov)
     if not query and mode == panels.UNUSUAL:
+        _html(st, '<div class="db-wl-head db-wl-head-mv" aria-hidden="true"><i></i>'
+                  "<span>Chg</span><span>σ</span></div>")  # fmt: skip
         movers = panels.movers_group(ov, sel)
         since = brief.when(ov.previous_brief)
         aside = f"since {since} brief" if since else ""
@@ -253,6 +253,8 @@ def _watchlist(ov: data.Overview, query: str, sel: str, window: int = 30) -> Non
         groups = panels.watchlist(rest, ov.as_of, sel, sigs=sigs)
         _groups(groups, names, sel, start_folded=True)
         return
+    _html(st, '<div class="db-wl-head" aria-hidden="true"><i></i><span>Last</span>'
+              "<span>Chg</span></div>")  # fmt: skip
     if not query:
         _groups(panels.watchlist(ov.sections, ov.as_of, sel, sigs=sigs), names, sel)
         return
@@ -545,7 +547,8 @@ def main() -> None:
     with st.container(key="db-main"):
         brief_col, watch_col, hero_col = st.columns(3, gap="large")
         with brief_col, st.container(key="db-brief"):
-            _html(st, brief.pane(ov.read, ov.caveats, ov.as_of, ov.previous_brief, ov.note))
+            pane = brief.pane(ov.read, ov.caveats, ov.as_of, ov.previous_brief, ov.note, ov.today)
+            _html(st, pane)
         with watch_col, st.container(key="db-watch"):
             _watchlist(ov, query, sel, config.checks.anomaly.window_days)
         with hero_col, st.container(key="db-hero"):

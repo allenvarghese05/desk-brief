@@ -44,6 +44,7 @@ from deskbrief.query import (
     OFFICIAL_INTERVALS,
     ChangeRow,
     CheckItem,
+    EventItem,
     HealthSummary,
     Lineage,
     SeriesKey,
@@ -1080,6 +1081,23 @@ def _crosscheck_text(i: CheckItem) -> str:
     gap = f"gap {i.observed:.1f}bp" if i.observed is not None else "no gap recorded"
     limit = f", limit {i.threshold:g}bp" if i.threshold is not None else ""
     return f"Cross-check {i.name}{where} {i.status.upper()}: {gap}{limit}"
+
+
+# ---------------------------------------------------------------------------
+# Today (P-024, T65): the day's scheduled releases and auctions
+# ---------------------------------------------------------------------------
+
+
+def today_events(items: Sequence[EventItem], report_date: date) -> tuple[Event, ...]:
+    """The events dated ``report_date`` (ET), in the reader's order, with their ET time
+    (``query.events_today`` has already applied ``schemas.current_rows``)."""
+    out = []
+    for e in items:
+        if e.event_date != report_date:
+            continue
+        when = f"{to_et(e.scheduled_at):%H:%M}" if e.scheduled_at is not None else ""
+        out.append(Event(e.event_date, when, e.title, source_name(e.source), e.kind))
+    return tuple(sorted(out, key=lambda x: (x.time_text or "99:99", x.title)))
 
 
 # ---------------------------------------------------------------------------
