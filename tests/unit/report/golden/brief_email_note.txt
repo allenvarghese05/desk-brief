@@ -31,6 +31,7 @@ SNAPSHOT
 
 CHECK BEFORE USING
   - S&P fut. Cross-check sp500_spy_es (sp500, data of 13 Nov) WARN: gap 7.0bp, limit 5bp
+  - WTI. A data check failed on this value; see Data health.
 
 Charts, sources and Data health are on the Desk Brief dashboard.
 

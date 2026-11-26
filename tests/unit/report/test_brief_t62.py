@@ -19,7 +19,7 @@ import pytest
 from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, tick
 from deskbrief.calendars import is_business_day
 from deskbrief.query import ChangeRow, ValueRow
-from deskbrief.report.model import BriefModel, Row, _caveats
+from deskbrief.report.model import NO_DAILY_BASIS_NOTE, BriefModel, Row, _caveats
 
 CYCLE = (1, 2, 3, 4, 5)
 START = date(2026, 9, 1)
@@ -327,6 +327,41 @@ def test_related_pair_on_different_windows_compares_daily_closes(tmp_path: Path)
     assert "GLD +3.0%" in c.text
 
 
+def _energy_over_thanksgiving(brent_thu: bool) -> list[dict[str, Any]]:
+    """Brent and WTI to Wed 25 Nov, then a bar on Thanksgiving (an NYSE holiday the energy
+    markets trade in this fixture) and Friday's, then Monday quotes hours apart."""
+    wed, thu, fri, mon = (date(2026, 11, d) for d in (25, 26, 27, 30))
+    out: list[dict[str, Any]] = []
+    for iid, base, k, at, has_thu in (("BRENT", 75.0, 1.03, "06:58", brent_thu),
+                                      ("WTI", 70.0, 1.002, "03:00", True)):  # fmt: skip
+        rows = _history(iid, base, 0.002, wed, unit="USD", **YH)
+        v = rows[-1]["value"]
+        if has_thu:
+            rows.append(daily(iid, thu, v, unit="USD", **YH))
+        rows.append(daily(iid, fri, round(v * k, 6), unit="USD", **YH))
+        rows.append(tick(iid, et(mon, at), v * k, unit="USD"))
+        out += rows
+    return out
+
+
+def test_related_pair_over_a_bar_on_an_nyse_holiday_is_still_compared(tmp_path: Path) -> None:
+    # PR #102 review round 2 N6: both legs store a Thanksgiving bar; Thursday to Friday is one
+    # session for both, so the caveat is not dropped for want of the NYSE's Wednesday
+    mon = date(2026, 11, 30)
+    w = world(tmp_path, _energy_over_thanksgiving(brent_thu=True))
+    m = BriefModel.from_store(w.connect(), w.config, mon, et(mon, "07:00"))
+    c = next(c for c in m.caveats if c.kind == "pair")
+    assert "daily closes Thu 26 Nov to Fri 27 Nov" in c.text
+
+
+def test_related_pair_skips_a_window_one_leg_traded_inside(tmp_path: Path) -> None:
+    # only WTI has the Thanksgiving bar: Wed to Fri is two sessions for WTI, so no caveat
+    mon = date(2026, 11, 30)
+    w = world(tmp_path, _energy_over_thanksgiving(brent_thu=False))
+    m = BriefModel.from_store(w.connect(), w.config, mon, et(mon, "07:00"))
+    assert [c for c in m.caveats if c.kind == "pair"] == []
+
+
 def test_related_pair_with_an_unranked_leg_is_skipped(tmp_path: Path) -> None:
     gold = price("GOLD_F", 12, base=2000.0, at="06:55")
     gld = _history("GLD", 185.0, 0.002, FRI, unit="USD", **YH)
@@ -388,8 +423,12 @@ def test_an_fx_move_has_no_sigma_from_another_basis(tmp_path: Path) -> None:
     assert r.change is not None
     assert r.change.rankable
     assert r.sigma is None  # the ECB fix's history is another basis than the NY close
-    assert r.sigma_note is not None
-    assert "intraday quote" in r.sigma_note
+    assert r.sigma_note == NO_DAILY_BASIS_NOTE
+    # PR #102 review round 2: the email says why too, in the snapshot and the known limits
+    m = build(world(tmp_path / "again", rows))
+    snap = next(x for g in m.snapshot for x in g.rows if x.instrument_id == "EURUSD")
+    assert snap.meta.endswith(NO_DAILY_BASIS_NOTE)
+    assert any(k.kind == "fx_unranked" and "EURUSD" in k.text for k in m.known_limits)
 
 
 def test_the_pair_fallback_uses_only_the_latest_session(tmp_path: Path) -> None:

@@ -147,8 +147,12 @@ def test_check_marker_on_the_strip_and_the_mover_row(run_home: Run) -> None:
 def test_brief_pane_shows_the_read_rules_checks_and_today(run_home: Run) -> None:
     text = page(run_home("hosted", rows=desk_rows()))
     pane = text.split('<div class="db-brief">', 1)[1]
-    # anchored to the brief (none archived: the 06:15 schedule), not to the 07:00 render
-    assert '<div class="db-label">The brief<span>Mon 06:15 ET · new since Fri 06:15</span>' in pane
+    # the read is recomputed at the 07:00 render, so it is labelled live; none is archived, so
+    # no brief time is claimed; "new since" follows the 06:15 schedule, not the reader's clock
+    assert (
+        '<div class="db-label">Live read<span>Mon 07:00 ET · no brief archived yet · '
+        "new since Fri 06:15</span>"
+    ) in pane
     assert 'class="db-read"><span class="db-regime' in pane
     assert '<div class="db-label">Why “' in pane
     assert '<div class="db-label">Check before using<span>1</span></div>' in pane
@@ -275,6 +279,47 @@ def test_hero_shows_sigma_or_why_there_is_none(tmp_path: Path) -> None:
     ]
     three = _row(tmp_path / "b", rows, "UST_3M")
     assert "another series would measure another basis" in panels.chart_header(three, MON_0700)
+
+
+def test_an_fx_pair_says_why_it_is_not_ranked_on_the_strip_and_watchlist(tmp_path: Path) -> None:
+    # PR #102 review round 2: the reason is not only in the hero
+    from app.components import data, panels
+
+    from deskbrief.report.model import NO_DAILY_BASIS_NOTE
+
+    td = {"source": "twelvedata", "dataset": "fx_quote", "unit": "fx_rate"}
+    w = World(tmp_path)
+    w.observations([tick("EURUSD", et(FRI, "16:58"), 1.0800, **td),
+                    tick("EURUSD", et(MON, "06:58"), 1.0854, **td)])  # fmt: skip
+    model = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    r = next(r for r in model.rows() if r.instrument_id == "EURUSD")
+    assert r.sigma_note == NO_DAILY_BASIS_NOTE
+    row = panels.wl_row(r, MON_0700, "")
+    assert row.count(NO_DAILY_BASIS_NOTE) == 2  # the tooltip and the screen-reader text
+    ov = data.overview(data.Snapshot(model, {}), "local", frozenset())
+    _, items = panels.strip_items(ov)
+    assert NO_DAILY_BASIS_NOTE in dict(items)["EURUSD"]
+    assert any("EURUSD" in k.text and k.kind == "fx_unranked" for k in ov.known_limits)
+
+
+def test_a_proxy_kept_out_of_the_ranking_says_why_beside_its_sigma(tmp_path: Path) -> None:
+    from app.components import panels
+
+    alp = {"source": "alpaca", "dataset": "iex_latest", "tier": 1}
+    rows = [
+        *price("ES_F", -8, 6000.0, unit="index_pts"),
+        *price("SPY", -8, 580.0, **alp),
+    ]
+    w = World(tmp_path)
+    w.observations(rows)
+    model = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    assert [m.instrument_id for m in model.movers] == ["ES_F"]
+    spy = next(r for r in model.rows() if r.instrument_id == "SPY")
+    assert spy.sigma is not None
+    assert spy.sigma_note == "not ranked: a proxy; its underlying (S&P fut) has a value"
+    assert "not ranked: a proxy; its underlying (S&amp;P fut) has a value" in panels.chart_header(
+        spy, MON_0700
+    )
 
 
 @pytest.mark.parametrize("mode", ["hosted", "local"])

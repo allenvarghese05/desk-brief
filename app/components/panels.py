@@ -300,7 +300,7 @@ def strip_items(ov: Overview, sel: str = "") -> tuple[str, list[Item]]:
                 row.instrument_id,
                 f'<a class="{cls}" data-db-id="{escape(row.instrument_id)}">'
                 f'<span class="db-sx-name">{escape(label)}'
-                f'<span class="db-sr"> · {escape(row.name)}</span></span>{body}</a>',
+                f'<span class="db-sr"> · {escape(row.name)}{_why_sr(row)}</span></span>{body}</a>',
             )
         )
     lead = f"{common} close" if _is_weekday(common) else common
@@ -389,6 +389,14 @@ def search(sections: Iterable[Section], query: str) -> list[Section]:
     return out
 
 
+def _why_sr(row: Row) -> str:
+    """Why a row shows no sigma or is kept out of the ranking (``Row.sigma_note``: an FX pair
+    has no daily history of its own basis; a proxy's underlying is ranked), for the
+    screen-reader text of a strip item (PR #102 review round 2)."""
+    note = getattr(row, "sigma_note", None)  # a stand-in row in a test may have none
+    return f" ({escape(note)})" if note else ""
+
+
 def _row_tip(row: Row, now: datetime) -> str:
     """The hover content every watchlist row has (P-023): full name, field, tier, source and
     as-of. A CSS tooltip (``.db-wl-tip``), shown on hover and on keyboard focus of the row's
@@ -402,6 +410,9 @@ def _row_tip(row: Row, now: datetime) -> str:
             f'{TIER_NAME[p.tier]} · <span class="db-src">{escape(p.source)}</span> · '
             f'<span class="db-asof">{escape(p.hover or p.as_of)}</span>'
         )
+        note = getattr(row, "sigma_note", None)
+        if note:  # an FX pair is never ranked; a proxy's underlying is (round 2)
+            facts += f" · {escape(note)}"
     return (
         f'<span class="db-tip db-wl-tip" role="tooltip" aria-hidden="true">'
         f'<b>{escape(row.name)}</b><span class="db-wl-tip-l">{facts}</span></span>'
@@ -424,7 +435,9 @@ def wl_row(
     drawn (P-023: no sparklines in lists)."""
     del spark
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy and not row.available else ""
-    hover = "; ".join((row.label, *row.qualifiers))
+    note = getattr(row, "sigma_note", None)
+    why = (note,) if note else ()
+    hover = "; ".join((row.label, *row.qualifiers, *why))
     cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
     cls += " db-wl-mover" if mover else ""
     mark = check_mark() if check else ""

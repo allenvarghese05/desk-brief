@@ -20,6 +20,7 @@ way out as a second guard.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -61,11 +62,11 @@ from deskbrief.report.model import (
 )
 from deskbrief.report.note import stored_note
 from deskbrief.store import duck
-from deskbrief.store.backend import StorageError
+from deskbrief.store.backend import REPORTS_PREFIX, StorageError
 from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
-from deskbrief.timeutil import et_date, et_to_utc, utc_now
+from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et, utc_now
 
 _log = logging.getLogger(__name__)
 
@@ -357,6 +358,9 @@ class Snapshot:
     note: Note | None = None
     #: the brief the page is anchored to (:func:`brief_time_of`)
     brief_time: datetime | None = None
+    #: the latest brief actually archived (its report time), today's or up to
+    #: ``ARCHIVE_LOOKBACK_DAYS`` back; None when none is found. The pane heading names it.
+    archived: datetime | None = None
 
 
 def build_snapshot(
@@ -380,7 +384,11 @@ def build_snapshot(
     says "No checks yet".
     """
     note = _stored_note(config, env, et_date(now))
-    brief_time = brief_time_of(note, now)
+    if note.written_at is not None and et_date(note.written_at) == et_date(now):
+        archived: datetime | None = note.written_at  # today's model.json, already read
+    else:
+        archived = _archived_brief_time(config, env, now)
+    brief_time = brief_time_of(archived, now)
     with shared_connection(config, env) as conn:
         latest = latest_check_run(conn, now)
         model = BriefModel.from_store(
@@ -403,20 +411,53 @@ def build_snapshot(
         (latest.target_date, latest.started_at) if latest is not None else None,
         note,
         brief_time,
+        archived,
     )
 
 
-def brief_time_of(note: Note | None, now: datetime) -> datetime:
-    """The brief the page is anchored to (PR #102 review): the time of today's archived brief,
-    else today's scheduled fire time (``query.BRIEF_CLOCK_ET``). "New since the previous brief"
-    and the ranking then match that brief at any hour, never the reader's clock."""
-    if (
-        note is not None
-        and note.written_at is not None
-        and et_date(note.written_at) == et_date(now)
-    ):
-        return note.written_at
-    return et_to_utc(et_date(now), BRIEF_CLOCK_ET)
+def brief_time_of(archived: datetime | None, now: datetime) -> datetime:
+    """The brief the page is anchored to (PR #102 review): today's archived brief time; before
+    today's brief has run, or on a day with none, today at the clock time of the latest
+    archived brief (so "new since" is since that brief's time); with no archive, today's
+    scheduled fire time (``query.BRIEF_CLOCK_ET``). "New since the previous brief" and the
+    ranking then match a brief at any hour, never the reader's clock."""
+    if archived is None:
+        return et_to_utc(et_date(now), BRIEF_CLOCK_ET)
+    if et_date(archived) == et_date(now):
+        return archived
+    return et_to_utc(et_date(now), f"{to_et(archived):%H:%M}")
+
+
+#: how many days back the dashboard looks for the latest archived brief (a long weekend plus a
+#: holiday); the pane heading names that brief, never a scheduled time that did not run
+ARCHIVE_LOOKBACK_DAYS = 5
+
+
+def _archived_brief_time(config: Config, env: Mapping[str, str], now: datetime) -> datetime | None:
+    """The report time of the newest brief archived on or before ``now`` (its ``model.json``),
+    searching today and up to ``ARCHIVE_LOOKBACK_DAYS`` days back. Never raises."""
+    try:
+        store = _store(config, env)
+        for back in range(ARCHIVE_LOOKBACK_DAYS + 1):
+            day = et_date(now) - timedelta(days=back)
+            prefix = f"{REPORTS_PREFIX}/date={day.isoformat()}/"
+            versions = [
+                (int(m[1]), key)
+                for key in store.list(prefix)
+                if (m := re.match(r"v(\d+)/model\.json$", key[len(prefix) :]))
+            ]
+            if not versions:
+                continue
+            doc = json.loads(store.get_bytes(max(versions)[1]))
+            written = doc.get("report_time") if isinstance(doc, dict) else None
+            if not isinstance(written, str):
+                continue
+            at = ensure_utc(datetime.fromisoformat(written))
+            if at <= ensure_utc(now):
+                return at
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard archived brief unreadable: %s", type(exc).__name__)
+    return None
 
 
 #: Today reads the events (and their fetch log) stored in the last this many days: every run
@@ -675,6 +716,7 @@ class Overview:
     previous_brief: datetime | None = None
     note: Note | None = None  # T66: the stored note (or why there is none)
     brief_time: datetime | None = None  # the brief "new since" and the ranking follow
+    archived: datetime | None = None  # the latest brief actually archived (pane heading)
     today: tuple[Event, ...] = ()  # T65: today's scheduled releases and auctions
 
 
@@ -728,5 +770,6 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         previous_brief=model.previous_brief,
         note=snap.note,
         brief_time=snap.brief_time,
+        archived=snap.archived,
         today=model.today,
     )

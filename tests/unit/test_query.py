@@ -907,8 +907,31 @@ def test_ust_3m_quote_ranks_against_yahoos_own_previous_close(tmp_path: Path) ->
         "history",
         et(FRI20),
     )
+    assert y.basis == "previous Yahoo close"
     assert y.change == pytest.approx(7.0)
     assert y.rankable
+
+
+def test_ust_3m_own_close_with_a_missing_yahoo_close_is_not_ranked(tmp_path: Path) -> None:
+    # PR #102 review round 2 N1: the quote gives way to Monday's own Yahoo close, which stays a
+    # quoted yield (never the official path): Friday's Yahoo close is missing, so Monday against
+    # Thursday spans two sessions and is never ranked as a one-day move
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_3M", FRI20, 3.80, **_TSY_3M),
+            daily("UST_3M", MON23, 3.81, **_TSY_3M),
+            daily("UST_3M", THU19, 3.55, unit="pct", **YH_HIST),
+            daily("UST_3M", MON23, 3.62, unit="pct", **YH_HIST),
+            tick("UST_3M", et(MON23, "14:59"), 3.61, unit="pct"),
+        ]
+    )
+    y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
+    assert (y.last.source, y.last.dataset, y.last.as_of) == ("yahoo", "history", et(MON23))
+    assert (y.status, y.basis) == ("ok", "previous Yahoo close")
+    assert y.change == pytest.approx(7.0)
+    assert y.note == "baseline close dated 19 Nov, not the previous session (20 Nov)"
+    assert (y.rankable, y.unranked_reason) == (False, "spans more than one session")
 
 
 def test_ust_3m_quote_against_an_older_own_close_is_not_ranked(tmp_path: Path) -> None:

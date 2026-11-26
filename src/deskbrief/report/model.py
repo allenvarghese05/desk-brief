@@ -30,18 +30,21 @@ import json
 import types
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any, Self, Union, get_args, get_origin, get_type_hints
+from zoneinfo import ZoneInfo
 
 import duckdb
 import numpy as np
 
-from deskbrief.calendars import prev_business_day
+from deskbrief.calendars import is_business_day, prev_business_day, session_bounds_utc
 from deskbrief.checks.anomaly import MIN_MOVES, daily_moves
 from deskbrief.config import BriefSettings, Config, Instrument, RelatedPair, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
     CHANGE_DECIMALS,
+    FX_CLOSE_HHMM,
+    HOME_EXCHANGES,
     OFFICIAL_INTERVALS,
     ChangeRow,
     CheckItem,
@@ -200,7 +203,8 @@ class HealthBlock:
 
 @dataclass(frozen=True)
 class KnownLimit:
-    kind: str  # proxy, iex, tiers, fallback, unavailable, dq_missing, dq_*, crosscheck_*, source
+    # proxy, iex, tiers, fallback, fx_unranked, unavailable, dq_missing, dq_*, crosscheck_*, source
+    kind: str
     text: str
 
 
@@ -429,6 +433,7 @@ class BriefModel:
         scores = _scores(config, list(changes.values()), by_feed, hidden)
         for iid, sc in scores.items():
             rows[iid] = replace(rows[iid], sigma=sc.sigma, sigma_note=sc.note)
+        rows = _proxy_notes(config, rows)
         spread = _spread_row(duck, config, report_time)
         if spread:  # derived: as bad as its worst leg
             legs = [flags.get(i, "none") for i in ("UST_10Y", "UST_2Y")]
@@ -469,7 +474,7 @@ class BriefModel:
             caveats=caveats,
             previous_brief=previous_brief_time(report_date, anchor),
             subject=_subject(read, report_time),
-            snapshot=_snapshot(config, sections, caveats, previous_brief_time(report_date, anchor)),
+            snapshot=_snapshot(config, sections, caveats, report_time),
         )
 
     # -- serialisation ------------------------------------------------------
@@ -779,6 +784,11 @@ def _health(s: HealthSummary) -> HealthBlock:
 # ---------------------------------------------------------------------------
 
 
+#: why a move measured against an intraday baseline (an FX pair's New York 17:00 quote) has no
+#: sigma, so is never ranked: every surface that shows the pair says it (PR #102 review round 2)
+NO_DAILY_BASIS_NOTE = "no sigma: no daily history of its own basis"
+
+
 @dataclass(frozen=True)
 class _Score:
     sigma: float | None
@@ -802,8 +812,8 @@ def _sigma_history(
     assert ch.previous is not None
     prev = ch.previous
     name = f"{source_name(prev.source)} {prev.dataset}"
-    if prev.interval != "1d":
-        return (), f"no sigma: its baseline ({name}, an intraday quote) has no daily history"
+    if prev.interval != "1d":  # an FX pair's New York 17:00 quote (PR #102 review round 2)
+        return (), NO_DAILY_BASIS_NOTE
     own = tuple(r for r in by_feed.get(series_key(prev), ()) if r.tier not in hidden)
     if len(own) > MIN_MOVES:
         return own, None
@@ -870,9 +880,7 @@ def _movers(config: Config, rows: dict[str, Row], scores: dict[str, _Score]) -> 
         row = rows.get(iid)
         if sc.sigma is None or sc.sigma < config.checks.anomaly.z_warn or row is None:
             continue
-        if row.is_proxy and any(
-            (u := rows.get(x)) is not None and u.available for x in under.get(iid, ())
-        ):
+        if _ranked_instead(row, rows, under) is not None:
             continue
         ch = row.change
         assert ch is not None
@@ -905,6 +913,35 @@ def _movers(config: Config, rows: dict[str, Row], scores: dict[str, _Score]) -> 
     return tuple(
         sorted(out, key=lambda m: (-(scores[m.instrument_id].sigma or 0.0), m.instrument_id))
     )
+
+
+def _ranked_instead(
+    row: Row, rows: Mapping[str, Row], under: Mapping[str, tuple[str, ...]]
+) -> str | None:
+    """The underlying market ranked instead of ``row`` when ``row`` is a proxy whose underlying
+    has a value (one market is never ranked twice); None otherwise."""
+    if not row.is_proxy:
+        return None
+    return next(
+        (x for x in under.get(row.instrument_id, ()) if (u := rows.get(x)) and u.available),
+        None,
+    )
+
+
+def _proxy_notes(config: Config, rows: dict[str, Row]) -> dict[str, Row]:
+    """A proxy with a sigma that is kept out of the ranking says why wherever its sigma shows
+    (the dashboard hero): "not ranked: a proxy; its underlying (S&P fut) has a value"."""
+    under = _underlying(config)
+    out = dict(rows)
+    for iid, r in rows.items():
+        if r.sigma is None:
+            continue
+        instead = _ranked_instead(r, rows, under)
+        if instead is not None:
+            out[iid] = replace(
+                r, sigma_note=f"not ranked: a proxy; its underlying ({_short(instead)}) has a value"
+            )
+    return out
 
 
 def _notable(movers: Sequence[Mover], summary: HealthSummary) -> tuple[Notable, ...]:
@@ -1023,7 +1060,12 @@ def _close_window(
     # feed never turns an old window into today's caveat (PR #102 review)
     if d1 != et_date(a.previous.as_of) or d1 != et_date(b.previous.as_of):
         return None
-    if d0 != prev_business_day("XNYS", d1):  # a missing day would stretch the window
+    # one session: d0 is the NYSE session before d1 or later (a bar both markets have on an
+    # NYSE holiday, such as Thanksgiving, counts: their own calendars traded it), and neither
+    # leg has a close between them that the other lacks (PR #102 review round 2)
+    if d0 < prev_business_day("XNYS", d1):  # a missing day would stretch the window
+        return None
+    if any(d0 < d < d1 for d in sa.keys() | sb.keys()):
         return None
     return (sa[d1] / sa[d0] - 1) * 100, (sb[d1] / sb[d0] - 1) * 100, d0, d1
 
@@ -1089,6 +1131,12 @@ def _caveats(
         if hit:
             out.append(Caveat("crosscheck", ", ".join(_short(x) for x in hit),
                               _crosscheck_text(i), tuple(hit)))  # fmt: skip
+    # a failed data check on any market the email or the strip shows (a mover or a snapshot
+    # row): one item, so every "check" marker has its line here (PR #102 review round 2)
+    for iid in _shown_ids(config, rows, ranked):
+        if rows[iid].dq_flag == "fail":
+            out.append(Caveat("dq", _short(iid), "A data check failed on this value; see "
+                              "Data health.", (iid,)))  # fmt: skip
     for m in movers:
         ch = rows[m.instrument_id].change
         if ch is not None and ch.note:
@@ -1099,6 +1147,24 @@ def _caveats(
         if c is not None:
             out.append(c)
     return tuple(out)
+
+
+def _shown_ids(config: Config, rows: dict[str, Row], ranked: set[str]) -> list[str]:
+    """Markets a reader sees: the movers, then every row with a value except a proxy whose
+    underlying has one (the snapshot shows the underlying instead), in row order."""
+    under = _underlying(config)
+    return [
+        iid
+        for iid, r in rows.items()
+        if iid in ranked
+        or (
+            r.available
+            and not (
+                r.is_proxy
+                and any((u := rows.get(x)) is not None and u.available for x in under.get(iid, ()))
+            )
+        )
+    ]
 
 
 def _ref_label(i: CheckItem) -> str | None:
@@ -1171,10 +1237,38 @@ def _underlying(config: Config) -> dict[str, tuple[str, ...]]:
     return {k: tuple(dict.fromkeys(v)) for k, v in out.items()}
 
 
-def _snap_meta(row: Row, previous_brief: datetime | None = None) -> str:
+def _latest_close(row: Row, at: datetime) -> datetime | None:
+    """The latest close of ``row``'s own market at or before ``at`` (aware UTC): a foreign
+    index's exchange close, an FX pair's New York 17:00, else the NYSE close (early closes
+    honoured). None when none is found within two weeks."""
+    at = ensure_utc(at)
+    home = HOME_EXCHANGES.get(row.instrument_id)
+    is_fx = row.change is not None and row.change.last.kind == "fx"
+    d = to_et(at).date() if home is None else at.astimezone(ZoneInfo(home.tz)).date()
+    for _ in range(14):
+        close: datetime | None
+        if home is not None:
+            close = (
+                datetime.combine(d, time.fromisoformat(home.close_hhmm), ZoneInfo(home.tz))
+                if is_business_day(home.calendar, d)
+                else None
+            )
+        elif is_fx:
+            close = et_to_utc(d, FX_CLOSE_HHMM) if d.weekday() < 5 else None
+        else:
+            bounds = session_bounds_utc(d)
+            close = bounds[1] if bounds is not None else None
+        if close is not None and ensure_utc(close) <= at:
+            return ensure_utc(close)
+        d -= timedelta(days=1)
+    return None
+
+
+def _snap_meta(row: Row, report_time: datetime | None = None) -> str:
     """What the reader needs beside the figure: its tier; for an official, weekly or monthly
-    value, its date (P-024); for a quote older than the previous brief, its time; and the
-    caveat words that belong to the value (IEX, fallback)."""
+    value, its date (P-024); for a quote older than its own market's latest close (a stalled
+    feed, Friday afternoon's quote on Monday), its day and time (PR #102 review round 2); and
+    the caveat words that belong to the value (IEX, fallback)."""
     ch = row.change
     if row.instrument_id == SPREAD_ID:
         return f"derived, {row.as_of_text}"
@@ -1187,9 +1281,10 @@ def _snap_meta(row: Row, previous_brief: datetime | None = None) -> str:
         et = to_et(last.as_of)
         return f"monthly, {et:%b %Y}"
     parts = ["proxy"] if row.is_proxy else []
+    close = _latest_close(row, report_time) if report_time is not None else None
     if last.interval == "1d":
         parts.append(f"{row.tier_name}, {to_et(last.as_of):%a}")
-    elif previous_brief is not None and ensure_utc(last.as_of) < ensure_utc(previous_brief):
+    elif close is not None and ensure_utc(last.as_of) < close:
         et = to_et(last.as_of)
         parts.append(f"{row.tier_name}, {et:%a} {et:%H:%M}")
     else:
@@ -1198,6 +1293,8 @@ def _snap_meta(row: Row, previous_brief: datetime | None = None) -> str:
         parts.append("IEX")
     if any(q.startswith("fallback") for q in row.qualifiers):
         parts.append("fallback")
+    if row.sigma_note == NO_DAILY_BASIS_NOTE:  # an FX pair is never ranked: say why here too
+        parts.append(row.sigma_note)
     return ", ".join(parts)
 
 
@@ -1205,7 +1302,7 @@ def _snapshot(
     config: Config,
     sections: Sequence[Section],
     caveats: Sequence[Caveat],
-    previous_brief: datetime | None = None,
+    report_time: datetime | None = None,
 ) -> tuple[SnapGroup, ...]:
     """The compact snapshot: one row per market, the underlying instead of its proxy when the
     underlying has a value, rows with no trade since their last close and rows with no value
@@ -1236,9 +1333,10 @@ def _snapshot(
                     value_text=r.value_text,
                     change_text=r.change_text if has else "",
                     direction=_direction(r.change_value) if r.change_value is not None else "none",
-                    meta=_snap_meta(r, previous_brief),
-                    # named in Check before using, or a failed data check: never hidden
-                    check=iid in flagged or r.dq_flag == "fail",
+                    meta=_snap_meta(r, report_time),
+                    # named in Check before using (a failed data check has its own item):
+                    # the same set as the movers' marker
+                    check=iid in flagged,
                 )
             )
         if rows or quiet or missing:
@@ -1287,6 +1385,15 @@ def _known_limits(
                 "weekly",
                 "Weekly series get no anomaly check (it reads daily values only): "
                 + ", ".join(weekly),
+            )
+        )
+    unranked = [r.instrument_id for r in rows.values() if r.sigma_note == NO_DAILY_BASIS_NOTE]
+    if unranked:
+        out.append(
+            KnownLimit(
+                "fx_unranked",
+                "Not ranked, no sigma (no daily history of their own basis, the New York "
+                "17:00 quote, yet): " + ", ".join(unranked),
             )
         )
     missing = [r.instrument_id for r in rows.values() if not r.available]

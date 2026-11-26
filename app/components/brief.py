@@ -130,14 +130,20 @@ def pane(
     previous_brief: datetime | None,
     note: Note | None = None,
     events: Sequence[EventLike] | None = None,
+    *,
+    now: datetime | None = None,
+    archived: datetime | None = None,
 ) -> str:
     """The whole brief pane as one block of markup. ``as_of`` is the brief the page follows
-    (``data.brief_time_of``): the archived brief's time, else the scheduled one."""
-    et = to_et(as_of)
+    (``data.brief_time_of``). With ``now`` (the page's time), the heading names what the reader
+    sees: the read, rules and checks are recomputed at ``now``, so after the brief they are
+    a "Live read" beside the brief that actually ran (``archived``), never under that brief's
+    own heading (PR #102 review round 2)."""
     since = when(previous_brief)
-    aside = f"{et:%a} {et:%H:%M} ET" + (f" · new since {since}" if since else "")
+    tail = f" · new since {since}" if since else ""
+    title, aside = _heading(as_of, now, archived)
     main = (
-        f'<div class="db-label">The brief<span>{escape(aside)}</span></div>'
+        f'<div class="db-label">{escape(title)}<span>{escape(aside + tail)}</span></div>'
         f"{_read_line(read)}{_note(note)}"
     )
     side = _why(read, since) + _caveats(caveats) + _today(events)
@@ -146,6 +152,25 @@ def pane(
         f'<div class="db-brief-main">{main}</div>'
         f'<div class="db-brief-side">{side}</div></div>'
     )
+
+
+def _heading(as_of: datetime, now: datetime | None, archived: datetime | None) -> tuple[str, str]:
+    """("The brief", "Mon 06:15 ET") when the page shows the brief's own minute; else
+    ("Live read", "15:02 ET · brief at 06:15"), naming the latest archived brief ("last brief
+    Fri 06:15" on another day) or saying none is archived."""
+    if now is None:  # a caller that shows the brief itself
+        et = to_et(as_of)
+        return "The brief", f"{et:%a} {et:%H:%M} ET"
+    page = to_et(now)
+    if archived is not None and abs((now - archived).total_seconds()) < 60:
+        a = to_et(archived)
+        return "The brief", f"{a:%a} {a:%H:%M} ET"
+    if archived is None:
+        return "Live read", f"{page:%a} {page:%H:%M} ET · no brief archived yet"
+    a = to_et(archived)
+    if a.date() == page.date():
+        return "Live read", f"{page:%H:%M} ET · brief at {a:%H:%M}"
+    return "Live read", f"{page:%a} {page:%H:%M} ET · last brief {a:%a} {a:%H:%M}"
 
 
 def _css() -> str:

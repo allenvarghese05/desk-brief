@@ -60,6 +60,87 @@ def test_on_a_saturday_fridays_close_supersedes_fridays_afternoon_quote(tmp_path
     assert ch.basis == "Thu close"
 
 
+def test_on_a_saturday_fridays_close_is_new_after_a_friday_premarket_print(tmp_path: Path) -> None:
+    # PR #102 review round 2 N2: Friday's brief showed a Friday 05:00 print; Friday's close,
+    # stored after that brief, is still new on Saturday and is ranked close to close
+    sat = date(2026, 11, 14)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("ES_F", THU, 5950.0, unit="index_pts", **YH),
+            tick("ES_F", et(FRI, "05:00"), 5955.0, unit="index_pts"),  # in Friday's brief
+            daily("ES_F", FRI, 6000.0, unit="index_pts", **YH),
+            tick("ES_F", et(FRI, "15:00"), 6030.0, unit="index_pts"),
+        ]
+    )
+    ch = change(w, "ES_F", sat, "10:00")
+    assert (ch.last.interval, ch.last.value) == ("1d", 6000.0)
+    assert ch.previous is not None
+    assert ch.previous.value == 5950.0
+    assert (ch.rankable, ch.unranked_reason) == (True, None)
+
+
+def test_on_an_xnys_holiday_the_previous_close_is_new_after_a_premarket_print(
+    tmp_path: Path,
+) -> None:
+    # PR #102 review round 2 N2: Thanksgiving (XNYS closed, the morning cron still runs).
+    # Wednesday's brief showed a Wednesday pre-market print; Wednesday's close, stored on
+    # Thursday morning, supersedes the Wednesday afternoon quote and is new
+    tue, wed, thu = date(2026, 11, 24), date(2026, 11, 25), date(2026, 11, 26)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("ES_F", tue, 5950.0, unit="index_pts", **YH),
+            tick("ES_F", et(wed, "05:00"), 5955.0, unit="index_pts"),  # in Wednesday's brief
+            tick("ES_F", et(wed, "15:00"), 6030.0, unit="index_pts"),
+            daily("ES_F", wed, 6000.0, unit="index_pts", ingested_at=et(thu, "05:00"), **YH),
+        ]
+    )
+    ch = change(w, "ES_F", thu, "06:15")
+    assert (ch.last.interval, ch.last.value) == ("1d", 6000.0)
+    assert ch.previous is not None
+    assert ch.previous.value == 5950.0
+    assert (ch.rankable, ch.unranked_reason) == (True, None)
+
+
+def test_a_close_the_previous_brief_already_had_is_not_new_again(tmp_path: Path) -> None:
+    # the other side of N2: Monday's close was stored before Tuesday's brief (which showed it),
+    # so with nothing newer on Wednesday it is not ranked a second time
+    wed = date(2026, 11, 18)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_10Y", FRI, 4.05, unit="pct", **YH),
+            tick("UST_10Y", et(MON, "14:50"), 4.14, unit="pct"),
+            daily("UST_10Y", MON, 4.15, unit="pct", ingested_at=et(TUE, "05:00"), **YH),
+        ]
+    )
+    assert change(w, "UST_10Y", TUE, "06:15").rankable
+    ch = change(w, "UST_10Y", wed, "06:15")
+    assert not ch.rankable
+
+
+def test_a_quoted_yields_close_after_its_premarket_print_ranks_the_next_morning(
+    tmp_path: Path,
+) -> None:
+    # N2 on a weekday with N1: Monday's 06:10 ^TNX print was in Monday's brief; Monday's 14:50
+    # quote gives way to Monday's Yahoo close, which is new on Tuesday, against Friday's close
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_10Y", FRI, 4.05, unit="pct", **YH),
+            tick("UST_10Y", et(MON, "06:10"), 4.06, unit="pct"),
+            tick("UST_10Y", et(MON, "14:50"), 4.14, unit="pct"),
+            daily("UST_10Y", MON, 4.15, unit="pct", **YH),
+        ]
+    )
+    ch = change(w, "UST_10Y", TUE, "06:15")
+    assert ch.basis == "previous Yahoo close"
+    assert ch.change is not None
+    assert abs(ch.change - 10.0) < 1e-6
+    assert (ch.rankable, ch.unranked_reason) == (True, None)
+
+
 def test_a_quote_after_its_sessions_close_stays_the_value(tmp_path: Path) -> None:
     w = World(tmp_path)
     w.observations(
@@ -112,18 +193,27 @@ def test_foreign_index_with_daily_bars_only_ranks_against_its_own_previous_sessi
         [
             daily("N225", THU, 38000.0, unit="index_pts", **YH),
             daily("N225", FRI, 38400.0, unit="index_pts", **YH),
-            daily("N225", MON, 38400.0, unit="index_pts", **YH),
-            # Tokyo closed 01:30 ET; the bar was fetched at 02:00 ET
-            daily("N225", TUE, 38016.0, unit="index_pts", ingested_at=et(TUE, "02:00"), **YH),
+            daily("N225", MON, 38400.0, unit="index_pts", ingested_at=et(MON, "10:05"), **YH),
+            # Yahoo's writer keeps a Tokyo bar only once its date is past in Tokyo (~10:00 ET)
+            daily("N225", TUE, 38016.0, unit="index_pts", ingested_at=et(TUE, "10:05"), **YH),
         ]
     )
-    ch = change(w, "N225", TUE)
-    assert ch.basis == "previous Tokyo close"
-    assert ch.last.value == 38016.0  # Tuesday's Tokyo bar is final by 07:00 ET (review)
-    assert ch.previous is not None
-    assert ch.previous.value == 38400.0  # Monday, Tokyo's session before Tuesday
-    assert ch.change == -1.0
-    assert ch.rankable
+    morning = change(w, "N225", TUE)
+    # PR #102 review round 2: Tokyo closed at 01:30 ET but its bar is not stored by 07:00, so
+    # the row shows Monday's session against Friday's and says Tuesday's close is missing
+    assert morning.basis == "previous Tokyo close"
+    assert (morning.last.value, morning.change) == (38400.0, 0.0)
+    assert morning.note == (
+        "Tokyo close of Tue 17 Nov not yet stored; this is the Mon 16 Nov session"
+    )
+    assert morning.rankable  # Monday's brief (06:15) had no Monday bar yet: it is new
+    later = change(w, "N225", TUE, "11:00")
+    assert later.last.value == 38016.0  # stored at 10:05 ET: the bar of the day counts
+    assert later.previous is not None
+    assert later.previous.value == 38400.0  # Monday, Tokyo's session before Tuesday
+    assert later.change == -1.0
+    assert later.note is None
+    assert later.rankable
 
 
 def test_a_european_bar_of_the_day_is_not_final_before_its_close(tmp_path: Path) -> None:
@@ -198,3 +288,23 @@ def test_a_future_with_no_close_of_its_own_says_so(tmp_path: Path) -> None:
 def test_previous_brief_time_is_the_previous_session_at_the_report_clock_time() -> None:
     assert previous_brief_time(MON, et(MON, "07:00")) == et(FRI, "07:00")
     assert previous_brief_time(TUE, et(TUE, "06:20")) == et(MON, "06:20")
+
+
+def test_a_tokyo_bar_the_previous_brief_showed_is_not_scored_again_after_a_holiday(
+    tmp_path: Path,
+) -> None:
+    """Monday 23 Nov 2026 is a Tokyo holiday. If Friday's brief already had Friday's final Tokyo
+    bar (stored before it ran), Monday's brief must not score that session again."""
+    fri, mon = date(2026, 11, 20), date(2026, 11, 23)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("N225", d, 38000.0 + 100 * i, unit="index_pts", ingested_at=et(d, "02:00"), **YH)
+            for i, d in enumerate([date(2026, 11, 18), date(2026, 11, 19), fri])
+        ]
+    )
+    assert change(w, "N225", fri).rankable  # Friday's brief scores Friday's Tokyo session
+    monday = change(w, "N225", mon)
+    assert not monday.rankable
+    assert monday.unranked_reason is not None
+    assert "already in the previous brief" in monday.unranked_reason

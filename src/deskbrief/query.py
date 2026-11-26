@@ -100,6 +100,7 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -483,7 +484,14 @@ def _change(
 
 
 def _et(row: ValueRow) -> date:
-    return et_date(row.as_of)
+    return _et_day(row.as_of)
+
+
+@lru_cache(maxsize=8192)
+def _et_day(as_of: datetime) -> date:
+    """:func:`et_date`, memoised: the change builders ask it of the same history rows many
+    times per render (a cheap win on the dashboard's data path, PR #102 review round 2)."""
+    return et_date(as_of)
 
 
 def overnight_changes(
@@ -514,6 +522,7 @@ def overnight_changes(
     by_inst: dict[str, list[ValueRow]] = {}
     for r in _official(duck, report_time, report_date, exclude_tiers):
         by_inst.setdefault(r.instrument_id, []).append(r)
+    closed_home = _home_closed_ids(report_time, report_date)
     bars = _finished_home_bars(duck, report_time, report_date, exclude_tiers)
     latest = {r.instrument_id: r for r in last_rows}
     for iid, bar in bars.items():
@@ -536,6 +545,12 @@ def overnight_changes(
     shown = {
         r.instrument_id: r for r in _snapshot(duck, since, nyse_prev, exclude_tiers=exclude_tiers)
     }
+    # that brief also showed the foreign bars that were final by its time (as this one does), so
+    # a Tokyo session it already scored is never scored again after a Tokyo holiday
+    for iid, bar in _finished_home_bars(duck, since, nyse_prev, exclude_tiers).items():
+        seen = shown.get(iid)
+        if seen is None or _session_day(seen) <= nyse_prev:
+            shown[iid] = bar
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
@@ -551,8 +566,30 @@ def overnight_changes(
                 ch = _off_session_price_change(last, history)
         else:
             ch = _official_change(last, history)
+        if (
+            home is not None
+            and last.instrument_id in closed_home
+            and _session_day(last) < report_date
+        ):
+            ch = _home_close_missing(ch, home, report_date)
         out.append(_ranked(ch, shown.get(last.instrument_id), since))
     return tuple(out)
+
+
+def _home_close_missing(ch: ChangeRow, home: HomeExchange, report_date: date) -> ChangeRow:
+    """Say that a foreign index's session of ``report_date`` has closed but its close is not
+    stored yet (PR #102 review round 2: Yahoo's writer keeps a Tokyo bar only after Tokyo
+    midnight, about 10:00 ET), so the move shown is the session before, never read as today's."""
+    shown = _session_day(ch.last)
+    text = (
+        f"{_exchange_name(home)} close of {report_date:%a} {report_date.day} {report_date:%b} "
+        f"not yet stored; this is the {shown:%a} {shown.day} {shown:%b} session"
+    )
+    return replace(ch, note=f"{ch.note}; {text}" if ch.note else text)
+
+
+def _exchange_name(home: HomeExchange) -> str:
+    return home.basis.removeprefix("previous ").removesuffix(" close")
 
 
 #: the morning brief's scheduled fire time, ET (``.github/workflows/morning.yml``: the cron that
@@ -599,6 +636,18 @@ def _superseding_close(last: ValueRow, history: list[ValueRow]) -> ValueRow | No
     return max(closes, key=lambda r: (r.as_of, r.ingested_at)) if closes else None
 
 
+def _home_closed_ids(at: datetime, report_date: date) -> list[str]:
+    """Foreign indices whose exchange held a session on ``report_date`` and closed it by ``at``."""
+    at = ensure_utc(at)
+    return [
+        iid
+        for iid, home in HOME_EXCHANGES.items()
+        if is_business_day(home.calendar, report_date)
+        and datetime.combine(report_date, time.fromisoformat(home.close_hhmm), ZoneInfo(home.tz))
+        <= at
+    ]
+
+
 def _finished_home_bars(
     duck: duckdb.DuckDBPyConnection,
     at: datetime,
@@ -606,16 +655,12 @@ def _finished_home_bars(
     exclude_tiers: Collection[int] = (),
 ) -> dict[str, ValueRow]:
     """Foreign indices' daily bars dated ``report_date`` whose exchange has closed by ``at``
-    (Tokyo closes hours before a 07:00 ET brief, so its bar of the day is final then; London's
-    and Frankfurt's are not). The current-day filter leaves every other bar of the day out."""
+    (Tokyo closes hours before a 07:00 ET brief; London's and Frankfurt's do not). The
+    current-day filter leaves every other bar of the day out. Yahoo's writer keeps a Tokyo bar
+    only once its date is past in Tokyo (about 10:00 ET), so before then the morning brief has
+    none and the row says so (:func:`_home_close_missing`)."""
     at = ensure_utc(at)
-    ids = [
-        iid
-        for iid, home in HOME_EXCHANGES.items()
-        if is_business_day(home.calendar, report_date)
-        and datetime.combine(report_date, time.fromisoformat(home.close_hhmm), ZoneInfo(home.tz))
-        <= at
-    ]
+    ids = _home_closed_ids(at, report_date)
     if not ids:
         return {}
     tier_sql, tier_params = _tier_filter(exclude_tiers)
@@ -665,19 +710,36 @@ def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | N
     day, shown_day = _session_day(last), _session_day(shown)
     home = HOME_EXCHANGES.get(last.instrument_id)
     if day == shown_day and home is not None:
-        exchange = home.basis.removeprefix("previous ").removesuffix(" close")
-        return f"{exchange} session of {day.day} {day:%b} already in the previous brief ({when})"
+        session = f"{_exchange_name(home)} session of {day.day} {day:%b}"
+        return f"{session} already in the previous brief ({when})"
     if day > shown_day or (
         day == shown_day
         and last.interval not in OFFICIAL_INTERVALS
         and ensure_utc(last.as_of) > ensure_utc(shown.as_of)
     ):
         return None
+    if day == shown_day and _close_after_shown_print(last, shown, since):
+        return None
     dated = to_et(last.as_of)
     text = f"{dated.day} {dated:%b}"
     if last.interval not in OFFICIAL_INTERVALS:
         text += f" {dated:%H:%M} ET"
     return f"value dated {text}, not new since the previous brief ({when})"
+
+
+def _close_after_shown_print(last: ValueRow, shown: ValueRow, since: datetime) -> bool:
+    """True when ``last`` is its session's daily close, first stored after the previous brief,
+    and that brief showed only an earlier intraday print of the same session (PR #102 review
+    round 2: a Friday pre-market quote in Friday's brief never makes Friday's close old news on
+    Saturday, an XNYS holiday morning, or for a quoted yield the next morning). The close
+    comes after any print taken before it, so it is new and measured close to close."""
+    return (
+        last.interval == "1d"
+        and last.field == "close"
+        and shown.interval not in OFFICIAL_INTERVALS
+        and f"{to_et(shown.as_of):%H:%M}" < US_CLOSE_HHMM
+        and ensure_utc(last.ingested_at) > ensure_utc(since)
+    )
 
 
 def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow:
@@ -848,8 +910,18 @@ def _fx_change(last: ValueRow, quotes: list[ValueRow]) -> ChangeRow:
     return _change(last, None, BASIS_NY_CLOSE, "no_baseline")
 
 
+#: sources of official yields (par curve, FRED); any other source's yield is a quoted yield
+OFFICIAL_YIELD_SOURCES: frozenset[str] = frozenset({"treasury", "fred"})
+
+
+def _quoted_yield(row: ValueRow) -> bool:
+    """A yield from a non-official source (Yahoo ^TNX / ^IRX), quote or its own daily close
+    (PR #102 review round 2: a quote superseded by its Yahoo close stays a quoted yield)."""
+    return family_of(row) == "yield" and row.source not in OFFICIAL_YIELD_SOURCES
+
+
 def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
-    if last.interval not in OFFICIAL_INTERVALS:
+    if last.interval not in OFFICIAL_INTERVALS or _quoted_yield(last):
         # a quoted yield (Yahoo ^IRX) against its own previous close when one is stored: the
         # official par yield measures something else (P-024, T61)
         own = [r for r in history if like_for_like(last, r) and _et(r) < _et(last)]

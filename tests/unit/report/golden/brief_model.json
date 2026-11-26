@@ -1283,7 +1283,16 @@
     "n_ranked": 0,
     "text": "Quiet. Nothing moved more than usual."
   },
-  "caveats": [],
+  "caveats": [
+    {
+      "kind": "dq",
+      "title": "WTI",
+      "text": "A data check failed on this value; see Data health.",
+      "instrument_ids": [
+        "WTI"
+      ]
+    }
+  ],
   "previous_brief": "2026-11-13T12:00:00+00:00",
   "subject": "Quiet · Desk Brief · Mon 16 Nov",
   "snapshot": [

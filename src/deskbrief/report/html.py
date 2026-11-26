@@ -49,9 +49,15 @@ def dashboard_url(env: Mapping[str, str]) -> str | None:
     url = (env.get(DASHBOARD_URL_ENV) or "").strip()
     if not url.startswith("https://") or any(c in url for c in " \"<>'`"):
         return None
-    if any(ord(c) < 32 or ord(c) == 127 for c in url):  # no newline, tab or other control
+    if any(_control(c) for c in url):  # no newline, tab or other control, C0 or C1
         return None
     return url
+
+
+def _control(c: str) -> bool:
+    """A C0 or C1 control, DEL, or a Unicode line or paragraph separator (U+2028, U+2029)."""
+    n = ord(c)
+    return n < 32 or 127 <= n <= 159 or n in (0x2028, 0x2029)
 
 
 def _event_line(e: Event) -> str:
@@ -85,7 +91,7 @@ def _why(read: Read | None) -> str:
 
 
 def _movers_note(m: BriefModel) -> str:
-    windows = sorted({x.n_moves for x in m.movers})
+    windows = sorted({x.n_moves for x in m.movers[:TOP_MOVERS]})  # the movers shown
     if not windows:
         return ""
     if len(windows) == 1:

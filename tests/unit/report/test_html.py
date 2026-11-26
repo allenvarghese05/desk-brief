@@ -186,6 +186,28 @@ def test_a_failed_check_keeps_its_marker_in_the_snapshot(tmp_path: Path) -> None
     m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
     wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
     assert wti.check
+    # PR #102 review round 2: the marker has its own line in Check before using
+    dq = [c for c in m.caveats if c.kind == "dq"]
+    assert [c.instrument_ids for c in dq] == [("WTI",)]
+    assert "A data check failed on this value" in section(render_html(m), "Check before using")
+
+
+def test_a_mover_whose_check_failed_stays_ranked_and_is_marked(tmp_path: Path) -> None:
+    # PR #102 review round 2 N1: one set drives every marker, so the mover, its snapshot row
+    # and Check before using agree; the move still ranks
+    w = World(tmp_path)
+    w.observations([*(r for r in desk_rows() if r["instrument_id"] != "WTI"),
+                    *price("WTI", -8, 70.0)])  # fmt: skip
+    w.dq(MON, [("range", "fail", "stooq", "WTI")])
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    wti = next(x for x in m.movers if x.instrument_id == "WTI")
+    assert wti.check
+    snap = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
+    assert snap.check
+    assert any(c.kind == "dq" and c.instrument_ids == ("WTI",) for c in m.caveats)
+    text = render_text(m)
+    assert "Nothing to check" not in text
+    assert "WTI. A data check failed on this value; see Data health." in text
 
 
 def test_an_old_quote_carries_its_time_in_the_snapshot(tmp_path: Path) -> None:
@@ -196,6 +218,19 @@ def test_an_old_quote_carries_its_time_in_the_snapshot(tmp_path: Path) -> None:
     m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
     wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
     assert wti.meta == "delayed, Thu 18:30"
+
+
+def test_a_quote_older_than_its_markets_latest_close_carries_its_time(tmp_path: Path) -> None:
+    # PR #102 review round 2 N2: Friday 15:00 is after Friday's 07:00 brief but before Friday's
+    # close, so on Monday it is stale and shows its day and time
+    w = World(tmp_path)
+    w.observations([daily("WTI", THU, 72.0, **YH, unit="USD"),
+                    tick("WTI", et(FRI, "15:00"), 71.0, unit="USD"),
+                    tick("BRENT", et(MON, "06:58"), 75.0, unit="USD")])  # fmt: skip
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    snap = {r.instrument_id: r for g in m.snapshot for r in g.rows}
+    assert snap["WTI"].meta == "delayed, Fri 15:00"
+    assert snap["BRENT"].meta == "delayed"  # after Friday's close: current, no time
 
 
 def test_check_before_using_and_the_check_marker(model: BriefModel) -> None:
@@ -219,10 +254,24 @@ def test_footer_is_three_lines_with_the_health_count_and_no_limits_list(
         assert limit.text.replace("&", "&amp;") not in html
 
 
+def test_the_movers_note_counts_only_the_movers_shown(model: BriefModel) -> None:
+    # PR #102 review round 2 N4: a sixth mover (not listed) never widens the window range
+    one = model.movers[0]
+    six = (*(replace(one, n_moves=30) for _ in range(5)), replace(one, n_moves=12))
+    note = report_html._movers_note(replace(model, movers=six))
+    assert "last 30 daily moves" in note
+    assert "12" not in note
+    assert note.endswith(" 1 more on the dashboard.")
+    mixed = (replace(one, n_moves=12), *(replace(one, n_moves=30) for _ in range(4)))
+    assert "(12 to 30 of them)" in report_html._movers_note(replace(model, movers=mixed))
+
+
 def test_dashboard_link_only_for_an_https_url(model: BriefModel) -> None:
     assert dashboard_url({}) is None
     assert dashboard_url({"DESKBRIEF_DASHBOARD_URL": "http://example.test"}) is None
     assert dashboard_url({"DESKBRIEF_DASHBOARD_URL": 'https://x.test/"><b'}) is None
+    for bad in ("\n", "\t", "\x7f", "\x85", "\x9f", "\u2028", "\u2029"):
+        assert dashboard_url({"DESKBRIEF_DASHBOARD_URL": f"https://x.test/a{bad}b"}) is None
     url = dashboard_url({"DESKBRIEF_DASHBOARD_URL": " https://desk.example.test/ "})
     assert url == "https://desk.example.test/"
     html = render_html(model, dashboard=url)
