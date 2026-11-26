@@ -42,6 +42,7 @@ from deskbrief.models import RunContext, Trigger
 from deskbrief.report.excel import write_workbook
 from deskbrief.report.html import dashboard_url, render_html, render_text
 from deskbrief.report.model import BriefModel
+from deskbrief.report.note import with_note
 from deskbrief.store.backend import (
     REPORTS_PREFIX,
     KeyExistsError,
@@ -291,6 +292,8 @@ def report_steps(
                 )
         finally:
             duck.close()
+        # P-024 (T66): the note, written once here and stored in model.json; never raises
+        model = with_note(model, ctx.config, os.environ, ctx.store)
         link = dashboard_url(os.environ)
         html = render_html(model, dashboard=link)
         # P-024 (T63): the subject line is the read, then "Desk Brief" and the date

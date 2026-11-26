@@ -507,7 +507,7 @@ def main() -> None:
     with st.container(key="db-main"):
         brief_col, watch_col, hero_col = st.columns(3, gap="large")
         with brief_col, st.container(key="db-brief"):
-            _html(st, brief.pane(ov.read, ov.caveats, ov.as_of, ov.previous_brief))
+            _html(st, brief.pane(ov.read, ov.caveats, ov.as_of, ov.previous_brief, ov.note))
         with watch_col, st.container(key="db-watch"):
             _watchlist(ov, query, sel, config.checks.anomaly.window_days)
         with hero_col, st.container(key="db-hero"):

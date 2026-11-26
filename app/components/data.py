@@ -43,10 +43,12 @@ from deskbrief.report.model import (
     KnownLimit,
     Mover,
     Notable,
+    Note,
     Read,
     Row,
     Section,
 )
+from deskbrief.report.note import stored_note
 from deskbrief.store import duck
 from deskbrief.store.backend import StorageError
 from deskbrief.store.datasets import current_clean_version
@@ -340,6 +342,8 @@ class Snapshot:
     #: the latest run with checks (T60 bug 5): its target date and start time; None when no
     #: run has recorded a check, the only case the status line says "No checks yet"
     last_run: tuple[date, datetime | None] | None = None
+    #: the note stored with today's archived brief (T66): the dashboard never calls the API
+    note: Note | None = None
 
 
 def build_snapshot(
@@ -380,7 +384,18 @@ def build_snapshot(
             for k, v in history.items()
         },
         (latest.target_date, latest.started_at) if latest is not None else None,
+        _stored_note(config, env, et_date(now)),
     )
+
+
+def _stored_note(config: Config, env: Mapping[str, str], day: date) -> Note:
+    """Today's stored note, or why there is none. Never raises: the page goes on without it."""
+    try:
+        note = stored_note(_store(config, env), day)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard stored note unreadable: %s", type(exc).__name__)
+        return Note(reason="the stored note could not be read")
+    return note if note is not None else Note(reason="no brief has been written today yet")
 
 
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
@@ -550,6 +565,7 @@ class Overview:
     read: Read | None = None
     caveats: tuple[Caveat, ...] = ()
     previous_brief: datetime | None = None
+    note: Note | None = None  # T66: the stored note (or why there is none)
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -600,4 +616,5 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         read=model.read,
         caveats=tuple(c for c in model.caveats if all(i in by_id for i in c.instrument_ids)),
         previous_brief=model.previous_brief,
+        note=snap.note,
     )
