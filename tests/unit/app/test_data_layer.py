@@ -468,30 +468,33 @@ def test_now_before_the_only_run_reads_no_checks(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("iid", "rows", "now", "label"),
     [
-        (  # FX traded on Thanksgiving (an XNYS holiday): since Wednesday's close
-            "EURUSD",
+        (  # ES futures traded on Thanksgiving (an XNYS holiday): since Wednesday's close.
+            # FX and N225 have their own bases since T61 (NY close, Tokyo close: test_query.py)
+            "ES_F",
             [
-                daily("EURUSD", date(2026, 11, 24), 1.00, source="yahoo", dataset="history",
-                      tier=2, unit="fx_rate"),
-                daily("EURUSD", date(2026, 11, 25), 1.05, source="yahoo", dataset="history",
-                      tier=2, unit="fx_rate"),
-                tick("EURUSD", et(date(2026, 11, 26), "06:00"), 1.071, unit="fx_rate"),
+                daily("ES_F", date(2026, 11, 24), 6000.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                daily("ES_F", date(2026, 11, 25), 6100.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                tick("ES_F", et(date(2026, 11, 26), "06:00"), 6161.0, unit="index_pts"),
             ],
             et(date(2026, 11, 26), "07:00"),
             "since Wed close",
         ),
-        (  # N225 closed on Good Friday (an XNYS holiday), seen on Saturday: since Thursday
-            "N225",
+        (  # ES futures traded on MLK Monday (an XNYS holiday): since Friday's close
+            "ES_F",
             [
-                daily("N225", date(2026, 4, 1), 30000.0, unit="index_pts"),
-                daily("N225", date(2026, 4, 2), 31000.0, unit="index_pts"),
-                daily("N225", date(2026, 4, 3), 31620.0, unit="index_pts"),
+                daily("ES_F", date(2026, 1, 15), 6000.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                daily("ES_F", date(2026, 1, 16), 6100.0, source="yahoo", dataset="history",
+                      tier=2, unit="index_pts"),
+                tick("ES_F", et(date(2026, 1, 19), "06:59"), 6161.0, unit="index_pts"),
             ],
-            et(date(2026, 4, 4), "10:00"),
-            "since Thu close",
+            et(date(2026, 1, 19), "07:00"),
+            "since Fri close",
         ),
     ],
-    ids=["thanksgiving_fx", "good_friday_n225"],
+    ids=["thanksgiving_es", "mlk_es"],
 )  # fmt: skip
 def test_holiday_trades_say_since_the_last_session_close(
     tmp_path: Path, iid: str, rows: list[dict[str, Any]], now: Any, label: str
@@ -505,3 +508,68 @@ def test_holiday_trades_say_since_the_last_session_close(
     row = _row(_snapshot(w, now), iid)
     assert row.change.status == "ok"
     assert panels.move_label(row) == label
+
+
+# T61 round 1 (review blocking 1): the dashboard names the same baseline as the email. Values
+# are invented.
+_T61_TUE = date(2026, 11, 24)
+_TSY_YIELD = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
+_YH_YIELD = {"source": "yahoo", "dataset": "history", "tier": 2, "unit": "pct"}
+
+
+@pytest.mark.parametrize(
+    ("iid", "rows", "email", "label", "pill"),
+    [
+        (  # a quoted yield against Yahoo's own previous close
+            "UST_10Y",
+            [
+                daily("UST_10Y", date(2026, 11, 20), 4.10, **_YH_YIELD),
+                daily("UST_10Y", date(2026, 11, 20), 4.12, **_TSY_YIELD),
+                daily("UST_10Y", date(2026, 11, 23), 4.15, **_TSY_YIELD),
+                tick("UST_10Y", et(date(2026, 11, 23), "14:59"), 4.14, unit="pct"),
+            ],
+            "previous Yahoo close (20 Nov)",
+            "vs Fri close",
+            "vs Fri 20 Nov Yahoo close",
+        ),
+        (  # an official yield against the official value before it
+            "UST_2Y",
+            [
+                daily("UST_2Y", date(2026, 11, 20), 3.70, **_TSY_YIELD),
+                daily("UST_2Y", date(2026, 11, 23), 3.67, **_TSY_YIELD),
+            ],
+            "previous official value (20 Nov)",
+            "Mon",
+            "vs 20 Nov official",
+        ),
+        (  # an FX pair against its own New York close
+            "EURUSD",
+            [
+                tick("EURUSD", et(date(2026, 11, 23), "17:30"), 1.10, unit="fx_rate"),
+                tick("EURUSD", et(_T61_TUE, "06:16"), 1.111, unit="fx_rate"),
+            ],
+            "previous NY close, 17:30 ET quote (23 Nov)",
+            "vs NY close",
+            "vs Mon 23 Nov NY close (17:30 ET quote)",
+        ),
+    ],
+    ids=["quoted_yield", "official_yield", "fx"],
+)  # fmt: skip
+def test_dashboard_and_email_name_the_same_baseline(
+    tmp_path: Path, iid: str, rows: list[dict[str, Any]], email: str, label: str, pill: str
+) -> None:
+    from app.components import panels
+
+    w = World(tmp_path / "w")
+    w.observations(rows)
+    row = _row(_snapshot(w, et(_T61_TUE, "07:00")), iid)
+    assert row.change.status == "ok"
+    assert f"since {email}" in row.description  # the email's line
+    assert panels.move_label(row) == label
+    assert panels.basis_text(row) == pill
+    # both name the baseline's date and what it is
+    day = email.split("(")[-1].rstrip(")")
+    assert day in pill
+    kind = {"UST_10Y": "Yahoo close", "UST_2Y": "official", "EURUSD": "NY close"}[iid]
+    assert kind in email
+    assert kind in pill

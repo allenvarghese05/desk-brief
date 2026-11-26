@@ -65,21 +65,49 @@ Overnight change (P-009)
 * weekly series (``interval = 1w``): change versus the **previous weekly value** of the same
   source, dataset and field (week-on-week). Like ``1d`` rows, a ``1w`` row dated on the current
   ET date is excluded.
+
+Own-market bases and ranking (P-024, T61)
+-----------------------------------------
+* FX pairs (``kind = fx``, price family) compare with their **own previous New York close**: the
+  stored quote of the same source, dataset and field nearest 17:00 ET (within two hours) on the
+  latest weekday whose 17:00 ET is before the last value, walking back up to
+  ``FX_CLOSE_LOOKBACK`` weekdays if none was stored. Yahoo's daily FX bars are not used: their
+  close sits at the London-day open (live probe 2026-11-24, recorded in the T61 PR).
+* Foreign indices (:data:`HOME_EXCHANGES`: N225, FTSE, DAX) compare with the close of their own
+  exchange's previous session before the last value's exchange-local date (``"previous Tokyo
+  close"``), whatever the NYSE did that day.
+* A price baseline is like-for-like with the value when it has the same source, dataset and field,
+  or the pair is in :data:`LIKE_FOR_LIKE` (a quote or trade against the same security's daily
+  close). Like-for-like closes are preferred; a **futures** price never falls back to another
+  series (Brent's ``BZ=F`` is never compared with FRED's spot ``DCOILBRENTEU``).
+* A yield quote (a Yahoo ``^IRX`` tick) compares with its own like-for-like close before the
+  quote's date when one is stored (``"previous Yahoo close"``); otherwise with the previous
+  official value, noted, as before.
+* A move over more than one period is shown with a note but never ranked: an FX baseline that
+  had to walk back past a missing 17:00 close, a yield quote whose own close is older than the
+  previous SIFMA session.
+* ``ChangeRow.rankable`` is True only for an ``ok`` change whose baseline is like-for-like and
+  whose value is new since the previous scheduled brief (the previous XNYS session at the
+  report's ET clock time). "New" compares with the value that brief showed, point-in-time on
+  ``ingested_at``: a print first stored after it is new even if dated earlier (FRED's day-late
+  series), once; it must belong to a later trading day, or the same day at a later instant.
+  ``unranked_reason`` says why not. The brief scores sigma only for rankable changes.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import duckdb
 
-from deskbrief.calendars import is_business_day, prev_business_day
+from deskbrief.calendars import ExchangeCalendar, is_business_day, prev_business_day
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
-from deskbrief.timeutil import ensure_utc, et_date
+from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
 
 #: fields that can be "the value" of an instrument (never open/high/low/bid/ask/volume)
 VALUE_FIELDS: tuple[str, ...] = (
@@ -100,6 +128,66 @@ CHANGE_DECIMALS = 9
 BASIS_NYSE_CLOSE = "previous NYSE close"
 BASIS_OFFICIAL = "previous official value"
 BASIS_WEEKLY = "previous weekly value"
+BASIS_NY_CLOSE = "previous NY close"
+
+#: how a provider is named in basis text ("previous Yahoo close"); unknown ids are shown as is
+SOURCE_NAMES: Mapping[str, str] = {
+    "yahoo": "Yahoo", "stooq": "Stooq", "cboe": "Cboe", "alpaca": "Alpaca",
+    "twelvedata": "Twelve Data", "treasury": "Treasury", "fred": "FRED", "ecb": "ECB",
+    "cftc": "CFTC",
+}  # fmt: skip
+
+
+def source_name(source: str) -> str:
+    return SOURCE_NAMES.get(source, source)
+
+
+#: FX: the New York close is 17:00 ET; a stored quote within two hours of it stands in for it
+FX_CLOSE_HHMM = "17:00"
+FX_CLOSE_WINDOW = timedelta(hours=2)
+#: how many weekday closes back an FX baseline is searched (a US holiday stores no quote)
+FX_CLOSE_LOOKBACK = 4
+
+
+@dataclass(frozen=True)
+class HomeExchange:
+    """A foreign index's own exchange: its calendar, time zone and basis text."""
+
+    calendar: ExchangeCalendar
+    tz: str
+    basis: str
+
+
+#: foreign indices measured against their own exchange's previous session (P-024)
+HOME_EXCHANGES: Mapping[str, HomeExchange] = {
+    "N225": HomeExchange("XTKS", "Asia/Tokyo", "previous Tokyo close"),
+    "FTSE": HomeExchange("XLON", "Europe/London", "previous London close"),
+    "DAX": HomeExchange("XETR", "Europe/Berlin", "previous Frankfurt close"),
+}
+
+#: (source, dataset, field) of a quote or trade on the listed security itself
+_QUOTE_SERIES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("yahoo", "quote", "last"),
+        ("alpaca", "iex_latest", "last"),
+        ("alpaca", "iex_bars_1m", "close"),
+        ("alpaca", "sip_bars_1m", "close"),
+    }
+)
+#: (source, dataset, field) of that same security's (or index's) own daily close
+_OWN_CLOSE_SERIES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("yahoo", "history", "close"),
+        ("stooq", "daily", "close"),
+        ("cboe", "vix_history", "close"),  # Cboe's own close of the index Yahoo quotes
+    }
+)
+#: (value series, baseline series) pairs that measure the same thing (P-024 like-for-like).
+#: Never listed: a spot series (FRED ``DCOIL*``) for a future, an official par yield (Treasury)
+#: for a quoted rate (``^IRX`` is a discount rate), a reference fix (ECB) for a quote.
+LIKE_FOR_LIKE: frozenset[tuple[tuple[str, str, str], tuple[str, str, str]]] = frozenset(
+    (value, base) for value in _QUOTE_SERIES | _OWN_CLOSE_SERIES for base in _OWN_CLOSE_SERIES
+)
 
 
 def session_close_basis(session: date) -> str:
@@ -155,16 +243,23 @@ class ValueRow:
 
 @dataclass(frozen=True)
 class ChangeRow:
-    """``last`` against its baseline. ``change`` is None unless ``status == "ok"``."""
+    """``last`` against its baseline. ``change`` is None unless ``status == "ok"``.
+
+    ``rankable`` (P-024): the change may be scored and ranked (like-for-like baseline, value new
+    since the previous scheduled brief). Otherwise ``unranked_reason`` says why, for an ``ok``
+    change; it is None for a change that has no number.
+    """
 
     last: ValueRow
     previous: ValueRow | None
     family: str  # price | yield | rate | macro
-    basis: str  # BASIS_NYSE_CLOSE | BASIS_OFFICIAL | BASIS_WEEKLY | "<weekday> close"
+    basis: str  # BASIS_* | "<weekday> close" | HomeExchange.basis | "previous <source> close"
     change: float | None
     change_unit: str  # pct | bp | pts | pp
     status: str  # ok | no_baseline | no_move_yet
     note: str | None = None
+    rankable: bool = False
+    unranked_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -397,30 +492,132 @@ def overnight_changes(
     by_inst: dict[str, list[ValueRow]] = {}
     for r in _official(duck, report_time, report_date, exclude_tiers):
         by_inst.setdefault(r.instrument_id, []).append(r)
+    fx_ids = sorted({r.instrument_id for r in last_rows if _is_fx_price(r)})
+    fx_quotes: dict[str, list[ValueRow]] = {}
+    for r in _ny_close_quotes(duck, report_time, fx_ids, exclude_tiers):
+        fx_quotes.setdefault(r.instrument_id, []).append(r)
     nyse_prev = prev_business_day("XNYS", report_date)
     session = is_business_day("XNYS", report_date)
+    # the previous scheduled brief: the previous XNYS session at this report's ET clock time
+    since = et_to_utc(nyse_prev, f"{to_et(report_time):%H:%M}")
+    # what that brief showed, point-in-time on ingested_at (a late print is new once)
+    shown = {
+        r.instrument_id: r for r in _snapshot(duck, since, nyse_prev, exclude_tiers=exclude_tiers)
+    }
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
-        if family_of(last) == "price" and last.interval != "1w":
-            if session:
-                out.append(_price_change(last, history, nyse_prev))
+        home = HOME_EXCHANGES.get(last.instrument_id)
+        if _is_fx_price(last):
+            ch = _fx_change(last, fx_quotes.get(last.instrument_id, []))
+        elif family_of(last) == "price" and last.interval != "1w":
+            if home is not None:
+                ch = _home_session_change(last, history, home)
+            elif session:
+                ch = _price_change(last, history, nyse_prev)
             else:
-                out.append(_off_session_price_change(last, history))
+                ch = _off_session_price_change(last, history)
         else:
-            out.append(_official_change(last, history))
+            ch = _official_change(last, history)
+        out.append(_ranked(ch, shown.get(last.instrument_id), since))
     return tuple(out)
+
+
+def like_for_like(value: ValueRow, baseline: ValueRow) -> bool:
+    """True when ``baseline`` measures the same thing as ``value`` (P-024).
+
+    Same source, dataset and field, or a pair listed in :data:`LIKE_FOR_LIKE`.
+    """
+    v = (value.source, value.dataset, value.field)
+    b = (baseline.source, baseline.dataset, baseline.field)
+    return v == b or (v, b) in LIKE_FOR_LIKE
+
+
+def _session_day(row: ValueRow) -> date:
+    """The trading day a value belongs to: a dated row's own date; an intraday row's date in its
+    home exchange's zone for a foreign index (Tokyo's Tuesday quote at 01:45 ET), else in ET."""
+    home = HOME_EXCHANGES.get(row.instrument_id)
+    if row.interval in OFFICIAL_INTERVALS or home is None:
+        return _et(row)
+    return ensure_utc(row.as_of).astimezone(ZoneInfo(home.tz)).date()
+
+
+def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | None:
+    """Why ``last`` is not new since the previous brief, which showed ``shown``; None if new.
+
+    P-024 and the planner's ruling on T61. ``shown`` is that brief's own value, point-in-time on
+    ``ingested_at``: a value first stored after the brief is new even when dated earlier (FRED
+    publishes a day late), and a value the brief already had is not. The value must belong to a
+    later trading day than ``shown``, or (a US market) the same day at a later instant. A
+    foreign index's session is scored once: a later quote of the session the previous brief
+    already showed, against the same previous-session close, is not scored again.
+    """
+    if shown is None:
+        return None
+    brief = to_et(since)
+    when = f"{brief.day} {brief:%b} {brief:%H:%M} ET"
+    day, shown_day = _session_day(last), _session_day(shown)
+    home = HOME_EXCHANGES.get(last.instrument_id)
+    if day == shown_day and home is not None:
+        exchange = home.basis.removeprefix("previous ").removesuffix(" close")
+        return f"{exchange} session of {day.day} {day:%b} already in the previous brief ({when})"
+    if day > shown_day or (
+        day == shown_day
+        and last.interval not in OFFICIAL_INTERVALS
+        and ensure_utc(last.as_of) > ensure_utc(shown.as_of)
+    ):
+        return None
+    dated = to_et(last.as_of)
+    text = f"{dated.day} {dated:%b}"
+    if last.interval not in OFFICIAL_INTERVALS:
+        text += f" {dated:%H:%M} ET"
+    return f"value dated {text}, not new since the previous brief ({when})"
+
+
+def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow:
+    if ch.status != "ok" or ch.previous is None or ch.unranked_reason is not None:
+        return ch  # a builder already said why it may not rank (a move spanning two periods)
+    if not like_for_like(ch.last, ch.previous):
+        prev = ch.previous
+        return replace(
+            ch,
+            unranked_reason=f"baseline is another series ({prev.source} {prev.dataset} "
+            f"{prev.field}), not {ch.last.source} {ch.last.dataset} {ch.last.field}",
+        )
+    reason = _not_new(ch.last, shown, since)
+    if reason is not None:
+        return replace(ch, unranked_reason=reason)
+    return replace(ch, rankable=True)
+
+
+def _pick_close(last: ValueRow, closes: list[ValueRow]) -> tuple[ValueRow | None, str | None]:
+    """The baseline among ``closes`` (best first) and its note.
+
+    A like-for-like close wins. Failing that, a future gets none (never a spot series from
+    another source); anything else falls back to the best close, with a note.
+    """
+    for r in closes:
+        if like_for_like(last, r):
+            return r, None
+    if not closes or last.kind == "future":
+        return None, None
+    prev = closes[0]
+    return prev, f"baseline from {prev.source} {prev.dataset}, not {last.source} {last.dataset}"
+
+
+def _close_change(last: ValueRow, closes: list[ValueRow], basis: str) -> ChangeRow:
+    prev, note = _pick_close(last, closes)
+    return _change(last, prev, basis, "ok" if prev else "no_baseline", note)
+
+
+def _daily_closes(history: list[ValueRow], on: date) -> list[ValueRow]:
+    return [r for r in history if r.field == "close" and r.interval == "1d" and _et(r) == on]
 
 
 def _price_change(last: ValueRow, history: list[ValueRow], nyse_prev: date) -> ChangeRow:
     if last.interval == "1d" and _et(last) >= nyse_prev:
         return _change(last, None, BASIS_NYSE_CLOSE, "no_move_yet")
-    closes = [
-        r for r in history if r.field == "close" and r.interval == "1d" and _et(r) == nyse_prev
-    ]
-    return _change(
-        last, closes[0] if closes else None, BASIS_NYSE_CLOSE, "ok" if closes else "no_baseline"
-    )
+    return _close_change(last, _daily_closes(history, nyse_prev), BASIS_NYSE_CLOSE)
 
 
 def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
@@ -428,16 +625,110 @@ def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> Change
     # S <= L: the session before S. S > L (a holiday trade): L itself, which is also the
     # session before S, since no session lies between L and the report date.
     base = prev_business_day("XNYS", _et(last))
-    closes = [r for r in history if r.field == "close" and r.interval == "1d" and _et(r) == base]
-    return _change(
-        last,
-        closes[0] if closes else None,
-        session_close_basis(base),
-        "ok" if closes else "no_baseline",
+    return _close_change(last, _daily_closes(history, base), session_close_basis(base))
+
+
+def _home_session_change(last: ValueRow, history: list[ValueRow], home: HomeExchange) -> ChangeRow:
+    """A foreign index against its own exchange's previous session (P-024, T61).
+
+    The session is the one before the last value's exchange-local date: a dated row's own date
+    (Yahoo dates a daily bar by the exchange-local day), a quote's date in the exchange's zone.
+    """
+    if last.interval in DATED_INTERVALS:
+        local = _et(last)
+    else:
+        local = ensure_utc(last.as_of).astimezone(ZoneInfo(home.tz)).date()
+    base = prev_business_day(home.calendar, local)
+    return _close_change(last, _daily_closes(history, base), home.basis)
+
+
+def _is_fx_price(row: ValueRow) -> bool:
+    return row.kind == "fx" and family_of(row) == "price"
+
+
+def _ny_close_quotes(
+    duck: duckdb.DuckDBPyConnection,
+    at: datetime,
+    instrument_ids: Sequence[str],
+    exclude_tiers: Collection[int] = (),
+) -> list[ValueRow]:
+    """Intraday rows of ``instrument_ids`` stamped within ``FX_CLOSE_WINDOW`` of 17:00 ET."""
+    if not instrument_ids:
+        return []
+    at = ensure_utc(at)
+    tier_sql, tier_params = _tier_filter(exclude_tiers)
+    ids = ", ".join("?" for _ in instrument_ids)
+    hours = FX_CLOSE_WINDOW.total_seconds() / 3600
+    close_h = int(FX_CLOSE_HHMM[:2])
+    local = "timezone('America/New_York', o.as_of)"
+    sql = (
+        f"{_SELECT} WHERE o.as_of <= ? AND o.as_of > ? AND o.instrument_id IN ({ids}) "
+        f"AND o.field IN ({_VALUE_FIELDS_SQL}) AND o.interval IN ('tick', '1m') "
+        f"AND abs(hour({local}) + minute({local}) / 60.0 - {close_h}) <= {hours}{tier_sql} "
+        f"ORDER BY o.instrument_id, o.as_of DESC, {_ORDER}"
     )
+    since = at - timedelta(days=FX_CLOSE_LOOKBACK + 4)  # weekends on top of the weekdays
+    return _rows(duck, sql, [at, at, since, *instrument_ids, *tier_params])
+
+
+def _ny_closes_before(t: datetime) -> list[datetime]:
+    """The ``FX_CLOSE_LOOKBACK`` latest weekday 17:00 ET instants strictly before ``t``."""
+    out: list[datetime] = []
+    d = et_date(t)
+    while len(out) < FX_CLOSE_LOOKBACK:
+        close = et_to_utc(d, FX_CLOSE_HHMM)
+        if d.weekday() < 5 and close < ensure_utc(t):
+            out.append(close)
+        d -= timedelta(days=1)
+    return out
+
+
+def _fx_change(last: ValueRow, quotes: list[ValueRow]) -> ChangeRow:
+    """An FX pair against its own stored quote at the previous New York close (P-024, T61)."""
+    series = [
+        q
+        for q in quotes
+        if (q.source, q.dataset, q.field) == (last.source, last.dataset, last.field)
+        and ensure_utc(q.as_of) < ensure_utc(last.as_of)
+    ]
+    closes = _ny_closes_before(last.as_of)
+    for close in closes:
+        near = [q for q in series if abs(ensure_utc(q.as_of) - close) <= FX_CLOSE_WINDOW]
+        if near:
+            prev = min(near, key=lambda q: (abs(ensure_utc(q.as_of) - close), -q.as_of.timestamp()))
+            basis = f"{BASIS_NY_CLOSE}, {to_et(prev.as_of):%H:%M} ET quote"
+            ch = _change(last, prev, basis, "ok")
+            if close == closes[0] or ch.status != "ok":
+                return ch
+            # walked back past a missing close: a move over more than one FX day, never ranked
+            want = to_et(closes[0])
+            return replace(
+                ch,
+                note=f"no {last.source} quote stored near the {want:%a} {want.day} {want:%b} "
+                "NY close",
+                unranked_reason="spans more than one FX day",
+            )
+    return _change(last, None, BASIS_NY_CLOSE, "no_baseline")
 
 
 def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
+    if last.interval not in OFFICIAL_INTERVALS:
+        # a quoted yield (Yahoo ^IRX) against its own previous close when one is stored: the
+        # official par yield measures something else (P-024, T61)
+        own = [r for r in history if like_for_like(last, r) and _et(r) < _et(last)]
+        if own:
+            prev = own[0]
+            ch = _change(last, prev, f"previous {source_name(prev.source)} close", "ok")
+            session = prev_business_day("SIFMA_US", _et(last))
+            if ch.status != "ok" or _et(prev) >= session:
+                return ch
+            # a missing close in between: a move over more than one session, never ranked
+            return replace(
+                ch,
+                note=f"baseline close dated {_et(prev).day} {_et(prev):%b}, not the previous "
+                f"session ({session.day} {session:%b})",
+                unranked_reason="spans more than one session",
+            )
     earlier = [r for r in history if r.as_of < last.as_of]
     if last.interval in OFFICIAL_INTERVALS:
         same = [

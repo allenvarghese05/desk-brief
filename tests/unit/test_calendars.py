@@ -265,3 +265,13 @@ def test_cached_schedules_are_read_only():
     assert isinstance(c._early_closes("XNYS", 2026), frozenset)
     assert isinstance(sched[date(2026, 11, 27)], tuple)
     assert c.session_bounds_utc(date(2026, 11, 26)) is None  # still closed after the attempts
+
+
+def test_exchange_calendars_for_foreign_indices() -> None:
+    # T61: N225, FTSE and DAX are measured against their own exchange's sessions
+    assert not c.is_business_day("XTKS", date(2026, 11, 23))  # Labour Thanksgiving Day
+    assert c.prev_business_day("XTKS", date(2026, 11, 24)) == date(2026, 11, 20)
+    assert not c.is_business_day("XLON", date(2026, 8, 31))  # summer bank holiday
+    assert c.prev_business_day("XLON", date(2026, 9, 1)) == date(2026, 8, 28)
+    assert c.is_business_day("XETR", date(2026, 1, 19))  # MLK day: Xetra trades
+    assert c.prev_business_day("XETR", date(2026, 1, 20)) == date(2026, 1, 19)

@@ -577,7 +577,9 @@ def _notable(
     moves: list[tuple[float, Notable]] = []
     for ch in changes:
         past = hist.get(ch.last.instrument_id, ())
-        if ch.previous is None or ch.change is None or not past:
+        # P-024: only honest moves are scored: a like-for-like baseline and a value new since
+        # the previous brief (``ChangeRow.rankable``); the rest stay in the table with their note
+        if not ch.rankable or ch.previous is None or ch.change is None or not past:
             continue
         # the T20 anomaly check's own scoring: |move| against the mean and sample std of the
         # |daily moves| before it, in the unit the check uses (bp for yields, return otherwise)
