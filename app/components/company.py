@@ -24,6 +24,7 @@ from html import escape
 from deskbrief.query import CompanyFilings, HolderChange
 
 EMPTY = "No filings stored yet"
+UNREADABLE = "Filings could not be read"
 HOLDER_LAG = "13F runs about 45 days behind"
 #: holder changes listed by name under the summary (largest change first)
 HOLDERS_LISTED = 3
@@ -68,14 +69,24 @@ def _holder(h: HolderChange) -> str:
     )
 
 
-def section_html(co: CompanyFilings | None, insider_days: int) -> str:
-    """The Company section's markup; ``co`` None (or nothing stored) says so."""
+def section_html(co: CompanyFilings | None, insider_days: int, *, listed: bool = True) -> str:
+    """The Company section's markup. ``co`` None means the store could not be read (said so,
+    never shown as "nothing stored"); ``listed`` False means the stock is not under
+    ``filings.companies`` in ``config.yaml``, so nothing is fetched for it."""
     head = '<div class="db-label db-co-label">Company<span>SEC EDGAR filings</span></div>'
-    if co is None or (co.latest_filing is None and not co.insiders.trades and not co.holders):
+    if co is None:
         return (
-            f'<section class="db-co">{head}<p class="db-empty">{EMPTY}. Filings come from SEC '
-            "EDGAR when the source is turned on.</p></section>"
+            f'<section class="db-co">{head}<p class="db-empty">{UNREADABLE} from the store just '
+            "now; the rest of the page is unaffected.</p></section>"
         )
+    if co.latest_filing is None and not co.insiders.trades and not co.holders:
+        why = (
+            "Filings come from SEC EDGAR when the source is turned on."
+            if listed
+            else "This stock is not listed under filings.companies in config.yaml, so no "
+            "filings are fetched for it."
+        )
+        return f'<section class="db-co">{head}<p class="db-empty">{EMPTY}. {why}</p></section>'
     rows = []
     f = co.latest_filing
     if f is not None:

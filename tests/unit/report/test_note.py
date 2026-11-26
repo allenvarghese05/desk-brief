@@ -3,7 +3,7 @@
 SYNTHETIC FIXTURE: every value is made up (``brief_synth`` builders). The replies below are
 written for these invented values; the API key is a fake string that is never sent anywhere.
 """
-# ruff: noqa: RUF001  (the sigma and minus signs are intentional output)
+# ruff: noqa: RUF001, RUF003  (the sigma and minus signs are intentional output)
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from deskbrief.report.note import (
     facts,
     month_spend,
     numbers,
+    record_spend,
     shown_numbers,
     stored_note,
     with_note,
@@ -216,31 +217,124 @@ def test_no_surviving_sentence_is_no_note(model: BriefModel, world: World) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_numbers_keep_their_units_and_skip_names() -> None:
-    found = numbers("S&P 500 futures fell −1.6% and the 10Y rose 3bp; 2s10s at +22 bp, $71.20.")
-    assert [(n.value, n.unit) for n in found] == [(1.6, "pct"), (3.0, "bp"), (22.0, "bp"),
-                                                  (71.2, "usd")]  # fmt: skip
+def _nums(text: str) -> list[tuple[str, str, str | None]]:
+    return [(str(n.value), n.unit, n.sign) for n in numbers(text)]
+
+
+def test_numbers_keep_their_units_signs_and_skip_names() -> None:
+    found = _nums("S&P 500 futures fell −1.6% and the 10Y rose 3bp; 2s10s at +22 bp, $71.20.")
+    assert found == [("1.6", "pct", "-"), ("3", "bp", None), ("22", "bp", "+"),
+                     ("71.20", "usd", None)]  # fmt: skip
     assert numbers("the 2-year and 10-year yields") == []
-    assert [(n.value, n.unit) for n in numbers("a 3.5σ day, 1,200 contracts")] == [
-        (3.5, "sigma"), (1200.0, "contracts"),
+    assert _nums("a 3.5σ day, 1,200 contracts, +0.25pp") == [
+        ("3.5", "sigma", None), ("1200", "contracts", None), ("0.25", "pp", "+"),
     ]  # fmt: skip
 
 
-def test_a_number_matches_only_within_the_shown_rounding_and_unit() -> None:
-    shown = numbers("−1.6%  4.37%  −3bp  5,976.00")
-    assert check("It fell 1.6%.", shown, (), 5).kept
-    assert not check("It fell 1.7%.", shown, (), 5).kept
-    assert not check("It fell 1.6bp.", shown, (), 5).kept  # the unit the model does not use
-    assert check("It fell 3 basis points to 4.37%.", shown, (), 5).kept
-    assert not check("It was 16 Nov.", shown, (), 5).kept  # a bare number the model never shows
-    assert check("The index was 5,976.00.", shown, (), 5).kept  # a bare level it does show
+SHOWN = numbers("−1.6%  4.37%  −3bp  +27bp  5,976.00  2%  +0.07pp  3.8σ")
+
+
+def kept(text: str, names: tuple[str, ...] = ()) -> bool:
+    return bool(check(text, SHOWN, (), 5, names).kept)
+
+
+def test_a_number_matches_only_as_shown_with_its_unit() -> None:
+    assert kept("It fell 1.6%.")
+    assert not kept("It fell 1.7%.")
+    assert not kept("It fell 1.6bp.")  # a unit the brief does not use for it
+    assert kept("It fell 3 basis points to 4.37%.")
+    assert kept("Spreads widened 27bps.")  # bps is bp
+    assert kept("The index was 5,976.00.")  # a bare level the brief shows
+    assert kept("Real yields rose 0.07pp.")  # pp is read, not taken for a bare 0
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Spreads widened fifteen basis points.",  # a number written as a word
+        "Volume was double the usual.",
+        "Insiders sold $40m of stock.",  # suffixes no shown value carries
+        "Volume was 3x normal.",
+        "Spreads widened 37bpz.",  # a digit inside a word
+        "The yield fell .5%.",  # a leading dot is read, and matches nothing
+        "Real yields rose 0.91pp.",
+        "This is the largest move in 30 years.",  # a count, not a name
+        "Gold ran for 26 days straight.",
+        "Futures fell for 7 sessions.",
+    ],
+)
+def test_numbers_the_check_cannot_read_or_match_fail_closed(sentence: str) -> None:
+    assert not kept(sentence)
+
+
+def test_the_note_may_not_add_precision_or_drift_within_the_rounding() -> None:
+    assert not kept("Equities rose 2.4%.")  # shown "2%"
+    assert not kept("Spreads widened 27.4bp.")  # shown "+27bp"
+    assert not kept("Futures fell 1.64%.")  # shown "−1.6%"
+    assert kept("The 10-year was 4.4%.")  # coarser than "4.37%" is allowed
+
+
+def test_an_explicit_sign_or_a_direction_word_must_agree() -> None:
+    assert not kept("Futures moved +1.6%.")  # shown "−1.6%"
+    assert kept("Futures moved −1.6%.")
+    assert not kept("Futures rose 1.6%.")
+    assert kept("Futures fell 1.6%.")
+    assert not kept("Spreads narrowed 27bp.")  # shown "+27bp"
+    assert kept("Spreads widened 27bp, while the index fell 1.6%.")
+    assert kept("Spreads widened 0.07pp to 4.37%.")  # a level carries no direction
+
+
+def test_market_names_with_digits_are_not_numbers() -> None:
+    assert kept("The S&P fut fell 1.6%.", names=("S&P fut",))
+    assert kept("10Y real yields fell 3bp.", names=("10Y real",))
+    assert not kept("COT 7 fell 1.6%.")  # an unknown name with a digit fails
+
+
+def test_forbidden_words_match_stems_and_allow_market_words() -> None:
+    words = ("buy", "sell", "target", "expect", "forecast", "predict", "recommend", "will rise")
+    for bad in ("Funds were selling.", "Desks are buying.", "It was expected.",
+                "Banks raised targets.", "One forecasts more.", "It was predicted.",
+                "He recommends patience.", "Gold will likely rise."):  # fmt: skip
+        assert not check(bad, (), words, 5).kept, bad
+    for ok in ("A sell-off hit stocks.", "The buyback was paused.", "Sellers stepped back."):
+        assert check(ok, (), words, 5).kept, ok
 
 
 def test_at_most_max_sentences_are_kept() -> None:
-    text = "\n".join(f"Sentence {w}." for w in ("one", "two", "three", "four"))
+    text = "\n".join(f"Sentence {w}." for w in ("alpha", "beta", "gamma", "delta"))
     out = check(text, [], (), 2)
-    assert out.kept == ("Sentence one.", "Sentence two.")
+    assert out.kept == ("Sentence alpha.", "Sentence beta.")
     assert out.dropped == ("over the sentence limit", "over the sentence limit")
+
+
+def test_dates_and_times_in_the_facts_are_never_allowed_numbers(model: BriefModel) -> None:
+    payload = facts(model, {1})
+    assert "07:00" in payload["brief"]
+    shown = shown_numbers(payload)
+    out = check("Futures fell for 7 sessions.\nThe drop came on day 16.", shown, (), 5)
+    assert out.kept == ()
+    assert all(s.unit or s.decimals for s in shown if s.value in (7, 16, 2026))
+
+
+def test_a_reply_cut_at_the_token_limit_is_no_note(model: BriefModel, world: World) -> None:
+    chg, _, _ = _es(model)
+    n = _write(model, world, Fake(f"S&P futures fell {chg} and then", stop="max_tokens"))
+    assert n.sentences == ()
+    assert n.reason == "the reply stopped at the token limit"
+    assert n.cost_usd > 0
+
+
+def test_the_four_invented_claims_of_the_review_are_all_dropped(
+    model: BriefModel, world: World
+) -> None:
+    reply = (
+        "S&P futures rose fifteen percent. Spreads widened 37bps. "
+        "It was the largest drop in 40 years. Futures fell for 7 sessions."
+    )
+    n = _write(model, world, Fake(reply))
+    assert n.sentences == ()
+    assert n.reason == "no sentence passed the number check"
+    assert len(n.dropped) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -274,13 +368,43 @@ def _archive(store: LocalBackend, d: date, version: int, note: dict[str, Any] | 
     store.put_bytes(report_key(d, version, "model.json"), body)
 
 
-def test_month_spend_sums_every_archived_note_of_the_month(tmp_path: Path) -> None:
+def test_month_spend_sums_the_ledger_of_the_calls_month(tmp_path: Path) -> None:
     store = LocalBackend(tmp_path / "data")
-    _archive(store, date(2026, 11, 2), 1, {"cost_usd": 0.01})
-    _archive(store, date(2026, 11, 2), 2, {"cost_usd": 0.02})  # a re-run is spend too
-    _archive(store, date(2026, 11, 13), 1, None)
-    _archive(store, date(2026, 10, 30), 1, {"cost_usd": 9.0})  # last month
+    for when, cost in ((et(date(2026, 11, 2), "07:00"), 0.01), (et(date(2026, 11, 2), "07:05"),
+                       0.02), (et(date(2026, 10, 30), "07:00"), 9.0)):  # fmt: skip
+        record_spend(store, when, Note(cost_usd=cost, model="m"))
+    _archive(store, date(2026, 11, 13), 1, {"cost_usd": 4.0})  # a brief's copy is not the ledger
     assert month_spend(store, date(2026, 11, 16)) == pytest.approx(0.03)
+    assert month_spend(store, et(date(2026, 11, 16), "07:00")) == pytest.approx(0.03)
+
+
+def test_with_note_records_the_spend_before_anything_else_can_fail(
+    model: BriefModel, world: World
+) -> None:
+    chg, _, _ = _es(model)
+    with_note(model, world.config, KEY, world.store, client_factory=Fake(
+        f"S&P futures fell {chg}.").factory, now=MON_0700)  # fmt: skip
+    keys = world.store.list("reports/note_spend/month=2026-11/")
+    assert len(keys) == 1
+    assert month_spend(world.store, MON) == pytest.approx((1200 * 2.0 + 300 * 10.0) / 1e6)
+
+
+def test_a_timeout_counts_the_worst_case_against_the_cap(model: BriefModel, world: World) -> None:
+    n = _write(model, world, Fake(exc=TimeoutError("slow")))
+    assert n.reason == "the API timed out"
+    assert n.cost_usd >= 8000 * 10.0 / 1e6
+
+
+def test_an_unexpected_error_costs_the_note_never_the_brief(
+    model: BriefModel, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*a: object, **k: object) -> object:
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(note_mod, "facts", boom)
+    out = with_note(model, world.config, KEY, world.store, client_factory=Fake("x").factory)
+    assert out.note is not None
+    assert out.note.reason == "the note could not be written (KeyError)"
 
 
 def test_stored_note_reads_the_newest_version(tmp_path: Path) -> None:
@@ -310,9 +434,11 @@ def test_the_morning_report_step_writes_the_note(monkeypatch: pytest.MonkeyPatch
 
 
 def test_shown_numbers_cover_the_facts(model: BriefModel) -> None:
+    from decimal import Decimal
+
     shown = shown_numbers(facts(model, {1}))
     chg, _, _ = _es(model)
-    assert any(abs(s.value - float(chg.rstrip("%"))) < 1e-9 and s.unit == "pct" for s in shown)
+    assert any(s.value == Decimal(chg.rstrip("%")) and s.unit == "pct" for s in shown)
 
 
 def test_the_brief_pane_shows_the_stored_note() -> None:

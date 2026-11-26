@@ -92,7 +92,29 @@ def test_an_empty_filings_table_says_no_filings_stored_yet() -> None:
 
     co = company_filings_from_frame(to_frame("filings", []), "EXMP", MON_0700, 90)
     assert "No filings stored yet" in company.section_html(co, 90)
-    assert "No filings stored yet" in company.section_html(None, 90)
+    unlisted = company.section_html(co, 90, listed=False)
+    assert "not listed under filings.companies in config.yaml" in unlisted
+
+
+def test_a_store_read_error_is_not_shown_as_nothing_stored() -> None:
+    from app.components import company
+
+    html = company.section_html(None, 90)
+    assert "Filings could not be read" in html
+    assert "No filings stored yet" not in html
+
+
+def test_the_plan_count_never_exceeds_the_trades_it_is_out_of() -> None:
+    from app.components import company
+
+    extra = [  # an option exercise and a tax withholding, both carrying the plan footnote
+        {**_trade(4, "other", 300.0, True), "trade_code": "M"},
+        {**_trade(5, "other", 100.0, True), "trade_code": "F"},
+    ]
+    frame = pd.concat([filings(), to_frame("filings", extra)], ignore_index=True)
+    co = company_filings_from_frame(frame, "EXMP", MON_0700, 90)
+    assert (co.insiders.n_buys, co.insiders.n_sells, co.insiders.n_10b5_1) == (1, 2, 1)
+    assert "1 of 3 under 10b5-1 plans" in company.section_html(co, 90)
 
 
 def test_marker_is_the_latest_filing_date() -> None:
@@ -139,6 +161,7 @@ def test_a_stock_with_nothing_stored_says_so(run_home: Run) -> None:
     text = page(at.run())
     assert "db-co-label" in text
     assert "No filings stored yet" in text
+    assert "not listed under filings.companies" in text  # AAPL is not configured
 
 
 def test_the_filing_marker_snaps_to_the_first_bar_on_or_after_the_filed_date(

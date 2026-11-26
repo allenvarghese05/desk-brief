@@ -342,7 +342,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.80" },
+    { name = "anthropic", specifier = ">=2.14,<3" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.27" },

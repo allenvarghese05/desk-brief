@@ -388,7 +388,8 @@ def _company(config: Config, row: Row) -> None:
         return
     co = data.load_company(config, row.instrument_id)
     with st.container(key="db-company"):
-        _html(st, company.section_html(co, config.filings.insider_days))
+        listed = any(c.instrument == row.instrument_id for c in config.filings.companies)
+        _html(st, company.section_html(co, config.filings.insider_days, listed=listed))
 
 
 @st.fragment

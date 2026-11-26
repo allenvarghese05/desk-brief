@@ -1278,8 +1278,8 @@ class InsiderSummary:
     """Form 4 transactions filed in ``[since, as-of date]`` and their totals (USD).
 
     ``net_usd`` = ``buys_usd - sells_usd`` (positive is net buying); trades with no price are
-    left out of the sums and counted in ``n_unpriced``. ``n_10b5_1`` counts trades marked as
-    under a Rule 10b5-1 plan.
+    left out of the sums and counted in ``n_unpriced``. ``n_10b5_1`` counts the buys and sells
+    marked as under a Rule 10b5-1 plan (other codes, such as an option exercise, are not counted).
     """
 
     since: date
@@ -1457,7 +1457,9 @@ def _insiders(rows: pd.DataFrame, since: date, until: date) -> InsiderSummary:
         buys_usd=float(buys_usd),
         sells_usd=float(sells_usd),
         net_usd=float(buys_usd - sells_usd),
-        n_10b5_1=sum(t.plan_10b5_1 for t in trades),
+        # over the same trades as the buy and sell counts (an exercise or a tax withholding
+        # can carry the plan footnote, but it is neither: PR #102 review B4)
+        n_10b5_1=sum(t.plan_10b5_1 for t in buys + sells),
         n_unpriced=sum(t.value_usd is None for t in buys + sells),
     )
 
