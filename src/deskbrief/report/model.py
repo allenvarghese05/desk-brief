@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import types
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime
 from typing import Any, Self, Union, get_args, get_origin, get_type_hints
@@ -36,6 +36,7 @@ from typing import Any, Self, Union, get_args, get_origin, get_type_hints
 import duckdb
 import numpy as np
 
+from deskbrief.calendars import prev_business_day
 from deskbrief.checks.anomaly import MIN_MOVES, daily_moves
 from deskbrief.config import BriefSettings, Config, Instrument, RelatedPair, config_hash
 from deskbrief.query import (
@@ -56,7 +57,6 @@ from deskbrief.query import (
     overnight_changes,
     previous_brief_time,
     series,
-    series_all,
     series_by_feed,
     series_key,
     source_name,
@@ -284,6 +284,15 @@ class Event:
     title: str
     source: str  # display name ("FRED", "Treasury")
     kind: str  # release | auction
+    period: str | None = None  # what the release covers ("Oct"), when the source gives it
+    prior: str | None = None  # the previous value, as the source gives it, when it does
+
+
+#: why there is no note when that is a configuration state, not news: the reader sees nothing
+#: (no "No note today" line); the reason goes to the log and to Data health (PR #102 review)
+NOTE_NO_KEY = "no API key is configured"
+NOTE_OFF = "the note is turned off in config"
+NOTE_SILENT_REASONS = frozenset({NOTE_NO_KEY, NOTE_OFF})
 
 
 @dataclass(frozen=True)
@@ -302,6 +311,15 @@ class Note:
     dropped: tuple[str, ...] = ()  # why each dropped sentence went (logged, never shown)
     model: str = ""
     cost_usd: float = 0.0
+    written_at: datetime | None = None  # the brief it was written for (the dashboard says so)
+
+    @property
+    def shown(self) -> bool:
+        """Whether a reader sees anything: kept sentences, or "No note today" with a reason
+        that is news (an API error, the cap, nothing surviving), never a configuration state."""
+        return bool(self.sentences) or (
+            self.reason is not None and self.reason not in NOTE_SILENT_REASONS
+        )
 
 
 @dataclass(frozen=True)
@@ -362,6 +380,7 @@ class BriefModel:
         *,
         exclude_tiers: Collection[int] = (),
         health_date: date | None = None,
+        brief_time: datetime | None = None,
     ) -> Self:
         """Build the brief for ET ``report_date`` as known at ``report_time`` (aware UTC).
 
@@ -376,11 +395,19 @@ class BriefModel:
         on a weekend. When given, those reads are bounded by ``report_time`` (a re-run stored
         later is ignored). The default ``None`` reads ``report_date`` without that bound, exactly
         as before, so the morning email is unchanged.
+
+        ``brief_time`` (keyword-only) anchors "new since the previous brief" to a brief rather
+        than to ``report_time``'s clock: the dashboard passes the day's archived brief time (or
+        the scheduled one), so its ranking is the brief's at any hour (PR #102 review). The
+        default ``None`` uses ``report_time``, which is the brief's own time in the morning job.
         """
         report_time = ensure_utc(report_time)
+        anchor = ensure_utc(brief_time) if brief_time is not None else report_time
         changes = {
             c.last.instrument_id: c
-            for c in overnight_changes(duck, report_date, report_time, exclude_tiers=exclude_tiers)
+            for c in overnight_changes(
+                duck, report_date, report_time, exclude_tiers=exclude_tiers, brief_time=anchor
+            )
         }
         snapshot = tuple(c.last for c in changes.values())  # ordered by instrument_id
         baselines = tuple(c.previous for c in changes.values() if c.previous is not None)
@@ -399,8 +426,7 @@ class BriefModel:
         }
         hidden = frozenset(exclude_tiers)
         by_feed = series_by_feed(duck, config.checks.anomaly.window_days * 2, report_time)
-        best = series_all(duck, config.checks.anomaly.window_days * 2, report_time)
-        scores = _scores(config, list(changes.values()), by_feed, best, hidden)
+        scores = _scores(config, list(changes.values()), by_feed, hidden)
         for iid, sc in scores.items():
             rows[iid] = replace(rows[iid], sigma=sc.sigma, sigma_note=sc.note)
         spread = _spread_row(duck, config, report_time)
@@ -441,9 +467,9 @@ class BriefModel:
             movers=movers,
             read=read,
             caveats=caveats,
-            previous_brief=previous_brief_time(report_date, report_time),
+            previous_brief=previous_brief_time(report_date, anchor),
             subject=_subject(read, report_time),
-            snapshot=_snapshot(config, sections, caveats),
+            snapshot=_snapshot(config, sections, caveats, previous_brief_time(report_date, anchor)),
         )
 
     # -- serialisation ------------------------------------------------------
@@ -763,37 +789,34 @@ class _Score:
 def _sigma_history(
     ch: ChangeRow,
     by_feed: dict[SeriesKey, tuple[ValueRow, ...]],
-    best: dict[str, tuple[ValueRow, ...]],
     hidden: frozenset[int],
 ) -> tuple[tuple[ValueRow, ...], str | None]:
-    """The daily history a move is scored against, and why there is none (T61 review).
+    """The daily history a move is scored against, and why there is none.
 
-    The baseline's own daily series first, so the move and its history share one basis (a
-    Yahoo ``^IRX`` quote against Yahoo's ``^IRX`` closes, Brent's future against its own
-    closes). Failing that, the best-tier daily history of the instrument (an FX pair's 17:00
-    quote has no daily series of its own), except for a quoted yield: the official par yield
-    is another basis, so it is left without sigma and says why.
+    Only the baseline's own daily series (T61 and PR #102 reviews): a Yahoo ``^IRX`` quote
+    against Yahoo's ``^IRX`` closes, Brent's future against its own closes. Another series
+    measures another basis (FRED spot for a future, the ECB fix for an FX pair's New York close,
+    the official par yield for a quoted rate), so a move without enough history of its own is
+    left without sigma, and so unranked, and says why.
     """
     assert ch.previous is not None
-    own = by_feed.get(series_key(ch.previous), ()) if ch.previous.interval == "1d" else ()
-    own = tuple(r for r in own if r.tier not in hidden)
+    prev = ch.previous
+    name = f"{source_name(prev.source)} {prev.dataset}"
+    if prev.interval != "1d":
+        return (), f"no sigma: its baseline ({name}, an intraday quote) has no daily history"
+    own = tuple(r for r in by_feed.get(series_key(prev), ()) if r.tier not in hidden)
     if len(own) > MIN_MOVES:
         return own, None
-    last = ch.last
-    if ch.family == "yield" and last.interval not in OFFICIAL_INTERVALS:
-        name = f"{source_name(ch.previous.source)} {ch.previous.dataset}"
-        return (), (
-            f"no sigma: fewer than {MIN_MOVES + 1} daily closes of {name} stored, and the "
-            "official yield history measures another basis"
-        )
-    return tuple(r for r in best.get(last.instrument_id, ()) if r.tier not in hidden), None
+    return (), (
+        f"no sigma: fewer than {MIN_MOVES + 1} daily values of {name} stored; another series "
+        "would measure another basis"
+    )
 
 
 def _scores(
     config: Config,
     changes: Sequence[ChangeRow],
     by_feed: dict[SeriesKey, tuple[ValueRow, ...]],
-    best: dict[str, tuple[ValueRow, ...]],
     hidden: frozenset[int],
 ) -> dict[str, _Score]:
     """Sigma of every rankable change: the T20 anomaly check's own scoring, |move| against the
@@ -805,7 +828,7 @@ def _scores(
         if not ch.rankable or ch.previous is None or ch.change is None:
             continue
         iid = ch.last.instrument_id
-        past, why = _sigma_history(ch, by_feed, best, hidden)
+        past, why = _sigma_history(ch, by_feed, hidden)
         if why is not None:
             out[iid] = _Score(None, 0, why)
             continue
@@ -837,11 +860,19 @@ def _direction(x: float) -> str:
 
 
 def _movers(config: Config, rows: dict[str, Row], scores: dict[str, _Score]) -> tuple[Mover, ...]:
-    """Rankable changes with sigma at or above the anomaly warn level, largest first."""
+    """Rankable changes with sigma at or above the anomaly warn level, largest first.
+
+    A proxy (an ETF) whose underlying market has a value is left out, as in the snapshot: one
+    market is never ranked twice, and the read never counts it twice (PR #102 review)."""
+    under = _underlying(config)
     out: list[Mover] = []
     for iid, sc in scores.items():
         row = rows.get(iid)
         if sc.sigma is None or sc.sigma < config.checks.anomaly.z_warn or row is None:
+            continue
+        if row.is_proxy and any(
+            (u := rows.get(x)) is not None and u.available for x in under.get(iid, ())
+        ):
             continue
         ch = row.change
         assert ch is not None
@@ -923,12 +954,8 @@ def _read(brief: BriefSettings, rows: dict[str, Row], n_ranked: int) -> Read:
         text = f"{label}. Nothing moved more than usual."
     elif label == brief.mixed_label:
         kind, regime = "mixed", None
-        parts = [
-            f"{rs.label} ({', '.join(r.label for r in hits if r.regime == rs.label)})"
-            for rs in brief.regime_rules
-            if met.get(rs.label)
-        ]
-        text = f"{label}. Rules met for " + " and ".join(parts) + "."
+        split = [rs.label for rs in brief.regime_rules if met.get(rs.label)]
+        text = f"{label}. The rules split between " + " and ".join(split) + "."
     elif label == brief.unclear_label:
         kind = "unclear"
         regime = (
@@ -992,6 +1019,12 @@ def _close_window(
     if len(common) < 2 or not sa[common[-2]] or not sb[common[-2]]:
         return None
     d0, d1 = common[-2], common[-1]
+    # only the latest session: both legs' own baselines must be that day's close, so a stalled
+    # feed never turns an old window into today's caveat (PR #102 review)
+    if d1 != et_date(a.previous.as_of) or d1 != et_date(b.previous.as_of):
+        return None
+    if d0 != prev_business_day("XNYS", d1):  # a missing day would stretch the window
+        return None
     return (sa[d1] / sa[d0] - 1) * 100, (sb[d1] / sb[d0] - 1) * 100, d0, d1
 
 
@@ -1088,6 +1121,11 @@ def _crosscheck_text(i: CheckItem) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _one_line(text: str) -> str:
+    """External text on one line: newlines, tabs and runs of spaces become one space."""
+    return " ".join(str(text).split())
+
+
 def today_events(items: Sequence[EventItem], report_date: date) -> tuple[Event, ...]:
     """The events dated ``report_date`` (ET), in the reader's order, with their ET time
     (``query.events_today`` has already applied ``schemas.current_rows``)."""
@@ -1096,7 +1134,18 @@ def today_events(items: Sequence[EventItem], report_date: date) -> tuple[Event, 
         if e.event_date != report_date:
             continue
         when = f"{to_et(e.scheduled_at):%H:%M}" if e.scheduled_at is not None else ""
-        out.append(Event(e.event_date, when, e.title, source_name(e.source), e.kind))
+        prior = e.details.get("prior") if isinstance(e.details, Mapping) else None
+        out.append(
+            Event(
+                e.event_date,
+                when,
+                _one_line(e.title),
+                source_name(e.source),
+                e.kind,
+                _one_line(e.period) if e.period else None,
+                _one_line(str(prior)) if prior not in (None, "") else None,
+            )
+        )
     return tuple(sorted(out, key=lambda x: (x.time_text or "99:99", x.title)))
 
 
@@ -1122,9 +1171,10 @@ def _underlying(config: Config) -> dict[str, tuple[str, ...]]:
     return {k: tuple(dict.fromkeys(v)) for k, v in out.items()}
 
 
-def _snap_meta(row: Row) -> str:
-    """What the reader needs beside the figure: its tier and, for an official, weekly or
-    monthly value, its date (P-024: weekly and monthly series are dated)."""
+def _snap_meta(row: Row, previous_brief: datetime | None = None) -> str:
+    """What the reader needs beside the figure: its tier; for an official, weekly or monthly
+    value, its date (P-024); for a quote older than the previous brief, its time; and the
+    caveat words that belong to the value (IEX, fallback)."""
     ch = row.change
     if row.instrument_id == SPREAD_ID:
         return f"derived, {row.as_of_text}"
@@ -1136,14 +1186,26 @@ def _snap_meta(row: Row) -> str:
     if last.interval == "1mo":
         et = to_et(last.as_of)
         return f"monthly, {et:%b %Y}"
-    proxy = "proxy, " if row.is_proxy else ""
+    parts = ["proxy"] if row.is_proxy else []
     if last.interval == "1d":
-        return f"{proxy}{row.tier_name}, {to_et(last.as_of):%a}"
-    return f"{proxy}{row.tier_name}"
+        parts.append(f"{row.tier_name}, {to_et(last.as_of):%a}")
+    elif previous_brief is not None and ensure_utc(last.as_of) < ensure_utc(previous_brief):
+        et = to_et(last.as_of)
+        parts.append(f"{row.tier_name}, {et:%a} {et:%H:%M}")
+    else:
+        parts.append(row.tier_name)
+    if any(q.startswith("IEX") for q in row.qualifiers):
+        parts.append("IEX")
+    if any(q.startswith("fallback") for q in row.qualifiers):
+        parts.append("fallback")
+    return ", ".join(parts)
 
 
 def _snapshot(
-    config: Config, sections: Sequence[Section], caveats: Sequence[Caveat]
+    config: Config,
+    sections: Sequence[Section],
+    caveats: Sequence[Caveat],
+    previous_brief: datetime | None = None,
 ) -> tuple[SnapGroup, ...]:
     """The compact snapshot: one row per market, the underlying instead of its proxy when the
     underlying has a value, rows with no trade since their last close and rows with no value
@@ -1174,8 +1236,9 @@ def _snapshot(
                     value_text=r.value_text,
                     change_text=r.change_text if has else "",
                     direction=_direction(r.change_value) if r.change_value is not None else "none",
-                    meta=_snap_meta(r),
-                    check=iid in flagged,
+                    meta=_snap_meta(r, previous_brief),
+                    # named in Check before using, or a failed data check: never hidden
+                    check=iid in flagged or r.dq_flag == "fail",
                 )
             )
         if rows or quiet or missing:
@@ -1298,6 +1361,7 @@ def _decode(tp: Any, value: Any) -> Any:
 
 
 __all__ = [
+    "NOTE_SILENT_REASONS",
     "BriefModel",
     "Caveat",
     "Event",

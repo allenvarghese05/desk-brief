@@ -161,7 +161,7 @@ def test_a_quoted_yield_without_its_own_history_is_left_unscored_and_says_why(
     assert r.change.rankable
     assert r.sigma is None
     assert r.sigma_note is not None
-    assert "official yield history measures another basis" in r.sigma_note
+    assert "another series would measure another basis" in r.sigma_note
     assert m.movers == ()
 
 
@@ -216,9 +216,10 @@ def test_read_mixed_when_the_rules_split(tmp_path: Path) -> None:
     assert m.read is not None
     assert (m.read.label, m.read.kind, m.read.tone) == ("Mixed", "mixed", "flat")
     assert m.read.regime is None
-    assert m.read.text == (
-        "Mixed. Rules met for Risk-off (Equity futures down) and Risk-on (VIX down)."
-    )
+    assert m.read.text == "Mixed. The rules split between Risk-off and Risk-on."
+    assert [(r.regime, r.label) for r in m.read.met] == [
+        ("Risk-off", "Equity futures down"), ("Risk-on", "VIX down"),
+    ]  # fmt: skip
 
 
 def test_read_quiet_when_nothing_is_ranked(tmp_path: Path) -> None:
@@ -360,3 +361,46 @@ def test_an_older_model_json_without_the_p024_sections_still_loads(tmp_path: Pat
     old = BriefModel.from_json(json.dumps(data))
     assert old.movers == ()
     assert old.read is None
+
+
+def test_a_proxy_never_ranks_beside_its_underlying(tmp_path: Path) -> None:
+    alp = {"source": "alpaca", "dataset": "iex_latest", "tier": 1}
+    spy = _history("SPY", 600.0, 0.002, FRI, unit="USD", **YH)
+    spy_tick = tick("SPY", et(MON, "06:59"), spy[-1]["value"] * (1 - 8 * 0.002), unit="USD", **alp)
+    es = price("ES_F", -8, base=6000.0, unit="index_pts")
+    both = build(world(tmp_path / "both", es, spy, [spy_tick]))
+    assert [x.instrument_id for x in both.movers] == ["ES_F"]  # SPY stands in for ES_F
+    assert both.read is not None
+    assert both.read.n_ranked == 1
+    alone = build(world(tmp_path / "alone", spy, [spy_tick]))
+    assert [x.instrument_id for x in alone.movers] == ["SPY"]  # no future: the proxy ranks
+
+
+def test_an_fx_move_has_no_sigma_from_another_basis(tmp_path: Path) -> None:
+    td = {"source": "twelvedata", "dataset": "fx_quote", "unit": "fx_rate"}
+    ecb = {"source": "ecb", "dataset": "eurofxref", "field": "rate", "unit": "fx_rate"}
+    rows = [
+        *_history("EURUSD", 1.08, 0.001, FRI, **ecb),
+        tick("EURUSD", et(FRI, "16:58"), 1.0800, **td),
+        tick("EURUSD", et(MON, "06:58"), 1.0900, **td),
+    ]
+    r = row(build(world(tmp_path, rows)), "EURUSD")
+    assert r.change is not None
+    assert r.change.rankable
+    assert r.sigma is None  # the ECB fix's history is another basis than the NY close
+    assert r.sigma_note is not None
+    assert "intraday quote" in r.sigma_note
+
+
+def test_the_pair_fallback_uses_only_the_latest_session(tmp_path: Path) -> None:
+    gold = price("GOLD_F", 1, base=2000.0, at="06:55")
+    gld = _history("GLD", 185.0, 0.002, date(2026, 11, 11), unit="USD", **YH)  # stalls on Wed
+    wed = gld[-1]["value"]
+    gld += [
+        daily("GLD", FRI, round(wed * 1.05, 6), unit="USD", **YH),  # Friday, no Thursday close
+        tick("GLD", et(MON, "04:10"), wed * 1.05, unit="USD"),
+    ]
+    caveats = build(world(tmp_path, gold, gld)).caveats
+    # the latest date both have is Friday, but the window before it is Wed to Fri for GLD:
+    # only a window ending on both baselines' own session is used, and Thu is missing
+    assert all("Wed" not in c.text for c in caveats if c.kind == "pair")

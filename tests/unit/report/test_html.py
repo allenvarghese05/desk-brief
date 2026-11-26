@@ -19,11 +19,11 @@ from typing import Any
 import pytest
 
 import brief_synth
-from brief_synth import FRI, MON, MON_0700, World, daily, et, fixture_config, monday_rows, tick
+from brief_synth import FRI, MON, MON_0700, THU, World, daily, et, fixture_config, monday_rows, tick
 from deskbrief.calendars import is_business_day
 from deskbrief.report import html as report_html
 from deskbrief.report.html import FOOTER_LINE, dashboard_url, render_html, render_text
-from deskbrief.report.model import BriefModel, Note, Read, _subject
+from deskbrief.report.model import BriefModel, Event, Note, Read, _subject
 
 GOLDEN = Path(__file__).parent / "golden"
 YH = {"source": "yahoo", "dataset": "history", "tier": 2}
@@ -175,8 +175,27 @@ def test_weekly_and_monthly_series_are_dated(model: BriefModel) -> None:
 
 
 def test_unavailable_markets_fold_into_one_grey_line(model: BriefModel) -> None:
-    assert any("data unavailable" in section(render_html(model), "Snapshot") for _ in [0])
+    assert "data unavailable" in section(render_html(model), "Snapshot")
     assert any(g.unavailable for g in model.snapshot)
+
+
+def test_a_failed_check_keeps_its_marker_in_the_snapshot(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(desk_rows())
+    w.dq(MON, [("range", "fail", "stooq", "WTI")])
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
+    assert wti.check
+
+
+def test_an_old_quote_carries_its_time_in_the_snapshot(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    # Thursday's evening quote is the latest value; Friday's 07:00 brief already had it
+    w.observations([daily("WTI", THU, 72.0, **YH, unit="USD"),
+                    tick("WTI", et(THU, "18:30"), 71.0, unit="USD")])  # fmt: skip
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
+    assert wti.meta == "delayed, Thu 18:30"
 
 
 def test_check_before_using_and_the_check_marker(model: BriefModel) -> None:
@@ -216,10 +235,32 @@ def test_note_or_no_note_today(model: BriefModel) -> None:
     html = render_html(kept)
     assert "S&amp;P futures fell 1.6%." in html
     assert "Every number checked (1 of 1)." in html
-    gone = replace(model, note=Note(reason="no API key is configured"))
-    assert "No note today: no API key is configured." in render_html(gone)
-    assert "No note today: no API key is configured." in render_text(gone)
+    gone = replace(model, note=Note(reason="the API timed out"))
+    assert "No note today: the API timed out." in render_html(gone)
+    assert "No note today: the API timed out." in render_text(gone)
     assert "No note today" not in render_html(model)  # no note stored: nothing in its place
+    for quiet in ("no API key is configured", "the note is turned off in config"):
+        silent = replace(model, note=Note(reason=quiet))
+        assert "No note today" not in render_html(silent)  # the log and Data health say why
+        assert quiet not in render_text(silent)
+
+
+def test_event_titles_from_sources_are_escaped_and_kept_on_one_line(tmp_path: Path) -> None:
+    from deskbrief.query import EventItem
+    from deskbrief.report.model import today_events
+
+    hostile = EventItem(MON, et(MON, "08:30"), "release", '<script>x</script>\nInjected  line',
+                        "fred", "release_dates", "Oct\n", None, {"prior": "+1.4%"})  # fmt: skip
+    events = today_events([hostile], MON)
+    w = World(tmp_path)
+    m = replace(BriefModel.from_store(w.connect(), w.config, MON, MON_0700), today=events)
+    html = render_html(m)
+    assert "<script>x" not in html
+    assert "&lt;script&gt;x&lt;/script&gt; Injected line, Oct" in html
+    assert "&middot; prior +1.4%" in html
+    text = render_text(m)
+    assert "  08:30  <script>x</script> Injected line, Oct · prior +1.4% (FRED)" in text
+    assert "Injected line" in text.split("TODAY (ET)", 1)[1].split("\n")[1]  # one line
 
 
 def _read(label: str, kind: str) -> Read:
@@ -240,9 +281,27 @@ def test_subject_line_is_the_read_then_desk_brief_and_the_date(label: str, kind:
     assert _subject(_read(label, kind), MON_0700) == f"{label} · Desk Brief · Mon 16 Nov"
 
 
-def test_notify_sends_the_models_subject(model: BriefModel) -> None:
-    src = (Path(report_html.__file__).parent / "notify.py").read_text(encoding="utf-8")
-    assert "_Built(model.subject or model.title," in src
+def test_notify_sends_the_models_subject_for_a_mixed_read(tmp_path: Path) -> None:
+    """Behaviour, not source: the morning report step sends the model's read as the subject."""
+    from deskbrief.models import JobKind, RunContext, Trigger
+    from deskbrief.report.notify import NullNotifier, report_steps
+
+    cboe = {"source": "cboe", "dataset": "vix_history"}
+    vix = _history("VIX", 16.0, FRI, unit="index_pts", **cboe)
+    down = tick("VIX", et(MON, "06:58"), vix[-1]["value"] * (1 - 5 * 0.002), unit="index_pts")
+    rows = [*price("ES_F", -8, 6000.0, "index_pts"), *vix, down]
+    w = World(tmp_path)
+    w.observations(rows)
+    ctx = RunContext(
+        run_id="RUNSUBJ", job=JobKind.MORNING, trigger=Trigger.MANUAL, target_date=MON,
+        now_utc=MON_0700, git_sha="x", config_hash="x", config=w.config, store=w.store,
+    )  # fmt: skip
+    null = NullNotifier()
+    build, notify = report_steps(null)
+    build(ctx)
+    notify(ctx)
+    (msg,) = null.messages
+    assert msg.subject == "Mixed · Desk Brief · Mon 16 Nov"
 
 
 def test_template_never_says_what_a_value_is() -> None:
@@ -275,10 +334,29 @@ def _golden_model(tmp_path: Path) -> BriefModel:
     return replace(m, config_hash="MASKED")
 
 
-@pytest.mark.parametrize(("name", "render"), [("brief_email.html", render_html),
-                                              ("brief_email.txt", render_text)])  # fmt: skip
-def test_golden_email(tmp_path: Path, name: str, render: Any) -> None:
-    text = render(_golden_model(tmp_path))
+def _golden_with_note(tmp_path: Path) -> BriefModel:
+    m = _golden_model(tmp_path)
+    es = next(x for x in m.movers if x.instrument_id == "ES_F")
+    fell = f"S&P futures fell {es.change_text.lstrip(chr(0x2212))}."
+    note = Note((fell,), 1, 1, model="synthetic", written_at=MON_0700)
+    events = (
+        Event(MON, "08:30", "Durable goods orders", "FRED", "release", "Oct", "+1.4%"),
+        Event(MON, "", "4-Week Bill auction", "Treasury", "auction"),
+    )
+    return replace(m, note=note, today=events)
+
+
+@pytest.mark.parametrize(
+    ("name", "render", "build"),
+    [
+        ("brief_email.html", render_html, _golden_model),
+        ("brief_email.txt", render_text, _golden_model),
+        ("brief_email_note.html", render_html, _golden_with_note),
+        ("brief_email_note.txt", render_text, _golden_with_note),
+    ],
+)
+def test_golden_email(tmp_path: Path, name: str, render: Any, build: Any) -> None:
+    text = render(build(tmp_path))
     if os.environ.get("UPDATE_GOLDEN"):
         (GOLDEN / name).write_text(text, encoding="utf-8")
     assert text == (GOLDEN / name).read_text(encoding="utf-8")

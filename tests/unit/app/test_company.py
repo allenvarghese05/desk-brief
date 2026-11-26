@@ -205,3 +205,18 @@ def test_company_stylesheet_is_flat(flat_css: Any) -> None:
 
     assert flat_css(company.COMPANY_CSS) == []
     assert not re.search(r"title=", company.COMPANY_CSS)
+
+
+def test_holders_of_different_quarters_each_say_their_own() -> None:
+    from app.components import company
+
+    newer = {**_holder("Example Pension Fund", "0006666666", 3000.0),
+             "period": date(2026, 9, 30), "filed_date": date(2026, 11, 13)}  # fmt: skip
+    frame = to_frame("filings", [_row(), _holder("Invented Asset Management", "0007777777",
+                                                 -12000.0), newer])  # fmt: skip
+    co = company_filings_from_frame(frame, "EXMP", MON_0700, 90)
+    assert co.holders_periods_differ
+    html = company.section_html(co, 90)
+    assert "13F · each holder&#x27;s latest 13F" in html or "each holder's latest 13F" in html
+    assert "Example Pension Fund · as of 30 Sep 2026" in html
+    assert "Invented Asset Management · as of 30 Jun 2026" in html

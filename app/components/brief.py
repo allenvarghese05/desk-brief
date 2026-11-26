@@ -19,17 +19,8 @@ from datetime import datetime
 from html import escape
 from typing import Protocol
 
-from deskbrief.report.model import Caveat, Read
+from deskbrief.report.model import Caveat, Note, Read
 from deskbrief.timeutil import to_et
-
-
-class NoteLike(Protocol):
-    """What the pane needs of a stored note (``report.model.Note``, card T66)."""
-
-    sentences: tuple[str, ...]
-    n_checked: int
-    n_numbers: int
-    reason: str | None  # why there is no note today; None when sentences survived
 
 
 class EventLike(Protocol):
@@ -38,6 +29,8 @@ class EventLike(Protocol):
     time_text: str  # "08:30", or "" when the source gives a date only
     title: str
     source: str
+    period: str | None
+    prior: str | None
 
 
 def when(prev: datetime | None) -> str:
@@ -57,15 +50,19 @@ def _read_line(read: Read | None) -> str:
     return f'<p class="db-read"><span class="db-regime{tone}">{escape(label)}.</span>{tail}</p>'
 
 
-def _note(note: NoteLike | None) -> str:
-    """The note one sentence per line and "every number checked (n of n)", or why not."""
-    if note is None or not note.sentences:
-        why = note.reason if note is not None and note.reason else "the note was not written"
-        return f'<p class="db-nonote">No note today: {escape(why)}.</p>'
+def _note(note: Note | None) -> str:
+    """The note one sentence per line, its time and "every number checked (n of n)"; or "No
+    note today" with a reason that is news; or nothing (no note stored, or a configuration
+    state such as no API key, which goes to the log and Data health)."""
+    if note is None or not note.shown:
+        return ""
+    if not note.sentences:
+        return f'<p class="db-nonote">No note today: {escape(note.reason or "")}.</p>'
     lines = "".join(f'<p class="db-note-s">{escape(s)}</p>' for s in note.sentences)
+    at = f"Note at {to_et(note.written_at):%H:%M} ET · " if note.written_at else ""
     return (
         f"{lines}"
-        f'<p class="db-checked"><span class="db-ok" aria-hidden="true">✓</span> every number '
+        f'<p class="db-checked">{at}<span class="db-ok" aria-hidden="true">✓</span> every number '
         f"checked ({note.n_checked} of {note.n_numbers})</p>"
     )
 
@@ -112,7 +109,9 @@ def _today(events: Sequence[EventLike] | None) -> str:
         return _section("Today", "ET", body)
     rows = "".join(
         f'<span class="db-cal-t">{escape(e.time_text or "all day")}</span>'
-        f'<div>{escape(e.title)}<span class="db-cal-src"> · {escape(e.source)}</span></div>'
+        f"<div>{escape(e.title)}{escape(', ' + e.period) if e.period else ''}"
+        + (f'<span class="db-cal-src"> · prior {escape(e.prior)}</span>' if e.prior else "")
+        + f'<span class="db-cal-src"> · {escape(e.source)}</span></div>'
         for e in events
     )
     return _section("Today", "ET", f'<div class="db-cal">{rows}</div>')
@@ -129,15 +128,16 @@ def pane(
     caveats: Sequence[Caveat],
     as_of: datetime,
     previous_brief: datetime | None,
-    note: NoteLike | None = None,
+    note: Note | None = None,
     events: Sequence[EventLike] | None = None,
 ) -> str:
-    """The whole brief pane as one block of markup."""
+    """The whole brief pane as one block of markup. ``as_of`` is the brief the page follows
+    (``data.brief_time_of``): the archived brief's time, else the scheduled one."""
     et = to_et(as_of)
     since = when(previous_brief)
-    aside = f"{et:%H:%M} ET" + (f" · new since {since}" if since else "")
+    aside = f"{et:%a} {et:%H:%M} ET" + (f" · new since {since}" if since else "")
     main = (
-        f'<div class="db-label">This morning<span>{escape(aside)}</span></div>'
+        f'<div class="db-label">The brief<span>{escape(aside)}</span></div>'
         f"{_read_line(read)}{_note(note)}"
     )
     side = _why(read, since) + _caveats(caveats) + _today(events)

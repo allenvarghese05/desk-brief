@@ -441,26 +441,17 @@ def test_shown_numbers_cover_the_facts(model: BriefModel) -> None:
     assert any(s.value == Decimal(chg.rstrip("%")) and s.unit == "pct" for s in shown)
 
 
-def test_the_brief_pane_shows_the_stored_note() -> None:
-    from app.components import brief
+def test_no_client_is_built_under_tests_even_with_a_key(
+    model: BriefModel, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-a-shell-might-export")
+    out = with_note(model, world.config, dict(__import__("os").environ), world.store)
+    assert out.note is not None
+    assert out.note.reason == "the API returned an error (NoAnthropicInTestsError)"
 
-    pane = brief.pane(None, (), MON_0700, None, Note(("S&P futures fell 1.6%.",), 1, 1))
-    assert '<p class="db-note-s">S&amp;P futures fell 1.6%.</p>' in pane
-    assert "every number checked (1 of 1)" in pane
-    none = brief.pane(None, (), MON_0700, None, Note(reason="no API key is configured"))
-    assert "No note today: no API key is configured." in none
 
-
-def test_the_dashboard_reads_the_stored_note_and_never_the_api(tmp_path: Path) -> None:
-    from app.components import data
-
-    store = LocalBackend(tmp_path / "data")
-    _archive(store, MON, 1, {"sentences": ["Stored."], "n_checked": 0, "n_numbers": 0})
-    config = World(tmp_path).config
-    config = config.model_copy(
-        update={"storage": config.storage.model_copy(update={"local_root": str(store.root)})}
-    )
-    assert data._stored_note(config, {}, MON).sentences == ("Stored.",)
-    assert data._stored_note(config, {}, FRI).reason == "no brief has been written today yet"
-    src = Path(data.__file__).read_text(encoding="utf-8")
-    assert "anthropic" not in src
+def test_configuration_states_are_silent_to_the_reader() -> None:
+    assert not Note(reason="no API key is configured").shown
+    assert not Note(reason="the note is turned off in config").shown
+    assert Note(reason="the API timed out").shown
+    assert Note(("Kept.",), 0, 0).shown

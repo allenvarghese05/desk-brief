@@ -25,7 +25,7 @@ from pathlib import Path
 
 import jinja2
 
-from deskbrief.report.model import NO_TRADE_TEXT, TIER_GLYPH, TIER_NAME, BriefModel, Read
+from deskbrief.report.model import NO_TRADE_TEXT, TIER_GLYPH, TIER_NAME, BriefModel, Event, Read
 from deskbrief.timeutil import to_et
 
 FOOTER_LINE = "Personal project built on public data. Not investment advice."
@@ -49,7 +49,16 @@ def dashboard_url(env: Mapping[str, str]) -> str | None:
     url = (env.get(DASHBOARD_URL_ENV) or "").strip()
     if not url.startswith("https://") or any(c in url for c in " \"<>'`"):
         return None
+    if any(ord(c) < 32 or ord(c) == 127 for c in url):  # no newline, tab or other control
+        return None
     return url
+
+
+def _event_line(e: Event) -> str:
+    """ "Durable goods orders, Oct · prior +1.4%": the period and prior value only when the
+    source gives them (one line: the model has already collapsed external whitespace)."""
+    text = e.title + (f", {e.period}" if e.period else "")
+    return text + (f" · prior {e.prior}" if e.prior else "")
 
 
 def _since(m: BriefModel) -> str:
@@ -76,8 +85,16 @@ def _why(read: Read | None) -> str:
 
 
 def _movers_note(m: BriefModel) -> str:
-    window = max((x.n_moves for x in m.movers), default=0)
-    text = f"σ compares the move with that market's last {window} daily moves"
+    windows = sorted({x.n_moves for x in m.movers})
+    if not windows:
+        return ""
+    if len(windows) == 1:
+        text = f"σ compares the move with that market's last {windows[0]} daily moves"
+    else:
+        text = (
+            "σ compares each move with that market's own recent daily moves "
+            f"({windows[0]} to {windows[-1]} of them)"
+        )
     since = _since(m)
     if since:
         text += f", for values new since the {since} brief"
@@ -99,7 +116,8 @@ def _read_parts(m: BriefModel) -> tuple[str, str, str]:
     """(label with its full stop, the rest of the read, the label colour)."""
     if m.read is None:
         return "No read.", "", _READ["flat"]
-    label, _, rest = m.read.text.partition(". ")
+    label = m.read.label
+    rest = m.read.text.removeprefix(f"{label}.").strip()
     return f"{label}.", rest, _READ.get(m.read.tone, _READ["flat"])
 
 
@@ -131,7 +149,7 @@ def render_html(model: BriefModel, *, dashboard: str | None = None) -> str:
             read_label=label,
             read_rest=rest,
             read_color=colour,
-            note=model.note,
+            note=model.note if model.note is not None and model.note.shown else None,
             why=_why(model.read),
             movers=model.movers[:TOP_MOVERS],
             movers_note=_movers_note(model),
@@ -150,7 +168,7 @@ def render_text(model: BriefModel, *, dashboard: str | None = None) -> str:
     """Plain-text alternative (the ``text/plain`` part of the email), in the same order."""
     label, rest, _ = _read_parts(model)
     out = [_when(model), f"{label} {rest}".strip(), ""]
-    note = model.note
+    note = model.note if model.note is not None and model.note.shown else None
     if note is not None and note.sentences:
         out += [" ".join(note.sentences), f"Every number checked ({note.n_checked} of "
                 f"{note.n_numbers}).", ""]  # fmt: skip
@@ -175,7 +193,7 @@ def render_text(model: BriefModel, *, dashboard: str | None = None) -> str:
         )
     out += ["", "TODAY (ET)"]
     if model.today:
-        out += [f"  {e.time_text or 'all day'}  {e.title} ({e.source})" for e in model.today]
+        out += [f"  {e.time_text or 'all day'}  {_event_line(e)} ({e.source})" for e in model.today]
     else:
         out.append("  No releases or auctions stored for today.")
     out += ["", "SNAPSHOT"]

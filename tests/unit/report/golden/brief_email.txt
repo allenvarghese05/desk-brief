@@ -18,7 +18,7 @@ SNAPSHOT
   FX
     EURUSD (official, Fri): 1.0842 +0.4%
   COMMODITIES
-    WTI (delayed): $71.20 −1.1%
+    WTI (delayed) (check): $71.20 −1.1%
   EQUITIES
     S&P fut (delayed) (check): 5,885.67 −1.6%
     QQQ: data unavailable

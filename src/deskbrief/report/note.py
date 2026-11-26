@@ -51,7 +51,7 @@ from typing import Any, Protocol, cast
 from deskbrief.config import Config, NoteSettings
 from deskbrief.ids import new_id
 from deskbrief.logging import get_logger
-from deskbrief.report.model import BriefModel, Note
+from deskbrief.report.model import NOTE_NO_KEY, NOTE_OFF, BriefModel, Note
 from deskbrief.store.backend import REPORTS_PREFIX, StorageBackend
 from deskbrief.timeutil import ensure_utc, to_et, utc_now
 
@@ -453,10 +453,12 @@ def write_note(
     s = config.brief.note
     log = get_logger()
     if not s.enabled:
-        return Note(reason="the note is turned off in config", model=s.model)
+        log.info("note.skipped", reason=NOTE_OFF)
+        return Note(reason=NOTE_OFF, model=s.model)
     key = (env.get(s.api_key_env) or "").strip()
     if not key:
-        return Note(reason="no API key is configured", model=s.model)
+        log.info("note.skipped", reason=NOTE_NO_KEY)
+        return Note(reason=NOTE_NO_KEY, model=s.model)
     payload = facts(model, hidden_tiers(config))
     system, user = prompt(s), "Facts (JSON):\n" + json.dumps(payload, ensure_ascii=False)
     worst = _cost(s, (len(system) + len(user)) // 3 + 200, s.max_output_tokens)
@@ -555,9 +557,11 @@ def stored_note(store: StorageBackend, report_date: date) -> Note | None:
             versions.append((int(m[1]), key))
     if not versions:
         return None
-    raw = json.loads(store.get_bytes(max(versions)[1])).get("note")
+    doc = json.loads(store.get_bytes(max(versions)[1]))
+    raw = doc.get("note")
     if not isinstance(raw, Mapping):
         return None
+    written = doc.get("report_time")
     return Note(
         sentences=tuple(str(x) for x in raw.get("sentences") or ()),
         n_checked=int(raw.get("n_checked") or 0),
@@ -565,6 +569,7 @@ def stored_note(store: StorageBackend, report_date: date) -> Note | None:
         reason=raw.get("reason"),
         model=str(raw.get("model") or ""),
         cost_usd=float(raw.get("cost_usd") or 0.0),
+        written_at=ensure_utc(datetime.fromisoformat(written)) if written else None,
     )
 
 

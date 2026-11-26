@@ -120,7 +120,7 @@ def test_watchlist_default_is_unusual_first_with_the_movers_on_top(run_home: Run
     assert movers_at < text.find(es) < rest_at
     assert '<span class="db-sig">' in es
     assert "<small>Yahoo · delayed · 06:58</small>" in es  # source, tier, time
-    assert "since Fri 07:00 brief" in text  # the previous brief's clock time (T61 review)
+    assert "since Fri 06:15 brief" in text  # the previous brief's time, not the reader's clock
     # everything else starts folded: no 2Y row until its group opens
     assert 'data-db-id="UST_2Y"' not in text
     at.button(key="fold-rates").click().run()
@@ -147,13 +147,14 @@ def test_check_marker_on_the_strip_and_the_mover_row(run_home: Run) -> None:
 def test_brief_pane_shows_the_read_rules_checks_and_today(run_home: Run) -> None:
     text = page(run_home("hosted", rows=desk_rows()))
     pane = text.split('<div class="db-brief">', 1)[1]
-    assert '<div class="db-label">This morning<span>07:00 ET · new since Fri 07:00</span>' in pane
+    # anchored to the brief (none archived: the 06:15 schedule), not to the 07:00 render
+    assert '<div class="db-label">The brief<span>Mon 06:15 ET · new since Fri 06:15</span>' in pane
     assert 'class="db-read"><span class="db-regime' in pane
     assert '<div class="db-label">Why “' in pane
     assert '<div class="db-label">Check before using<span>1</span></div>' in pane
     assert "<b>Brent vs WTI</b>" in pane
     assert '<div class="db-label">Today<span>ET</span></div>' in pane
-    assert "No note today:" in pane
+    assert "No note today: no brief has been written today yet." in pane
 
 
 def test_quiet_store_reads_quiet_and_lists_nothing_to_check(run_home: Run) -> None:
@@ -273,7 +274,7 @@ def test_hero_shows_sigma_or_why_there_is_none(tmp_path: Path) -> None:
         tick("UST_3M", et(MON, "06:58"), 3.5, unit="pct"),
     ]
     three = _row(tmp_path / "b", rows, "UST_3M")
-    assert "official yield history measures another basis" in panels.chart_header(three, MON_0700)
+    assert "another series would measure another basis" in panels.chart_header(three, MON_0700)
 
 
 @pytest.mark.parametrize("mode", ["hosted", "local"])

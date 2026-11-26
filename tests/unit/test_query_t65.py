@@ -21,6 +21,7 @@ from deskbrief.query import (
     company_filings_from_frame,
     current_events,
     events_today,
+    holder_period_is_stale,
     latest_amendments_only,
 )
 from deskbrief.schemas import to_frame
@@ -273,3 +274,55 @@ def test_company_filings_reads_the_store(tmp_path: Path) -> None:
     cf = company_filings(ds, "AAPL", NOW, 90)
     assert cf.latest_filing is not None
     assert cf.holders_period == date(2026, 9, 30)
+
+
+# --------------------------------------------------------------------------------------------
+# PR #102 review batch 4: per-holder 13F periods, unmatched Form 4/A
+# --------------------------------------------------------------------------------------------
+
+
+def test_holders_keep_their_own_latest_quarter_during_the_filing_window() -> None:
+    rows: list[dict[str, Any]] = []
+    # one holder has filed the new quarter, another not yet: both show, each with its period
+    rows += _holder("0007777777-26-000003", date(2026, 9, 30), date(2026, 11, 10), 12000, 2000)
+    rows += _holder("0007777777-26-000002", date(2026, 6, 30), date(2026, 8, 10), 10000, 1000)
+    rows += _holder("0006666666-26-000001", date(2026, 6, 30), date(2026, 8, 12), 3000, -500,
+                    party="Other Invented Fund", cik="0006666666")  # fmt: skip
+    # a holder that stopped filing: its last quarter has missed two deadlines, left out
+    rows += _holder("0005555555-26-000001", date(2026, 3, 31), date(2026, 5, 12), 900, 100,
+                    party="Dormant Invented Fund", cik="0005555555")  # fmt: skip
+    cf = company_filings_from_frame(to_frame("filings", rows), "AAPL", NOW, 90)
+    assert [(h.party, h.period, h.accession) for h in cf.holders] == [
+        ("Invented Asset Management", date(2026, 9, 30), "0007777777-26-000003"),
+        ("Other Invented Fund", date(2026, 6, 30), "0006666666-26-000001"),
+    ]
+    assert cf.holders_period == date(2026, 9, 30)
+    assert cf.holders_periods_differ
+    assert not company_filings_from_frame(_company_frame(), "AAPL", NOW, 90).holders_periods_differ
+
+
+def test_holder_staleness_bound() -> None:
+    q1 = date(2026, 3, 31)
+    # two later quarters (Q2, Q3) are due by 2026-11-14 (Q3 end + 45 days)
+    assert not holder_period_is_stale(q1, date(2026, 11, 14))
+    assert holder_period_is_stale(q1, date(2026, 11, 15))
+    assert not holder_period_is_stale(date(2026, 6, 30), NOW.date())
+
+
+def test_an_unmatched_form4_amendment_is_counted_alone() -> None:
+    rows = [
+        # two Form 4s of one owner for one period; a 4/A restates one, the writer cannot tell
+        _filing("0009999999-26-000020", 0, "filing", "4", date(2026, 11, 2)),
+        _trade("0009999999-26-000020", 1, "4", date(2026, 11, 2), "buy", 100, 40.0),
+        _filing("0009999999-26-000021", 0, "filing", "4", date(2026, 11, 2)),
+        _trade("0009999999-26-000021", 1, "4", date(2026, 11, 2), "buy", 150, 40.0),
+        _filing("0009999999-26-000022", 0, "filing", "4/A", date(2026, 11, 9),
+                details_json='{"amendment_unmatched":true,"amends_candidates":'
+                             '["0009999999-26-000020","0009999999-26-000021"]}'),
+        _trade("0009999999-26-000022", 1, "4/A", date(2026, 11, 9), "buy", 120, 40.0),
+    ]  # fmt: skip
+    cf = company_filings_from_frame(to_frame("filings", rows), "AAPL", NOW, 90)
+    assert [(t.accession, t.shares) for t in cf.insiders.trades] == [
+        ("0009999999-26-000022", 120.0)
+    ]
+    assert cf.insiders.n_buys == 1

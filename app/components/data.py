@@ -37,6 +37,7 @@ from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
 from deskbrief.query import (
+    BRIEF_CLOCK_ET,
     CompanyFilings,
     Lineage,
     company_filings_from_frame,
@@ -64,7 +65,7 @@ from deskbrief.store.backend import StorageError
 from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
-from deskbrief.timeutil import et_date, utc_now
+from deskbrief.timeutil import et_date, et_to_utc, utc_now
 
 _log = logging.getLogger(__name__)
 
@@ -354,6 +355,8 @@ class Snapshot:
     last_run: tuple[date, datetime | None] | None = None
     #: the note stored with today's archived brief (T66): the dashboard never calls the API
     note: Note | None = None
+    #: the brief the page is anchored to (:func:`brief_time_of`)
+    brief_time: datetime | None = None
 
 
 def build_snapshot(
@@ -376,6 +379,8 @@ def build_snapshot(
     check read): a run that starts later cannot colour the dot or the flags while the status line
     says "No checks yet".
     """
+    note = _stored_note(config, env, et_date(now))
+    brief_time = brief_time_of(note, now)
     with shared_connection(config, env) as conn:
         latest = latest_check_run(conn, now)
         model = BriefModel.from_store(
@@ -385,6 +390,7 @@ def build_snapshot(
             now,
             exclude_tiers=exclude_tiers,
             health_date=latest.target_date if latest is not None else et_date(now),
+            brief_time=brief_time,
         )
         history = series_all(conn, SPARK_DAYS, now)
     model = replace(model, today=_today(config, env, now, model))
@@ -395,8 +401,22 @@ def build_snapshot(
             for k, v in history.items()
         },
         (latest.target_date, latest.started_at) if latest is not None else None,
-        _stored_note(config, env, et_date(now)),
+        note,
+        brief_time,
     )
+
+
+def brief_time_of(note: Note | None, now: datetime) -> datetime:
+    """The brief the page is anchored to (PR #102 review): the time of today's archived brief,
+    else today's scheduled fire time (``query.BRIEF_CLOCK_ET``). "New since the previous brief"
+    and the ranking then match that brief at any hour, never the reader's clock."""
+    if (
+        note is not None
+        and note.written_at is not None
+        and et_date(note.written_at) == et_date(now)
+    ):
+        return note.written_at
+    return et_to_utc(et_date(now), BRIEF_CLOCK_ET)
 
 
 #: Today reads the events (and their fetch log) stored in the last this many days: every run
@@ -654,6 +674,7 @@ class Overview:
     caveats: tuple[Caveat, ...] = ()
     previous_brief: datetime | None = None
     note: Note | None = None  # T66: the stored note (or why there is none)
+    brief_time: datetime | None = None  # the brief "new since" and the ranking follow
     today: tuple[Event, ...] = ()  # T65: today's scheduled releases and auctions
 
 
@@ -706,5 +727,6 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         caveats=tuple(c for c in model.caveats if all(i in by_id for i in c.instrument_ids)),
         previous_brief=model.previous_brief,
         note=snap.note,
+        brief_time=snap.brief_time,
         today=model.today,
     )

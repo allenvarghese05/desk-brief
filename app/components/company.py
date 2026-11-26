@@ -61,10 +61,11 @@ def _row(label: str, value: str, note: str) -> str:
     )
 
 
-def _holder(h: HolderChange) -> str:
+def _holder(h: HolderChange, own_period: bool = False) -> str:
     tone = "db-up" if h.shares_change > 0 else "db-down" if h.shares_change < 0 else "db-flat"
+    when = f" · as of {_d(h.period)}" if own_period else ""
     return (
-        f'<li><span class="db-co-party">{escape(h.party)}</span>'
+        f'<li><span class="db-co-party">{escape(h.party)}{when}</span>'
         f'<span class="{tone}">{_shares(h.shares_change)} sh</span></li>'
     )
 
@@ -120,13 +121,14 @@ def section_html(co: CompanyFilings | None, insider_days: int, *, listed: bool =
     if co.holders:
         added = sum(1 for h in co.holders if h.shares_change > 0)
         cut = sum(1 for h in co.holders if h.shares_change < 0)
-        names = "".join(_holder(h) for h in co.holders[:HOLDERS_LISTED])
+        differ = co.holders_periods_differ  # mid filing window: each holder's own quarter
+        names = "".join(_holder(h, differ) for h in co.holders[:HOLDERS_LISTED])
+        as_of = "each holder's latest 13F" if differ else f"as of {_d(co.holders_period)}"
         rows.append(
             _row(
                 "Big holders, last quarter",
                 f"{added} added · {cut} cut",
-                f"13F · as of {_d(co.holders_period)}, {HOLDER_LAG}"
-                f'<ul class="db-co-holders">{names}</ul>',
+                f'13F · {as_of}, {HOLDER_LAG}<ul class="db-co-holders">{names}</ul>',
             )
         )
     else:

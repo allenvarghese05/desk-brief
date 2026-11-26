@@ -898,7 +898,9 @@ def test_ust_3m_quote_ranks_against_yahoos_own_previous_close(tmp_path: Path) ->
         ]
     )
     y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
-    assert (y.status, y.basis, y.note) == ("ok", "previous Yahoo close", None)
+    # PR #102 review: the 14:59 quote gives way to Monday's own close of the same series
+    assert (y.last.source, y.last.dataset, y.last.as_of) == ("yahoo", "history", et(MON23))
+    assert y.status == "ok"
     assert y.previous is not None
     assert (y.previous.source, y.previous.dataset, y.previous.as_of) == (
         "yahoo",
@@ -967,7 +969,7 @@ def test_late_published_fred_value_is_ranked_once(tmp_path: Path) -> None:
     )
 
 
-def test_tick_older_than_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
+def test_tick_older_than_the_previous_brief_gives_way_to_its_close(tmp_path: Path) -> None:
     w = World(tmp_path)
     w.observations(
         [
@@ -976,11 +978,11 @@ def test_tick_older_than_the_previous_brief_is_not_rankable(tmp_path: Path) -> N
         ]
     )
     es = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "ES_F")
-    assert es.status == "ok"
+    # PR #102 review: Monday's close of the same series supersedes Monday's earlier tick, so the
+    # stale tick is neither shown nor ranked; Tuesday has no move yet against that close
+    assert (es.last.interval, es.last.value) == ("1d", 6000.0)
+    assert es.status == "no_move_yet"
     assert not es.rankable
-    assert es.unranked_reason == (
-        "value dated 23 Nov 06:30 ET, not new since the previous brief (23 Nov 07:00 ET)"
-    )
 
 
 def test_brent_baseline_is_never_fred_spot(tmp_path: Path) -> None:

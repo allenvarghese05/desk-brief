@@ -53,3 +53,28 @@ def _no_system_ca_store(request: pytest.FixtureRequest) -> Iterator[None]:
         yield
     finally:
         mp.undo()
+
+
+class NoAnthropicInTestsError(RuntimeError):
+    """Raised if a unit test ever tries to build the real Anthropic client."""
+
+
+def _refuse_sdk_client(*_args: object, **_kwargs: object) -> object:
+    raise NoAnthropicInTestsError("unit tests never build the real Anthropic client (T66)")
+
+
+@pytest.fixture(autouse=True)
+def _no_anthropic_api(request: pytest.FixtureRequest) -> Iterator[None]:
+    """PR #102 review: no unit test may call the Anthropic API, whatever the developer's shell
+    exports. The key is removed from the environment and the SDK client factory refuses to be
+    built, so a test that forgets a fake gets "No note today", never a billed call."""
+    if request.node.get_closest_marker("integration") is not None:
+        yield
+        return
+    mp = pytest.MonkeyPatch()
+    mp.delenv("ANTHROPIC_API_KEY", raising=False)
+    mp.setattr("deskbrief.report.note._sdk_client", _refuse_sdk_client)
+    try:
+        yield
+    finally:
+        mp.undo()
