@@ -18,7 +18,13 @@ revisions           ET date of ``detected_at``
 alerts              ``target_date`` of the run
 runs                ``target_date`` of the run
 scorecard_daily     the ET date being scored
+events              ET date of ``ingested_at`` (the fetch, not the event date)
+filings             ET date of ``ingested_at`` (the fetch, not the filing date)
 ==================  ==========================================================
+
+``events`` and ``filings`` (P-024, card T64) live under ``derived/``, not ``clean/``: they are
+not observations, a clean rebuild does not re-parse them, and every run re-fetches them, so they
+must not move with ``clean/_CURRENT``. Partitioning by the fetch date keeps one file per run.
 
 ``as_of`` semantics (also documented in ``deskbrief.schemas``): ``tick`` = the trade/quote
 instant; ``1m`` = bar **start** instant; ``1d`` = 00:00 America/New_York on the reference
@@ -97,6 +103,8 @@ TABLE_LAYER: dict[str, str] = {
     "revisions": DERIVED_PREFIX,
     "alerts": DERIVED_PREFIX,
     "runs": DERIVED_PREFIX,
+    "events": DERIVED_PREFIX,  # P-024 / T64: Today's calendar (not an observation table)
+    "filings": DERIVED_PREFIX,  # P-024 / T64: SEC EDGAR facts (not an observation table)
 }
 
 #: Tables written as one file per date (overwritten), not one file per run.

@@ -26,11 +26,35 @@ currency per unit of base, ``index_pts``, ``USD``, ``shares`` (volume), ``index`
 value that may be negative, e.g. NFCI), ``contracts`` (futures contracts; a net position may
 be negative). Fields: ``level`` = an index value that is neither a price nor a rate;
 ``net_position`` = net speculative position; ``open_interest`` = open interest.
+
+Two tables are not observation tables (P-024, card T64): ``events`` (Today's scheduled releases
+and auctions) and ``filings`` (SEC EDGAR filings, Form 4 trades and 13F holder changes per
+instrument). Neither feeds ``obs_all``/``obs_latest``, the checks, sigma or the change ranking.
+Both are re-fetched each run, and a later fetch may no longer contain a key an earlier one had
+(a rescheduled release, a re-parse with fewer facts). So the newest run *replaces* a whole scope
+(``REPLACE_SCOPE``) rather than single keys; every reader goes through :func:`current_rows`.
+Writer rules:
+
+* within one run a natural key (``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``) appears once;
+* a run writes a scope only when every fetch of it succeeded, and writes all of it (``events``:
+  every event of that source and dataset in the horizon; ``filings``: the filing row and every
+  fact parsed from that accession);
+* ``events.source`` / ``events.dataset`` are exactly the ``source_log`` source and dataset of
+  the fetch, so a genuinely empty fetch can be matched to the scope it empties;
+* an ``/A`` filing names the accession it amends in ``amends_accession`` when the filing says
+  which one; readers then drop the amended filing (:func:`current_rows`).
+
+Reader rules (:func:`current_rows`): the newest run replaces a scope; for ``events`` only a
+fetch logged ``empty`` with nothing quarantined can empty it; old accessions are never replaced
+by newer ones, so readers filter by date (Form 4 by ``filed_date`` within
+``filings.insider_days``; 13F by the latest ``period``; the latest 10-Q/10-K by ``filed_date``).
+
+``filings`` units: ``shares`` in shares, ``price`` in USD per share, ``value_usd`` in USD.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from datetime import date, datetime
 from typing import Any
 
@@ -38,7 +62,18 @@ import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 
-from deskbrief.models import CheckType, DQStatus, FetchStatus, JobKind, RunStatus, Trigger
+from deskbrief.models import (
+    CheckType,
+    DQStatus,
+    EventKind,
+    FetchStatus,
+    FilingForm,
+    FilingRowKind,
+    JobKind,
+    RunStatus,
+    TradeSide,
+    Trigger,
+)
 
 ENUMS: dict[str, tuple[str, ...]] = {
     "field": (
@@ -74,6 +109,10 @@ ENUMS: dict[str, tuple[str, ...]] = {
         "stale",
     ),
     "severity": ("info", "warn", "crit"),
+    "event_kind": tuple(k.value for k in EventKind),
+    "filing_form": tuple(f.value for f in FilingForm),
+    "filing_row": tuple(r.value for r in FilingRowKind),
+    "trade_side": tuple(s.value for s in TradeSide),
 }
 
 # Backwards-friendly names
@@ -233,6 +272,53 @@ TABLES: dict[str, dict[str, str]] = {
         "disagreement_rate": "float?",
         "n_crosschecks": "int",
     },
+    # P-024 / T64: Today's calendar. One row per scheduled event per run.
+    "events": {
+        "event_id": "str",  # unique per source+dataset in a run; includes the event date
+        "source": "str",  # fiscaldata | fred
+        "dataset": "str",
+        "kind": "enum:event_kind",
+        "title": "str",  # e.g. "Consumer Price Index", "7-Year Note auction"
+        "event_date": "date",  # ET calendar date of the event
+        "scheduled_at": "ts?",  # UTC instant when the time is known, else null
+        "period": "str?",  # reference period as the source names it, e.g. "2026-02"
+        "url": "str?",  # the source page for the event
+        "details_json": "str",  # source-specific extras (term, CUSIP, offering, release id)
+        "fetch_id": "str",
+        "run_id": "str",
+        "ingested_at": "ts",
+    },
+    # P-024 / T64: SEC EDGAR, per instrument of kind stock. Row seq 0 is the filing itself;
+    # rows 1.. are the facts parsed from it (Form 4 transactions, 13F holder positions).
+    "filings": {
+        "instrument_id": "str",
+        "cik": "str",  # issuer CIK, 10 digits, zero-padded
+        "accession": "str",  # EDGAR accession number, 0000000000-00-000000
+        "seq": "int",  # 0 = the filing; 1.. = parsed facts in document order
+        "row_kind": "enum:filing_row",
+        "form": "enum:filing_form",
+        "filed_date": "date",  # EDGAR filing date (ET)
+        "period": "date?",  # period of report: quarter or year end; 13F as-of quarter end
+        "url": "str",  # EDGAR link to the filing
+        "party": "str?",  # Form 4 reporting owner, or 13F filer (holder) name
+        "party_cik": "str?",  # that party's CIK, 10 digits
+        "party_role": "str?",  # Form 4 relationship, e.g. "Director", "Officer: CFO"
+        "trade_date": "date?",  # Form 4 transaction date
+        "trade_code": "str?",  # Form 4 transaction code (P, S, A, M, F, G, ...)
+        "side": "enum:trade_side?",  # Form 4 only
+        "shares": "float?",  # Form 4 shares traded; 13F shares held at period end
+        "shares_change": "float?",  # 13F: shares held minus the previous quarter's
+        "price": "float?",  # Form 4 price per share, USD
+        "value_usd": "float?",  # Form 4 shares x price; 13F market value, USD
+        "plan_10b5_1": "bool",  # Form 4 row marked as under a Rule 10b5-1 plan; else false
+        "details_json": "str",  # extras (security title, ownership form, 13F class)
+        "amends_accession": "str?",  # an /A filing: the accession it amends, when known
+        "source": "str",  # edgar
+        "dataset": "str",
+        "fetch_id": "str",
+        "run_id": "str",
+        "ingested_at": "ts",
+    },
 }
 
 _NONNEG_INT = {
@@ -247,6 +333,7 @@ _NONNEG_INT = {
     "n_dq_warn",
     "fetches",
     "n_crosschecks",
+    "seq",
 }
 _EXTRA_CHECKS: dict[str, list[pa.Check]] = {
     "tier": [pa.Check.isin([1, 2, 3])],
@@ -255,6 +342,14 @@ _EXTRA_CHECKS: dict[str, list[pa.Check]] = {
     "result_id": [pa.Check.str_length(min_value=1)],
     "fetch_id": [pa.Check.str_length(min_value=1)],
     "run_id": [pa.Check.str_length(min_value=1)],
+    "event_id": [pa.Check.str_length(min_value=1)],
+    "cik": [pa.Check.str_matches(r"^\d{10}$")],
+    "party_cik": [pa.Check.str_matches(r"^\d{10}$")],
+    "accession": [pa.Check.str_matches(r"^\d{10}-\d{2}-\d{6}$")],
+    "amends_accession": [pa.Check.str_matches(r"^\d{10}-\d{2}-\d{6}$")],
+    "shares": [pa.Check.ge(0)],
+    "price": [pa.Check.ge(0)],
+    "value_usd": [pa.Check.ge(0)],
 }
 
 #: Natural key of an observation; multiple ingested versions of a key are revisions.
@@ -266,6 +361,20 @@ OBS_NATURAL_KEY: tuple[str, ...] = (
     "interval",
     "as_of",
 )
+
+#: Key of a calendar event (``events``), unique within one run. Not a cross-run dedup key:
+#: readers use :func:`current_rows`.
+EVENTS_NATURAL_KEY: tuple[str, ...] = ("source", "dataset", "event_id")
+
+#: Key of a filing row (``filings``), unique within one run. Readers use :func:`current_rows`.
+FILINGS_NATURAL_KEY: tuple[str, ...] = ("instrument_id", "accession", "seq")
+
+#: The unit one run replaces as a whole (P-024 review B1): the newest run that wrote a scope
+#: is its only current version, so keys a later fetch dropped do not linger.
+REPLACE_SCOPE: dict[str, tuple[str, ...]] = {
+    "events": ("source", "dataset"),
+    "filings": ("instrument_id", "accession"),
+}
 
 # ---------------------------------------------------------------------------
 # kind -> pandera checks / pandas dtype
@@ -359,9 +468,81 @@ def _dtype(kind: str) -> Any:
     raise ValueError(kind)  # pragma: no cover
 
 
+_ET = "America/New_York"
+_FORM4 = ("4", "4/A")
+_FORM13F = ("13F-HR", "13F-HR/A")
+
+
+def _scheduled_on_event_date(df: pd.DataFrame) -> pd.Series:
+    """``scheduled_at``, when known, falls on ``event_date`` in New York."""
+    known = df["scheduled_at"].notna()
+    if not known.any():
+        return pd.Series(True, index=df.index)
+    et_day = pd.to_datetime(df["scheduled_at"], utc=True).dt.tz_convert(_ET).dt.date
+    return ~known | (et_day == df["event_date"])
+
+
+def _required_where(mask: pd.Series, df: pd.DataFrame, cols: tuple[str, ...]) -> pd.Series:
+    ok = pd.Series(True, index=df.index)
+    for c in cols:
+        ok &= df[c].notna()
+    return ~mask | ok
+
+
+def _filing_row_shape(df: pd.DataFrame) -> pd.Series:
+    """seq 0 is exactly the filing row; each fact kind sits on its own form."""
+    kind, form = df["row_kind"], df["form"]
+    return (
+        ((df["seq"] == 0) == (kind == "filing"))
+        & ((kind != "insider_trade") | form.isin(_FORM4))
+        & ((kind != "holder_change") | form.isin(_FORM13F))
+    )
+
+
+def _insider_trade_fields(df: pd.DataFrame) -> pd.Series:
+    cols = ("party", "trade_date", "trade_code", "side", "shares")
+    return _required_where(df["row_kind"] == "insider_trade", df, cols)
+
+
+def _holder_change_fields(df: pd.DataFrame) -> pd.Series:
+    cols = ("party", "party_cik", "shares", "shares_change")
+    return _required_where(df["row_kind"] == "holder_change", df, cols)
+
+
+def _thirteen_f_period(df: pd.DataFrame) -> pd.Series:
+    return _required_where(df["form"].isin(_FORM13F), df, ("period",))
+
+
+def _amends_only_from_amendments(df: pd.DataFrame) -> pd.Series:
+    """``amends_accession`` only on an ``/A`` form, and never the filing's own accession."""
+    named = df["amends_accession"].notna()
+    return ~named | (df["form"].str.endswith("/A") & (df["amends_accession"] != df["accession"]))
+
+
+def _plan_flag_on_trades_only(df: pd.DataFrame) -> pd.Series:
+    return ~df["plan_10b5_1"].astype(bool) | (df["row_kind"] == "insider_trade")
+
+
+#: Cross-column (row-wise) rules, P-024 review round 1.
+_FRAME_CHECKS: dict[str, list[pa.Check]] = {
+    "events": [
+        pa.Check(_scheduled_on_event_date, error="scheduled_at must fall on event_date (ET)"),
+    ],
+    "filings": [
+        pa.Check(_filing_row_shape, error="seq 0 is the filing row; facts match their form"),
+        pa.Check(_insider_trade_fields, error="insider_trade rows need party, trade fields"),
+        pa.Check(_holder_change_fields, error="holder_change rows need party, holdings"),
+        pa.Check(_thirteen_f_period, error="13F rows need period (the as-of quarter end)"),
+        pa.Check(_plan_flag_on_trades_only, error="plan_10b5_1 only on insider_trade rows"),
+        pa.Check(_amends_only_from_amendments, error="amends_accession only on an /A form"),
+    ],
+}
+
+
 def _schema(name: str, decl: Mapping[str, str]) -> pa.DataFrameSchema:
     return pa.DataFrameSchema(
         {c: _column(c, k) for c, k in decl.items()},
+        checks=_FRAME_CHECKS.get(name, []),
         strict=True,
         ordered=False,
         name=name,
@@ -382,6 +563,8 @@ REVISIONS_SCHEMA = TABLE_SCHEMAS["revisions"]
 ALERTS_SCHEMA = TABLE_SCHEMAS["alerts"]
 RUNS_SCHEMA = TABLE_SCHEMAS["runs"]
 SCORECARD_SCHEMA = TABLE_SCHEMAS["scorecard_daily"]
+EVENTS_SCHEMA = TABLE_SCHEMAS["events"]
+FILINGS_SCHEMA = TABLE_SCHEMAS["filings"]
 
 
 def columns(table: str) -> tuple[str, ...]:
@@ -426,3 +609,95 @@ def to_frame(table: str, rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
 def validate(table: str, df: pd.DataFrame) -> pd.DataFrame:
     """Validate ``df`` against the table schema; raises ``pandera.errors.SchemaErrors``."""
     return TABLE_SCHEMAS[table].validate(df, lazy=True)
+
+
+def _utc_column(df: pd.DataFrame, col: str, table: str) -> pd.Series:
+    """``df[col]`` as tz-aware UTC; a naive column is a writer bug, so it raises."""
+    ser = df[col]
+    if not isinstance(ser.dtype, pd.DatetimeTZDtype):
+        raise ValueError(f"{table}.{col} must be tz-aware UTC timestamps, got {ser.dtype}")
+    utc: pd.Series = ser.dt.tz_convert("UTC")
+    return utc
+
+
+def _newest_by(
+    records: Iterable[Mapping[Hashable, Any]], key: tuple[str, ...], at: str
+) -> dict[tuple[Any, ...], tuple[Any, str]]:
+    """``{key values: (latest at, run_id)}``; ties go to the larger ``run_id``."""
+    best: dict[tuple[Any, ...], tuple[Any, str]] = {}
+    for rec in records:
+        k = tuple(rec[c] for c in key)
+        cand = (rec[at], str(rec["run_id"]))
+        if k not in best or cand > best[k]:
+            best[k] = cand
+    return best
+
+
+def _genuinely_empty_runs(source_log: pd.DataFrame) -> list[dict[Hashable, Any]]:
+    """One record per ``(source, dataset, run_id)`` whose every fetch was ``empty`` with nothing
+    quarantined: the provider said "nothing", so the scope is replaced by no rows.
+
+    Anything else leaves the previous rows current: a failed fetch, a quarantined parse (logged
+    ``ok`` with ``rows_quarantined > 0``; P-024 review N1), or ``ok`` with no rows written.
+    """
+    log = source_log.assign(responded_at=_utc_column(source_log, "responded_at", "source_log"))
+    log = log.assign(
+        _empty=(log["status"] == FetchStatus.EMPTY.value) & (log["rows_quarantined"] == 0)
+    )
+    runs = log.groupby(["source", "dataset", "run_id"], sort=False).agg(
+        empty=("_empty", "all"), responded_at=("responded_at", "max")
+    )
+    out: list[dict[Hashable, Any]] = runs[runs["empty"]].reset_index().to_dict("records")
+    return out
+
+
+def current_rows(
+    table: str, df: pd.DataFrame, source_log: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """The current version of ``events`` or ``filings``. Every reader uses this (P-024 B1, N1).
+
+    1. Per ``REPLACE_SCOPE``, only the rows of the newest run that wrote that scope survive.
+       "Newest" is the run with the latest ``ingested_at`` in the scope. Scheduled runs are
+       serialised (one ``deskbrief-pipeline`` concurrency group), so that is the latest run
+       start; runs that overlap (a manual local run beside CI) are not, and ties go to the
+       larger ``run_id`` (a ULID, which sorts by run start).
+    2. ``events`` with ``source_log``: a newer run that wrote no rows for a scope empties it only
+       when every fetch of that scope was ``empty`` with zero rows quarantined. A failed fetch,
+       a quarantined parse (logged ``ok``) or ``ok`` with no rows leaves the previous rows. This
+       matches on ``(source, dataset)``, so ``events.dataset`` must be the fetch's dataset.
+    3. ``filings``: a filing is superseded, and all its rows dropped, when a current row of the
+       same instrument names it in ``amends_accession``.
+
+    Old accessions are never replaced by newer ones (each is its own scope): readers also filter
+    by date (Form 4 by ``filed_date``, the last ``filings.insider_days``; 13F by the latest
+    ``period``; the latest 10-Q/10-K by ``filed_date``). Timestamps must be tz-aware (naive
+    raises). Returns the same columns and dtypes.
+    """
+    scope = REPLACE_SCOPE[table]
+    if df.empty:
+        return df.reset_index(drop=True)
+    ingested = _utc_column(df, "ingested_at", table)
+    keys = df[[*scope, "run_id"]].assign(ingested_at=ingested)
+    records: list[dict[Hashable, Any]] = keys.to_dict("records")
+    newest = _newest_by(records, scope, "ingested_at")
+    current: dict[tuple[Any, ...], str | None] = {k: run for k, (_, run) in newest.items()}
+    if table == "events" and source_log is not None and not source_log.empty:
+        empties = _genuinely_empty_runs(source_log)
+        for k, (at, run) in _newest_by(empties, ("source", "dataset"), "responded_at").items():
+            if k in newest and (at, run) > newest[k]:
+                current[k] = None  # a newer complete fetch said nothing is scheduled
+    mask = pd.Series(
+        [current.get(tuple(r[c] for c in scope)) == r["run_id"] for r in records], index=df.index
+    )
+    if table == "filings":
+        live = df[mask]
+        amended = {
+            (i, a)
+            for i, a in zip(live["instrument_id"], live["amends_accession"], strict=True)
+            if isinstance(a, str)
+        }
+        not_amended = [
+            (i, a) not in amended for i, a in zip(df["instrument_id"], df["accession"], strict=True)
+        ]
+        mask &= pd.Series(not_amended, index=df.index)
+    return df[mask].reset_index(drop=True)

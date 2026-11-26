@@ -12,7 +12,8 @@ calling :meth:`Datasets.append`. ``scorecard_daily`` is one file per date, overw
 
 Partition membership (P-006) is checked on every append: each row must belong to ``part_date``
 (observations by ``et_date(as_of)``, quarantine/revisions by ``et_date(detected_at)``,
-source_log by ``et_date(requested_at)``, dq/crosscheck/runs by ``target_date``), else
+source_log by ``et_date(requested_at)``, dq/crosscheck/runs by ``target_date``, events and
+filings by ``et_date(ingested_at)``), else
 ``ValueError``. (``alerts`` has no date column, so it cannot be checked.) ``overwrite=True`` is
 only accepted for the daily tables.
 
@@ -80,6 +81,8 @@ PARTITION_RULES: dict[str, tuple[str, Callable[[object], date]]] = {
     "crosscheck_results": ("target_date", _plain_date),
     "runs": ("target_date", _plain_date),
     "scorecard_daily": ("date", _plain_date),  # the ET date scored
+    "events": ("ingested_at", _et_date_of),  # P-024 / T64: the fetch date, one file per run
+    "filings": ("ingested_at", _et_date_of),  # P-024 / T64: the fetch date, one file per run
 }
 
 

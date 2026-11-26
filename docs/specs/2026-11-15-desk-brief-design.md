@@ -150,6 +150,9 @@ sources:
   stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
   cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}
+  fiscaldata: {rate_per_min: 30, timeout_s: 20, retries: 3}              # P-024: Treasury upcoming auctions
+  edgar:      {rate_per_min: 300, timeout_s: 20, retries: 2,             # P-024: SEC allows 10/s (600/min max)
+               user_agent_env: DESKBRIEF_SEC_USER_AGENT}                 # contact UA from a secret, never committed
 instruments:
   - id: SPY
     name: SPDR S&P 500 ETF
@@ -203,6 +206,37 @@ dashboard:
   mode_env: DESKBRIEF_DISPLAY_MODE    # hosted | local
   refresh_seconds: 60
   hosted_hidden_tiers: [1]
+brief:                          # P-024 (contract T64); the read, Check before using, the note
+  regime_rules:                 # a label whose min_met rules are met while no other label has one met;
+    - label: Risk-off           # rankable moves only (T61). BriefSettings.read_label decides.
+      min_met: 2
+      rules:                    # market, direction, and min_sigma OR (min_change + change_unit pct|bp|pts|pp)
+        - {market: ES_F, direction: down, min_sigma: 1.0, label: Equity futures down}
+        # ... VIX up, HY_OAS up, UST_2Y down; Risk-on mirrors them
+  quiet_label: Quiet            # nothing ranked
+  mixed_label: Mixed            # rules met for more than one label
+  unclear_label: No clear read  # moves ranked, but no label's rules met far enough
+  related_pairs:                # flagged when both rankable changes, over matching windows, differ by more than limit
+    - {pair: [BRENT, WTI], limit: 1.0, unit: pct}
+    - {pair: [GOLD_F, GLD], limit: 1.0, unit: pct}
+  note:                         # T66; inert without the key
+    model: claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY
+    max_sentences: 5
+    timeout_s: 30
+    effort: low                 # adaptive thinking kept short
+    max_output_tokens: 8000     # covers thinking + the note, so thinking cannot starve the text
+    monthly_cap_usd: 5.0
+    price_input_usd_per_mtok: 2.0
+    price_output_usd_per_mtok: 10.0
+    forbidden_words: [buy, sell, target, will rise, ...]
+events:                         # Today's calendar (T65)
+  horizon_days: 7
+  fred_releases: []             # each {release_id, title, time_et: "HH:MM"}; FRED gives dates only
+filings:                        # SEC EDGAR (T65), instruments of kind stock only
+  companies: []                 # each {instrument, cik: 10 digits, cusip (optional, for 13F)}; share classes may share a cik
+  insider_days: 90              # Form 4 look-back
+  holders: []                   # 13F filers compared quarter on quarter: {cik, name}
 ```
 
 All thresholds above are starting values; tuning them is expected and each tuning is an INCIDENTS.md entry ("false alarm tuned").
@@ -354,6 +388,8 @@ deskbrief-data/
   derived/alerts/date={…}/run={run_id}.parquet
   derived/runs/date={…}/run={run_id}.parquet
   derived/scorecard_daily/date={…}.parquet          # overwritten per day
+  derived/events/date={ingested ET date}/run={run_id}.parquet    # P-024: Today's calendar
+  derived/filings/date={ingested ET date}/run={run_id}.parquet   # P-024: SEC EDGAR facts
   serving/latest_snapshot.parquet  serving/health.json  serving/scorecard_30d.parquet
   serving/crosschecks_7d.parquet   serving/series_30d.parquet  serving/runs_14d.parquet
   reports/date={YYYY-MM-DD}/v{n}/brief.html|brief.xlsx|brief.xlsm|model.json
@@ -428,6 +464,14 @@ erDiagram
 **runs** — `run_id, job (morning|intraday|eod|backfill|rebuild|history), trigger (schedule|manual|catchup), target_date, scheduled_for, started_at, finished_at, status (ok|degraded|failed), git_sha, config_hash, n_fetch, n_fetch_failed, n_obs, n_dq_fail, n_dq_warn, report_key, schedule_delay_s`
 
 **scorecard_daily** — `source, date, fetches, ok_rate, median_latency_ms, p95_latency_ms, median_data_age_s, error_rate, disagreement_rate, n_crosschecks`
+
+**events** (derived, P-024) — key `(source, dataset, event_id)` unique within a run (`event_id` includes the event date); not an observation table (no `obs_latest`, checks or σ). Re-fetched each run: the newest run that wrote a `(source, dataset)` replaces it whole (`schemas.current_rows`, the one reader rule). A newer run that wrote nothing empties it only when every fetch of that scope was logged `empty` with zero rows quarantined; a failed fetch, a quarantined parse (logged `ok`) or `ok` with no rows leaves the previous rows. "Newest" = latest `ingested_at` in the scope; scheduled runs are serialised (one concurrency group), and ties go to the larger `run_id` (a ULID). Writer rules: a run writes a scope only when every fetch of it succeeded, and `events.source`/`dataset` are exactly the fetch's `source_log` source/dataset. `scheduled_at`, when known, falls on `event_date` in ET.
+
+`event_id, source (fiscaldata|fred), dataset, kind (release|auction), title, event_date (ET date), scheduled_at (UTC, null when only the date is known), period (reference period as the source names it), url, details_json, fetch_id, run_id, ingested_at`
+
+**filings** (derived, P-024) — key `(instrument_id, accession, seq)` unique within a run; seq 0 is exactly the filing row, 1.. the facts parsed from it; not an observation table. The newest run that wrote an `(instrument_id, accession)` replaces all of its rows (`schemas.current_rows`), so a re-parse with fewer facts leaves none behind. Insider-trade rows (Form 4 only) carry party, trade date, code, side and shares; holder-change rows (13F only) carry party, party CIK, shares and shares change; 13F rows carry `period`; `plan_10b5_1` only on insider trades. An `/A` filing names the accession it amends in `amends_accession` (when the filing says which); readers drop the amended filing. Old accessions are never replaced by newer ones, so readers filter by date: Form 4 by `filed_date` within `filings.insider_days`, 13F by the latest `period`, the latest 10-Q/10-K by `filed_date`.
+
+`instrument_id, cik (10 digits), accession (0000000000-00-000000), seq, row_kind (filing|insider_trade|holder_change), form (10-K, 10-K/A, 10-Q, 10-Q/A, 4, 4/A, 13F-HR, 13F-HR/A), filed_date, period (period of report; 13F as-of quarter end), url (EDGAR), party (Form 4 owner or 13F filer), party_cik, party_role, trade_date, trade_code (Form 4 code), side (buy|sell|other), shares (shares; ≥ 0), shares_change (13F, vs previous quarter; may be negative), price (USD per share; ≥ 0), value_usd (USD; ≥ 0), plan_10b5_1 (true only when the Form 4 row says so), details_json, amends_accession (an /A filing: the accession it amends), source (edgar), dataset, fetch_id, run_id, ingested_at`
 
 **reports** (in runs + `model.json`) — `report_date, version, run_id, html_key, xlsx_key, xlsm_key, email_status, recipients_count, sent_at`
 

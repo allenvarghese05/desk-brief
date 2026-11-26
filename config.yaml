@@ -23,6 +23,12 @@ sources:
   # T49: CFTC public reporting (Socrata, keyless); one request per run. docs/sources/cftc.md
   cftc:       {rate_per_min: 10, timeout_s: 30, retries: 3,
                user_agent: "desk-brief/0.1 (+https://github.com/allenvarghese05/desk-brief)"}
+  # P-024 / T64: contract entries only; T65 adds the adapters, probes and enables them.
+  fiscaldata: {rate_per_min: 30, timeout_s: 20, retries: 3, enabled: false}
+  # SEC fair access: at most 10 requests per second (600/min; config rejects more). The contact
+  # User-Agent is read from the secret named here and is never committed or logged.
+  edgar:      {rate_per_min: 300, timeout_s: 20, retries: 2, enabled: false,
+               user_agent_env: DESKBRIEF_SEC_USER_AGENT}
 
 instruments:
   # ---------------- Equities (ETFs and portfolio stocks) ----------------
@@ -564,3 +570,45 @@ dashboard:
   mode_env: DESKBRIEF_DISPLAY_MODE
   refresh_seconds: 60
   hosted_hidden_tiers: [1]
+
+# P-024: the brief shared by Home and the email. Starting values; tuning is a normal PR.
+brief:
+  # The read: a label whose min_met rules are met while no other label has a rule met.
+  # Rules look at rankable moves only (T61).
+  regime_rules:
+    - label: Risk-off
+      min_met: 2
+      rules:
+        - {market: ES_F,   direction: down, min_sigma: 1.0, label: Equity futures down}
+        - {market: VIX,    direction: up,   min_sigma: 1.0, label: VIX up}
+        - {market: HY_OAS, direction: up,   min_sigma: 1.0, label: High-yield spreads wider}
+        - {market: UST_2Y, direction: down, min_sigma: 1.0, label: Front-end yields down}
+    - label: Risk-on
+      min_met: 2
+      rules:
+        - {market: ES_F,   direction: up,   min_sigma: 1.0, label: Equity futures up}
+        - {market: VIX,    direction: down, min_sigma: 1.0, label: VIX down}
+        - {market: HY_OAS, direction: down, min_sigma: 1.0, label: High-yield spreads tighter}
+        - {market: UST_2Y, direction: up,   min_sigma: 1.0, label: Front-end yields up}
+  quiet_label: Quiet                  # nothing ranked
+  mixed_label: Mixed                  # rules met for more than one label
+  unclear_label: No clear read        # moves ranked, but no label's rules met far enough
+  # Check before using: two related markets whose moves differ by more than limit (pct points),
+  # compared over matching windows (gold futures trade overnight, GLD does not; T62 matches them).
+  related_pairs:
+    - {pair: [BRENT, WTI], limit: 1.0, unit: pct}
+    - {pair: [GOLD_F, GLD], limit: 1.0, unit: pct}
+  # T66: the morning note. Inert until the owner adds the ANTHROPIC_API_KEY secret.
+  note:
+    enabled: true
+    model: claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY
+    max_sentences: 5
+    timeout_s: 30
+    effort: low                       # adaptive thinking kept short
+    max_output_tokens: 8000           # covers thinking + the ~200-token note; thinking must not starve the text
+    monthly_cap_usd: 5.0              # pending the owner's confirmation (P-024 open question)
+    price_input_usd_per_mtok: 2.0     # claude-sonnet-5-5 list price, for the spend estimate
+    price_output_usd_per_mtok: 10.0
+    forbidden_words: [buy, sell, target, price target, will rise, will fall, should, recommend,
+                      forecast, predict, expect, outperform, underperform, overweight, underweight]
