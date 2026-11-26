@@ -220,3 +220,16 @@ def test_holders_of_different_quarters_each_say_their_own() -> None:
     assert "13F · each holder&#x27;s latest 13F" in html or "each holder's latest 13F" in html
     assert "Example Pension Fund · as of 30 Sep 2026" in html
     assert "Invented Asset Management · as of 30 Jun 2026" in html
+
+
+def test_an_ambiguous_amendment_flags_the_insider_line() -> None:
+    from dataclasses import replace
+
+    from app.components import company
+
+    co = company_filings_from_frame(filings(), "EXMP", MON_0700, 90)
+    flagged = replace(co, insiders=replace(co.insiders, n_ambiguous=1))
+    html = company.section_html(flagged, 90)
+    assert 'class="db-mark db-mark-warn db-check">check' in html
+    assert "1 amendment could not be matched to one original" in html
+    assert "db-check" not in company.section_html(co, 90)

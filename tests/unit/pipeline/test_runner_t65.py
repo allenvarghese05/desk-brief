@@ -480,3 +480,37 @@ def test_a_morning_run_for_a_past_date_leaves_the_calendar_alone(tmp_path: Path)
     assert sorted(current_rows("events", events, log)["run_id"]) == [ctx1.run_id] * 2
     assert any("is not today" in n for n in m2.notes)
     assert m2.status is RunStatus.OK
+
+
+def test_a_404_on_a_stored_original_never_counts_it_beside_its_amendment(
+    tmp_path: Path,
+) -> None:
+    """PR #102 review B3: run 1 stores a Form 4 and the Form 4/A that restates it, so only the
+    amendment counts. In run 2 the original's document answers 404: the amendment is skipped
+    too, so run 1's row naming the original stays current and the totals do not change."""
+    from deskbrief.query import company_filings_from_frame
+
+    cfg = _config(filings=True)
+    ea = edgar_answer()
+    env = _env(tmp_path, cfg, [EdgarSource(cfg)], ea, THU)
+    _run(env, ea, THU)
+    first = company_filings_from_frame(
+        Datasets(env.store).read("filings"), "AAPL", THU + timedelta(hours=1), 90
+    )
+
+    def original_404(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        if "form4_buy.xml" in url:  # the amended original's document is missing today
+            return 404, b"not found"
+        return ea(req, url)
+
+    _run(env, original_404, THU + timedelta(days=1))
+    after = company_filings_from_frame(
+        Datasets(env.store).read("filings"), "AAPL", THU + timedelta(days=1, hours=1), 90
+    )
+    assert {t.accession for t in after.insiders.trades} == {
+        t.accession for t in first.insiders.trades
+    }
+    assert (after.insiders.n_buys, after.insiders.buys_usd) == (
+        first.insiders.n_buys,
+        first.insiders.buys_usd,
+    )

@@ -1378,6 +1378,9 @@ class InsiderSummary:
     net_usd: float
     n_10b5_1: int
     n_unpriced: int
+    #: Form 4/As that could not be matched to one original (two or more candidates): their
+    #: candidates are left out, so a Form 4 nobody amended may be missing; the section says so
+    n_ambiguous: int = 0
 
 
 @dataclass(frozen=True)
@@ -1526,6 +1529,22 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
     return filings[keep].reset_index(drop=True)
 
 
+def _ambiguous_amendments(rows: pd.DataFrame, since: date, until: date) -> int:
+    """Form 4/A filing rows in the window whose original could not be told from two or more
+    candidates (``amends_candidates`` in their ``details_json``)."""
+    heads = rows[(rows["seq"] == 0) & rows["amends_accession"].isna() & (rows["form"] == "4/A")]
+    n = 0
+    for filed, details in zip(heads["filed_date"], heads["details_json"], strict=True):
+        info = json.loads(details) if isinstance(details, str) and details else {}
+        if (
+            since <= filed <= until
+            and isinstance(info, dict)
+            and len(info.get("amends_candidates") or ()) >= 2
+        ):
+            n += 1
+    return n
+
+
 def _insiders(rows: pd.DataFrame, since: date, until: date) -> InsiderSummary:
     trades: list[InsiderTrade] = []
     sel = rows[(rows["row_kind"] == "insider_trade")]
@@ -1565,6 +1584,7 @@ def _insiders(rows: pd.DataFrame, since: date, until: date) -> InsiderSummary:
         # over the same trades as the buy and sell counts (an exercise or a tax withholding
         # can carry the plan footnote, but it is neither: PR #102 review B4)
         n_10b5_1=sum(t.plan_10b5_1 for t in buys + sells),
+        n_ambiguous=_ambiguous_amendments(rows, since, until),
         n_unpriced=sum(t.value_usd is None for t in buys + sells),
     )
 

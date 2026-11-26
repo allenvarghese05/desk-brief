@@ -43,7 +43,11 @@ request's status and error and writes no rows. One exception: a 404 on a documen
 (logged `edgar.document_skipped`, listed under `skipped` in the bundle), so one missing
 document does not hold back a company every day. Each accession is still written whole or not
 at all: a skipped Form 4 gets no rows, and a holder with a skipped filing in its latest or
-previous 13F period gets no rows that run. A 404 on the submissions JSON, and any 5xx or 429,
+previous 13F period gets no rows that run. A Form 4/A whose possible original was skipped that
+run (a Form 4 filed on its `dateOfOriginalSubmission`) is skipped too, unless it still matches its
+original exactly (logged `edgar.amendment_skipped`): written now, it would name its original less
+surely than the stored row does, and the reader would count both. A 404 on the submissions JSON,
+and any 5xx or 429,
 still fail the whole fetch. The body stored in `raw/` is a JSON bundle of
 every document read (`bundle: edgar-bundle/1`), parsed purely by `parse_table`. 13F information
 tables are kept only for the configured CUSIPs, with the full document's byte size and sha256

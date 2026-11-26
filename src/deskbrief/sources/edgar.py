@@ -458,7 +458,7 @@ class EdgarSource:
         filings = recent_filings(subs)
         req = raw.request
         if req.dataset == COMPANY_DATASET:
-            rows = self._company_rows(req, filings, docs)
+            rows = self._company_rows(req, filings, docs, skipped)
         elif req.dataset == HOLDERS_DATASET:
             name = subs.get("name") if isinstance(subs.get("name"), str) else None
             rows = self._holder_rows(req, filings, docs, name, skipped)
@@ -482,7 +482,11 @@ class EdgarSource:
         }
 
     def _company_rows(
-        self, req: FetchRequest, filings: list[Filing], docs: list[dict[str, Any]]
+        self,
+        req: FetchRequest,
+        filings: list[Filing],
+        docs: list[dict[str, Any]],
+        skipped: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         instrument = req.symbols[0] if req.symbols else ""
         company = self._companies.get(instrument)
@@ -517,6 +521,23 @@ class EdgarSource:
             amends, candidates = None, None
             if filing.form == "4/A":
                 amends, candidates = _form4_original(filing, form4, originals)
+                missing = _skipped_originals(filing, form4, filings, skipped or set())
+                strict = (
+                    amends is not None
+                    and form4.original_submission is not None
+                    and by_acc[amends].filed == form4.original_submission
+                )
+                if missing and not strict:
+                    # PR #102 review B3: a Form 4 that could be its original was not readable
+                    # this run (404). Writing the amendment now would match it more weakly
+                    # than the stored row, which names the original; skip it, so the stored
+                    # rows stay current and nothing is counted twice.
+                    get_logger().warning(
+                        "edgar.amendment_skipped",
+                        accession=filing.accession,
+                        missing_originals=missing,
+                    )
+                    continue
             rows.extend(form4.rows(self._base(req, instrument, cik, filing), amends, candidates))
         return rows
 
@@ -942,6 +963,23 @@ def parse_form4(text: str, filing: Filing) -> Form4:
         trades=trades,
         other_owners=others,
         skipped=skipped,
+    )
+
+
+def _skipped_originals(
+    filing: Filing, form4: Form4, filings: list[Filing], skipped: set[str]
+) -> list[str]:
+    """Form 4s skipped this run (their document answered 404) that could be ``filing``'s
+    original: filed on its ``dateOfOriginalSubmission``, or, when it gives none, filed no later
+    than the amendment. The owner cannot be checked without the document, so this errs wide."""
+    on_date = form4.original_submission
+    return sorted(
+        f.accession
+        for f in filings
+        if f.accession in skipped
+        and f.form == "4"
+        and f.accession != filing.accession
+        and (f.filed == on_date if on_date is not None else f.filed <= filing.filed)
     )
 
 

@@ -411,10 +411,10 @@ def test_a_missing_form4_skips_that_filing_not_the_company(source: EdgarSource) 
     rows = source.parse_table(raw)
     accs = set(rows["accession"])
     assert "0009999999-26-000009" not in accs  # skipped whole: no rows for it
-    assert {"0009999999-26-000010", "0009999999-26-000008", "0009999999-26-000007"} <= accs
-    head = rows[(rows["accession"] == "0009999999-26-000008") & (rows["seq"] == 0)].iloc[0]
-    assert pd.isna(head["amends_accession"])  # its original is not in the bundle
-    assert json.loads(head["details_json"])["amends_candidates"] == []
+    # its Form 4/A is skipped too (PR #102 review B3): written now it could not name its
+    # original, so a stored row that does would be replaced and both would count
+    assert "0009999999-26-000008" not in accs
+    assert {"0009999999-26-000010", "0009999999-26-000007"} <= accs  # the company still loads
     validate("filings", clean_table_response(source, raw, "RUN1", "filings").rows)
 
 

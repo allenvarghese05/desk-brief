@@ -111,11 +111,24 @@ def section_html(co: CompanyFilings | None, insider_days: int, *, listed: bool =
     n_trades = ins.n_buys + ins.n_sells
     plans = f" · {ins.n_10b5_1} of {n_trades} under 10b5-1 plans" if n_trades else ""
     unpriced = f" · {ins.n_unpriced} without a price" if ins.n_unpriced else ""
+    check, unsure = "", ""
+    if ins.n_ambiguous:
+        # PR #102 review: an amendment whose original could not be told apart
+        check = (
+            ' <span class="db-mark db-mark-warn db-check">check<span class="db-sr"> (an '
+            "amendment could not be matched)</span></span>"
+        )
+        n = ins.n_ambiguous
+        unsure = (
+            f" · {n} amendment{'s' if n != 1 else ''} could not be matched to one original, "
+            "so the possible originals are left out"
+        )
     rows.append(
         _row(
             f"Insiders, {insider_days} days",
-            f"{sells} · {buys}",
-            f"Form 4 · net {_usd(ins.net_usd)}{plans}{unpriced} · filed since {_d(ins.since)}",
+            f"{sells} · {buys}{check}",
+            f"Form 4 · net {_usd(ins.net_usd)}{plans}{unpriced}{unsure} · filed since "
+            f"{_d(ins.since)}",
         )
     )
     if co.holders:

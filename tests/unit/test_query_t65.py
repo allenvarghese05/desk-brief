@@ -326,3 +326,5 @@ def test_an_unmatched_form4_amendment_is_counted_alone() -> None:
         ("0009999999-26-000022", 120.0)
     ]
     assert cf.insiders.n_buys == 1
+    # never counted twice, but a Form 4 nobody amended may be missing: the reader is told
+    assert cf.insiders.n_ambiguous == 1
