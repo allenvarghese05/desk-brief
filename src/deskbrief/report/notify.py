@@ -40,7 +40,7 @@ import duckdb
 from deskbrief.logging import get_logger, redact, redact_text
 from deskbrief.models import RunContext, Trigger
 from deskbrief.report.excel import write_workbook
-from deskbrief.report.html import render_html, render_text
+from deskbrief.report.html import dashboard_url, render_html, render_text
 from deskbrief.report.model import BriefModel
 from deskbrief.store.backend import (
     REPORTS_PREFIX,
@@ -291,8 +291,10 @@ def report_steps(
                 )
         finally:
             duck.close()
-        html = render_html(model)
-        mail = _Built(f"{model.title} · {model.health.text}", html, render_text(model))
+        link = dashboard_url(os.environ)
+        html = render_html(model, dashboard=link)
+        # P-024 (T63): the subject line is the read, then "Desk Brief" and the date
+        mail = _Built(model.subject or model.title, html, render_text(model, dashboard=link))
         built.append(mail)  # from here on the email can go out even if archiving fails
         workbook = _workbook_bytes(model)
         name = f"brief-{ctx.target_date.isoformat()}.xlsx"

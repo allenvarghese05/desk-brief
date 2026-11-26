@@ -277,6 +277,9 @@ def _about(w: _Book, ws: Any, m: BriefModel) -> None:
         ("empty tables", "A table with nothing to list keeps one placeholder row ('none')."),
         ("report", f"{m.title}; config {m.config_hash[:12]}; model schema {m.schema_version}."),
     ]  # fmt: skip
+    if m.read is not None:  # P-024 (T63): the read, as the email and Home open with it
+        met = ", ".join(r.label for r in m.read.met)
+        lines.append(("read", m.read.text + (f" Rules met: {met}." if met else "")))
     lines += [(f"limit: {k.kind}", k.text) for k in m.known_limits]
     lines.append(("disclaimer", "Personal project built on public data. Not investment advice."))
     ws.write_string(0, 0, "About", w.fmt(bold=True, font_size=14))

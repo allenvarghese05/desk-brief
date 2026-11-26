@@ -1,0 +1,35 @@
+Desk Brief · Mon 16 Nov · 07:00 ET
+No clear read. 1 market moved more than usual.
+
+No regime rule met.
+
+MOVED MORE THAN USUAL
+  S&P fut (check): 5,885.67 −1.6%, 3.5σ (Yahoo, delayed, 06:58)
+  σ compares the move with that market's last 30 daily moves, for values new since the Fri 07:00 brief.
+
+TODAY (ET)
+  No releases or auctions stored for today.
+
+SNAPSHOT
+  RATES
+    10Y (delayed): 4.37% −3bp
+    2Y (official, Fri): 4.18% −2bp
+    2s10s (derived, 13 Nov): +22bp −3bp
+  FX
+    EURUSD (official, Fri): 1.0842 +0.4%
+  COMMODITIES
+    WTI (delayed): $71.20 −1.1%
+  EQUITIES
+    S&P fut (delayed) (check): 5,885.67 −1.6%
+    QQQ: data unavailable
+  VOLATILITY
+    VIX: no trade since last close
+
+CHECK BEFORE USING
+  - S&P fut. Cross-check sp500_spy_es (sp500, data of 13 Nov) WARN: gap 7.0bp, limit 5bp
+
+Charts, sources and Data health are on the Desk Brief dashboard.
+
+1/3 checks pass (1 fail, 1 warn). Details and the full list of limits are on the Data health page.
+● live · ◐ delayed · ○ official. Proxies (ETFs) are shown only when the underlying market has no value.
+Personal project built on public data. Not investment advice.

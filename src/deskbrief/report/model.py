@@ -104,6 +104,8 @@ SHORT_LABELS = {
     "COT_ZN_OI": "10Y note COT OI",
 }
 UNAVAILABLE = "data unavailable"
+#: the snapshot's grey line for rows whose latest value is still their last close (T63)
+NO_TRADE_TEXT = "no trade since last close"
 SPREAD_ID = "UST_2S10S"
 _FLAG_ORDER = ("none", "pass", "warn", "fail")  # worst last
 SPREAD_LOOKBACK_DAYS = 14  # enough official days to find the latest date both legs share
@@ -273,6 +275,58 @@ class Caveat:
 
 
 @dataclass(frozen=True)
+class Event:
+    """A scheduled release or auction in Today (P-024, card T65), from the ``events`` table."""
+
+    event_date: date
+    time_text: str  # "08:30" ET, or "" when the source gives a date only
+    title: str
+    source: str  # display name ("FRED", "Treasury")
+    kind: str  # release | auction
+
+
+@dataclass(frozen=True)
+class Note:
+    """The morning note (P-024, card T66), stored with the brief so no reader calls the API.
+
+    ``sentences`` survived the check: every number in them matched a value in the model within
+    its display rounding, and none holds a forbidden word. With no sentence (no key, an API
+    error, a timeout, the spend cap, or nothing surviving) ``reason`` says why, in words a
+    reader sees after "No note today: "."""
+
+    sentences: tuple[str, ...] = ()
+    n_checked: int = 0  # numbers checked in the kept sentences
+    n_numbers: int = 0  # numbers in the kept sentences (equal to n_checked when shown)
+    reason: str | None = None
+    dropped: tuple[str, ...] = ()  # why each dropped sentence went (logged, never shown)
+    model: str = ""
+    cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class SnapRow:
+    """One market in the email's compact snapshot (P-024, card T63)."""
+
+    instrument_id: str
+    label: str  # the trader's name ("10Y", "S&P fut")
+    value_text: str
+    change_text: str
+    direction: str  # up | down | flat | none (no change to show)
+    meta: str  # "official, Fri", "delayed", "weekly, 10 Nov", "monthly, Oct 2026", "proxy", ""
+    check: bool = False  # named in Check before using
+
+
+@dataclass(frozen=True)
+class SnapGroup:
+    """One asset class of the snapshot: its rows, then the folded grey lines."""
+
+    title: str
+    rows: tuple[SnapRow, ...]
+    no_trade: tuple[str, ...] = ()  # no trade since their last close (folded into one line)
+    unavailable: tuple[str, ...] = ()  # no value at all (folded into one line)
+
+
+@dataclass(frozen=True)
 class BriefModel:
     schema_version: int
     report_date: date
@@ -290,6 +344,12 @@ class BriefModel:
     read: Read | None = None
     caveats: tuple[Caveat, ...] = ()
     previous_brief: datetime | None = None  # the brief "new since" compares with (T61)
+    # P-024 (T63): the email's subject line and compact snapshot
+    subject: str = ""
+    snapshot: tuple[SnapGroup, ...] = ()
+    # P-024 (T65, T66): Today's scheduled releases and auctions; the stored note
+    today: tuple[Event, ...] = ()
+    note: Note | None = None
 
     @classmethod
     def from_store(
@@ -364,6 +424,7 @@ class BriefModel:
         movers = tuple(replace(m, check=m.instrument_id in flagged) for m in movers)
         headline = _headline(config, rows)
         health = _health(summary)
+        read = _read(config.brief, rows, len(movers))
         return cls(
             schema_version=SCHEMA_VERSION,
             report_date=report_date,
@@ -377,9 +438,11 @@ class BriefModel:
             known_limits=_known_limits(config, rows, snapshot, summary),
             lineage=lineages(duck, snapshot) + lineages(duck, baselines, role="baseline"),
             movers=movers,
-            read=_read(config.brief, rows, len(movers)),
+            read=read,
             caveats=caveats,
             previous_brief=previous_brief_time(report_date, report_time),
+            subject=_subject(read, report_time),
+            snapshot=_snapshot(config, sections, caveats),
         )
 
     # -- serialisation ------------------------------------------------------
@@ -1020,6 +1083,89 @@ def _crosscheck_text(i: CheckItem) -> str:
 
 
 # ---------------------------------------------------------------------------
+# the email's subject line and snapshot (P-024, T63)
+# ---------------------------------------------------------------------------
+
+
+def _subject(read: Read, report_time: datetime) -> str:
+    """The read, then "Desk Brief" and the date: "Risk-off · Desk Brief · Mon 16 Nov"."""
+    et = to_et(report_time)
+    return f"{read.label} · Desk Brief · {et:%a} {et.day} {et:%b}"
+
+
+def _underlying(config: Config) -> dict[str, tuple[str, ...]]:
+    """Each proxy's underlying markets (``config.groups``: the exact and official members)."""
+    out: dict[str, list[str]] = {}
+    for g in config.groups:
+        if g.proxy:
+            out.setdefault(g.proxy, []).extend(
+                m for m in (g.exact, g.official) if m and m != g.proxy
+            )
+    return {k: tuple(dict.fromkeys(v)) for k, v in out.items()}
+
+
+def _snap_meta(row: Row) -> str:
+    """What the reader needs beside the figure: its tier and, for an official, weekly or
+    monthly value, its date (P-024: weekly and monthly series are dated)."""
+    ch = row.change
+    if row.instrument_id == SPREAD_ID:
+        return f"derived, {row.as_of_text}"
+    if ch is None:
+        return ""
+    last = ch.last
+    if last.interval == "1w":
+        return f"weekly, {row.as_of_text}"
+    if last.interval == "1mo":
+        et = to_et(last.as_of)
+        return f"monthly, {et:%b %Y}"
+    proxy = "proxy, " if row.is_proxy else ""
+    if last.interval == "1d":
+        return f"{proxy}{row.tier_name}, {to_et(last.as_of):%a}"
+    return f"{proxy}{row.tier_name}"
+
+
+def _snapshot(
+    config: Config, sections: Sequence[Section], caveats: Sequence[Caveat]
+) -> tuple[SnapGroup, ...]:
+    """The compact snapshot: one row per market, the underlying instead of its proxy when the
+    underlying has a value, rows with no trade since their last close and rows with no value
+    folded into one grey line each."""
+    available = {r.instrument_id for s in sections for r in s.rows if r.available}
+    under = _underlying(config)
+    flagged = {i for c in caveats for i in c.instrument_ids}
+    out: list[SnapGroup] = []
+    for sec in sections:
+        rows: list[SnapRow] = []
+        quiet: list[str] = []
+        missing: list[str] = []
+        for r in sec.rows:
+            iid = r.instrument_id
+            if r.is_proxy and any(u in available for u in under.get(iid, ())):
+                continue  # the underlying market is shown instead
+            if not r.available:
+                missing.append(_short(iid))
+                continue
+            if r.change is not None and r.change.status == "no_move_yet":
+                quiet.append(_short(iid))
+                continue
+            has = r.change_value is not None
+            rows.append(
+                SnapRow(
+                    instrument_id=iid,
+                    label=_short(iid),
+                    value_text=r.value_text,
+                    change_text=r.change_text if has else "",
+                    direction=_direction(r.change_value) if r.change_value is not None else "none",
+                    meta=_snap_meta(r),
+                    check=iid in flagged,
+                )
+            )
+        if rows or quiet or missing:
+            out.append(SnapGroup(sec.title, tuple(rows), tuple(quiet), tuple(missing)))
+    return tuple(out)
+
+
+# ---------------------------------------------------------------------------
 # known limits
 # ---------------------------------------------------------------------------
 
@@ -1136,15 +1282,19 @@ def _decode(tp: Any, value: Any) -> Any:
 __all__ = [
     "BriefModel",
     "Caveat",
+    "Event",
     "Headline",
     "HeadlineItem",
     "HealthBlock",
     "KnownLimit",
     "Mover",
     "Notable",
+    "Note",
     "Read",
     "Row",
     "RuleResult",
     "Section",
+    "SnapGroup",
+    "SnapRow",
     "field_label",
 ]

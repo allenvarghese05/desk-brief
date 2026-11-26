@@ -1,74 +1,107 @@
-{#- Email-safe layout (spec 9.1): tables, inline CSS only, no script, no style block, no external
-    resources. Every string below comes from the BriefModel (P-009: labels are the model's, this
-    file never says what a value "is"). Autoescape is on. -#}
+{#- The morning email v4 (P-024, card T63), in the order of the approved email mockup: the read,
+    the note, Moved more than usual, Today, the snapshot, Check before using, the dashboard link
+    and a three-line footer. Email-safe: tables for rows, inline CSS only, no style block, no
+    script, no external resources, one 640 px column that narrows on a phone. Every string comes
+    from the BriefModel or the stored note and events; autoescape is on. -#}
+{%- set F = "font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;" -%}
+{%- set META = "font-size:12px;color:#6b7280;" -%}
+{%- set H2 = "font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:#6b7280;font-weight:bold;margin:28px 0 8px 0;padding-top:10px;border-top:1px solid #d9dce0;" -%}
+{%- set TD = "padding:7px 0;border-top:1px solid #eef0f2;vertical-align:baseline;" -%}
+{%- set TDR = TD ~ "text-align:right;white-space:nowrap;padding-left:12px;" -%}
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ m.title }}</title>
+<title>{{ m.subject or m.title }}</title>
 </head>
-<body style="margin:0;padding:0;background:#f4f5f7;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f7;">
+<body style="margin:0;padding:0;background:#f3f4f6;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f3f4f6;">
 <tr><td align="center" style="padding:16px 8px;">
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #dcdfe4;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1b1f24;">
-<tr>
-<td style="padding:14px 16px 4px 16px;font-size:18px;font-weight:bold;">{{ m.title }}</td>
-<td align="right" style="padding:14px 16px 4px 16px;font-size:13px;color:{{ health_color }};white-space:nowrap;">&#9679; {{ m.health.text }}</td>
-</tr>
-<tr><td colspan="2" style="padding:4px 16px 12px 16px;font-size:14px;">{{ m.headline.text }}</td></tr>
-</table>
-{% for s in m.sections %}
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #dcdfe4;border-top:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#1b1f24;">
-<tr style="background:#eef0f3;">
-<th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">{{ s.title|upper }}</th>
-<th align="right" style="padding:6px 6px;font-size:12px;">last</th>
-<th align="right" style="padding:6px 6px;font-size:12px;">chg</th>
-<th align="right" style="padding:6px 6px;font-size:12px;">as of (ET)</th>
-<th align="left" style="padding:6px 16px 6px 8px;font-size:12px;">tier</th>
-</tr>
-{% for r in s.rows %}
-<tr>
-<td style="padding:6px 16px;border-top:1px solid #eef0f3;">{{ r.label }}
-{%- set note = change_note(r) %}
-{%- if note %}<br><span style="font-size:11px;color:#5b6470;">{{ note }}</span>{% endif %}
-{%- for q in r.qualifiers %}<br><span style="font-size:11px;color:#8a5a00;">{{ q }}</span>{% endfor %}</td>
-{% if r.available %}
-<td align="right" style="padding:6px;border-top:1px solid #eef0f3;white-space:nowrap;">{{ r.value_text }}</td>
-<td align="right" style="padding:6px;border-top:1px solid #eef0f3;white-space:nowrap;">{{ r.change_text }}</td>
-<td align="right" style="padding:6px;border-top:1px solid #eef0f3;white-space:nowrap;">{{ r.as_of_text }}</td>
-<td style="padding:6px 16px 6px 8px;border-top:1px solid #eef0f3;white-space:nowrap;">{{ r.tier_glyph }} {{ r.tier_name }}</td>
-{% else %}
-<td colspan="4" align="right" style="padding:6px 16px;border-top:1px solid #eef0f3;color:#8a5a00;">{{ r.value_text }}</td>
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #e3e5e8;{{ F }}font-size:14px;line-height:1.55;color:#111418;">
+<tr><td style="padding:24px 24px 28px 24px;">
+<div style="{{ META }}">{{ when }}</div>
+<h1 style="font-size:19px;line-height:1.35;margin:6px 0 0 0;font-weight:bold;"><span style="color:{{ read_color }};">{{ read_label }}</span>{% if read_rest %} {{ read_rest }}{% endif %}</h1>
+{% if note and note.sentences %}
+<p style="margin:10px 0 0 0;">{{ note.sentences|join(" ") }}</p>
+<p style="margin:8px 0 0 0;{{ META }}"><span style="color:#0e8a5f;">&#10003;</span> Every number checked ({{ note.n_checked }} of {{ note.n_numbers }}).</p>
+{% elif note %}
+<p style="margin:10px 0 0 0;{{ META }}">No note today: {{ note.reason }}.</p>
 {% endif %}
+{% if why %}
+<p style="margin:8px 0 0 0;{{ META }}">{{ why }}</p>
+{% endif %}
+
+<div style="{{ H2 }}">Moved more than usual</div>
+{% if movers %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+{% for x in movers %}
+<tr>
+<td style="{{ TD }}{% if loop.first %}border-top:0;{% endif %}">{{ x.short }}{% if x.check %} <span style="color:#9a6700;">&middot; check</span>{% endif %}<br><span style="{{ META }}">{{ x.source }} &middot; {{ tier_name[x.tier] }} &middot; {{ x.as_of_text }}</span></td>
+<td style="{{ TDR }}{% if loop.first %}border-top:0;{% endif %}">{{ x.value_text }}</td>
+<td style="{{ TDR }}{% if loop.first %}border-top:0;{% endif %}color:{{ tone[x.direction] }};">{{ x.change_text }}</td>
+<td style="{{ TDR }}{% if loop.first %}border-top:0;{% endif %}font-size:12px;color:#5f6670;">{{ "%.1f"|format(x.sigma) }}&sigma;</td>
 </tr>
 {% endfor %}
 </table>
-{% endfor %}
-{% if m.notable %}
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #dcdfe4;border-top:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#1b1f24;">
-<tr style="background:#eef0f3;"><th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">NOTABLE</th></tr>
-{% for n in m.notable %}
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">&bull; {{ n.text }}</td></tr>
-{% endfor %}
-</table>
-{% endif %}
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #dcdfe4;border-top:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#1b1f24;">
-<tr style="background:#eef0f3;"><th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">DATA HEALTH</th></tr>
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;color:{{ health_color }};">{{ m.health.text }}</td></tr>
-{% for h in m.health.summary.sources if h.status != "ok" %}
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">{{ health_line(h) }}</td></tr>
-{% endfor %}
-<tr style="background:#eef0f3;"><th align="left" style="padding:6px 16px;font-size:12px;letter-spacing:1px;">KNOWN LIMITS TODAY</th></tr>
-{% for k in m.known_limits %}
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">&bull; {{ k.text }}</td></tr>
+<p style="margin:8px 0 0 0;{{ META }}">{{ movers_note }}</p>
 {% else %}
-<tr><td style="padding:5px 16px;border-top:1px solid #eef0f3;">none recorded</td></tr>
+<p style="margin:0;{{ META }}">Nothing moved more than usual{% if since %} since the {{ since }} brief{% endif %}.</p>
+{% endif %}
+
+<div style="{{ H2 }}">Today (ET)</div>
+{% if events %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+{% for e in events %}
+<tr><td style="{{ TD }}{% if loop.first %}border-top:0;{% endif %}width:56px;white-space:nowrap;">{{ e.time_text or "all day" }}</td><td style="{{ TD }}{% if loop.first %}border-top:0;{% endif %}">{{ e.title }} <span style="{{ META }}">&middot; {{ e.source }}</span></td></tr>
 {% endfor %}
 </table>
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:640px;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#5b6470;">
-<tr><td style="padding:10px 16px 2px 16px;">{{ legend }}</td></tr>
-<tr><td style="padding:2px 16px 16px 16px;">{{ footer }}</td></tr>
+{% else %}
+<p style="margin:0;{{ META }}">No releases or auctions stored for today.</p>
+{% endif %}
+
+<div style="{{ H2 }}">Snapshot</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+{% for g in m.snapshot %}
+<tr><td colspan="3" style="padding:{% if loop.first %}0{% else %}12px{% endif %} 0 4px 0;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;font-weight:bold;">{{ g.title }}</td></tr>
+{% for r in g.rows %}
+<tr>
+<td style="{{ TD }}">{{ r.label }}{% if r.meta %} <span style="{{ META }}">{{ r.meta }}</span>{% endif %}{% if r.check %} <span style="color:#9a6700;font-size:12px;">&middot; check</span>{% endif %}</td>
+<td style="{{ TDR }}">{{ r.value_text }}</td>
+<td style="{{ TDR }}color:{{ tone[r.direction] }};">{{ r.change_text or "–" }}</td>
+</tr>
+{% endfor %}
+{% if g.no_trade %}
+<tr><td style="{{ TD }}color:#9aa0a8;">{{ g.no_trade|join(", ") }}</td><td colspan="2" style="{{ TDR }}color:#9aa0a8;">{{ no_trade }}</td></tr>
+{% endif %}
+{% if g.unavailable %}
+<tr><td style="{{ TD }}color:#9aa0a8;">{{ g.unavailable|join(", ") }}</td><td colspan="2" style="{{ TDR }}color:#9aa0a8;">data unavailable</td></tr>
+{% endif %}
+{% endfor %}
+</table>
+
+<div style="{{ H2 }}">Check before using</div>
+{% if m.caveats %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+{% for c in m.caveats %}
+<tr><td style="{{ TD }}{% if loop.first %}border-top:0;{% endif %}"><b style="color:#9a6700;">{{ c.title }}.</b> {{ c.text }}</td></tr>
+{% endfor %}
+</table>
+{% else %}
+<p style="margin:0;{{ META }}">Nothing to check in today's read.</p>
+{% endif %}
+
+{% if dashboard_url %}
+<p style="margin:24px 0 0 0;"><a href="{{ dashboard_url }}" style="color:#1f5fd1;font-weight:bold;text-decoration:none;">Open the dashboard &rarr;</a></p>
+{% else %}
+<p style="margin:24px 0 0 0;{{ META }}">Charts, sources and Data health are on the Desk Brief dashboard.</p>
+{% endif %}
+
+<div style="margin-top:24px;padding-top:12px;border-top:1px solid #d9dce0;{{ META }}">
+{% for line in footer_lines %}{{ line }}{% if not loop.last %}<br>{% endif %}
+{% endfor %}
+</div>
+</td></tr>
 </table>
 </td></tr>
 </table>

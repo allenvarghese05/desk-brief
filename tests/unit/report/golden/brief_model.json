@@ -134,7 +134,9 @@
           "change_value": -3.0,
           "change_value_unit": "bp",
           "dq_flag": "none",
-          "as_of": "2026-11-16T11:58:00+00:00"
+          "as_of": "2026-11-16T11:58:00+00:00",
+          "sigma": null,
+          "sigma_note": null
         },
         {
           "instrument_id": "UST_2Y",
@@ -214,7 +216,9 @@
           "change_value": -2.0,
           "change_value_unit": "bp",
           "dq_flag": "none",
-          "as_of": "2026-11-13T05:00:00+00:00"
+          "as_of": "2026-11-13T05:00:00+00:00",
+          "sigma": null,
+          "sigma_note": "no sigma: fewer than 10 earlier daily moves stored"
         },
         {
           "instrument_id": "UST_2S10S",
@@ -241,7 +245,9 @@
           "change_value": -3.0,
           "change_value_unit": "bp",
           "dq_flag": "none",
-          "as_of": "2026-11-13T05:00:00+00:00"
+          "as_of": "2026-11-13T05:00:00+00:00",
+          "sigma": null,
+          "sigma_note": null
         }
       ]
     },
@@ -327,7 +333,9 @@
           "change_value": 0.388888889,
           "change_value_unit": "pct",
           "dq_flag": "none",
-          "as_of": "2026-11-13T05:00:00+00:00"
+          "as_of": "2026-11-13T05:00:00+00:00",
+          "sigma": null,
+          "sigma_note": "no sigma: fewer than 10 earlier daily moves stored"
         }
       ]
     },
@@ -415,7 +423,9 @@
           "change_value": -1.111111111,
           "change_value_unit": "pct",
           "dq_flag": "fail",
-          "as_of": "2026-11-16T11:58:00+00:00"
+          "as_of": "2026-11-16T11:58:00+00:00",
+          "sigma": null,
+          "sigma_note": "no sigma: fewer than 10 earlier daily moves stored"
         }
       ]
     },
@@ -503,7 +513,9 @@
           "change_value": -0.4,
           "change_value_unit": "pct",
           "dq_flag": "warn",
-          "as_of": "2026-11-16T11:59:00+00:00"
+          "as_of": "2026-11-16T11:59:00+00:00",
+          "sigma": null,
+          "sigma_note": "no sigma: fewer than 10 earlier daily moves stored"
         },
         {
           "instrument_id": "SPY",
@@ -585,7 +597,9 @@
           "change_value": 0.250626566,
           "change_value_unit": "pct",
           "dq_flag": "warn",
-          "as_of": "2026-11-16T11:59:00+00:00"
+          "as_of": "2026-11-16T11:59:00+00:00",
+          "sigma": null,
+          "sigma_note": "no sigma: fewer than 10 earlier daily moves stored"
         },
         {
           "instrument_id": "QQQ",
@@ -610,7 +624,9 @@
           "change_value": null,
           "change_value_unit": null,
           "dq_flag": "none",
-          "as_of": null
+          "as_of": null,
+          "sigma": null,
+          "sigma_note": null
         }
       ]
     },
@@ -674,7 +690,9 @@
           "change_value": null,
           "change_value_unit": null,
           "dq_flag": "none",
-          "as_of": "2026-11-13T05:00:00+00:00"
+          "as_of": "2026-11-13T05:00:00+00:00",
+          "sigma": null,
+          "sigma_note": null
         }
       ]
     }
@@ -1254,5 +1272,114 @@
       "rows_parsed": null,
       "role": "baseline"
     }
-  ]
+  ],
+  "movers": [],
+  "read": {
+    "label": "Quiet",
+    "kind": "quiet",
+    "tone": "flat",
+    "regime": null,
+    "rules": [],
+    "n_ranked": 0,
+    "text": "Quiet. Nothing moved more than usual."
+  },
+  "caveats": [],
+  "previous_brief": "2026-11-13T12:00:00+00:00",
+  "subject": "Quiet · Desk Brief · Mon 16 Nov",
+  "snapshot": [
+    {
+      "title": "Rates",
+      "rows": [
+        {
+          "instrument_id": "UST_10Y",
+          "label": "10Y",
+          "value_text": "4.37%",
+          "change_text": "−3bp",
+          "direction": "down",
+          "meta": "delayed",
+          "check": false
+        },
+        {
+          "instrument_id": "UST_2Y",
+          "label": "2Y",
+          "value_text": "4.18%",
+          "change_text": "−2bp",
+          "direction": "down",
+          "meta": "official, Fri",
+          "check": false
+        },
+        {
+          "instrument_id": "UST_2S10S",
+          "label": "2s10s",
+          "value_text": "+22bp",
+          "change_text": "−3bp",
+          "direction": "down",
+          "meta": "derived, 13 Nov",
+          "check": false
+        }
+      ],
+      "no_trade": [],
+      "unavailable": []
+    },
+    {
+      "title": "FX",
+      "rows": [
+        {
+          "instrument_id": "EURUSD",
+          "label": "EURUSD",
+          "value_text": "1.0842",
+          "change_text": "+0.4%",
+          "direction": "up",
+          "meta": "official, Fri",
+          "check": false
+        }
+      ],
+      "no_trade": [],
+      "unavailable": []
+    },
+    {
+      "title": "Commodities",
+      "rows": [
+        {
+          "instrument_id": "WTI",
+          "label": "WTI",
+          "value_text": "$71.20",
+          "change_text": "−1.1%",
+          "direction": "down",
+          "meta": "delayed",
+          "check": false
+        }
+      ],
+      "no_trade": [],
+      "unavailable": []
+    },
+    {
+      "title": "Equities",
+      "rows": [
+        {
+          "instrument_id": "ES_F",
+          "label": "S&P fut",
+          "value_text": "5,976.00",
+          "change_text": "−0.4%",
+          "direction": "down",
+          "meta": "delayed",
+          "check": false
+        }
+      ],
+      "no_trade": [],
+      "unavailable": [
+        "QQQ"
+      ]
+    },
+    {
+      "title": "Volatility",
+      "rows": [],
+      "no_trade": [
+        "VIX"
+      ],
+      "unavailable": []
+    }
+  ],
+  "today": [],
+  "note": null
 }
