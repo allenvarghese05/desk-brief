@@ -104,8 +104,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import duckdb
+import pandas as pd
 
 from deskbrief.calendars import Calendar, ExchangeCalendar, is_business_day, prev_business_day
+from deskbrief.schemas import current_rows
+from deskbrief.store.datasets import Datasets
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
 
@@ -134,7 +137,7 @@ BASIS_NY_CLOSE = "previous NY close"
 SOURCE_NAMES: Mapping[str, str] = {
     "yahoo": "Yahoo", "stooq": "Stooq", "cboe": "Cboe", "alpaca": "Alpaca",
     "twelvedata": "Twelve Data", "treasury": "Treasury", "fred": "FRED", "ecb": "ECB",
-    "cftc": "CFTC",
+    "cftc": "CFTC", "fiscaldata": "Treasury", "edgar": "SEC EDGAR",
 }  # fmt: skip
 
 
@@ -1206,3 +1209,327 @@ def value_label(row: ValueRow) -> str:
     """Instrument name plus its field label, e.g. ``Euro / US dollar (ECB reference rate)``."""
     label = field_label(row)
     return row.name if label.lower() in row.name.lower() else f"{row.name} ({label})"
+
+
+# ---------------------------------------------------------------------------
+# Today's calendar and the Company section (P-024, card T65): ``events`` and ``filings``
+# ---------------------------------------------------------------------------
+#
+# Neither table has a DuckDB view (they are not observations), so these helpers read them with
+# ``Datasets`` (or take frames already read) and always go through ``schemas.current_rows``.
+# Point in time: rows ingested after ``now`` and ``source_log`` rows that responded after it
+# are ignored, so a brief written earlier reads the same rows later. "Newest" in
+# ``current_rows`` means the latest ``ingested_at`` (= the fetch's ``responded_at``) per scope,
+# ties to the larger ``run_id``.
+#
+# ``events_today(datasets, now, horizon_days)``         current events, ET today .. +horizon
+# ``company_filings(datasets, instrument_id, now, insider_days)``
+#                                                       latest 10-Q/10-K, insiders, 13F holders
+# ``current_events`` / ``company_filings_from_frame``   the same over frames already read
+
+
+@dataclass(frozen=True)
+class EventItem:
+    """One scheduled release or auction (``events``)."""
+
+    event_date: date  # ET calendar date
+    scheduled_at: datetime | None  # UTC instant when the time is known
+    kind: str  # release | auction
+    title: str
+    source: str
+    dataset: str
+    period: str | None
+    url: str | None
+    details: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class FilingRef:
+    """A filing (row ``seq = 0``): the latest 10-Q or 10-K."""
+
+    accession: str
+    form: str
+    filed_date: date
+    period: date | None
+    url: str
+
+
+@dataclass(frozen=True)
+class InsiderTrade:
+    """One Form 4 non-derivative transaction."""
+
+    accession: str
+    form: str
+    filed_date: date
+    trade_date: date
+    party: str
+    party_role: str | None
+    trade_code: str
+    side: str  # buy | sell | other
+    shares: float
+    price: float | None  # USD per share
+    value_usd: float | None
+    plan_10b5_1: bool
+    url: str
+
+
+@dataclass(frozen=True)
+class InsiderSummary:
+    """Form 4 transactions filed in ``[since, as-of date]`` and their totals (USD).
+
+    ``net_usd`` = ``buys_usd - sells_usd`` (positive is net buying); trades with no price are
+    left out of the sums and counted in ``n_unpriced``. ``n_10b5_1`` counts trades marked as
+    under a Rule 10b5-1 plan.
+    """
+
+    since: date
+    trades: tuple[InsiderTrade, ...]
+    n_buys: int
+    n_sells: int
+    buys_usd: float
+    sells_usd: float
+    net_usd: float
+    n_10b5_1: int
+    n_unpriced: int
+
+
+@dataclass(frozen=True)
+class HolderChange:
+    """A 13F holder's position at ``period`` end and its change from the previous quarter."""
+
+    party: str
+    party_cik: str
+    period: date
+    filed_date: date
+    shares: float
+    shares_change: float
+    value_usd: float | None
+    accession: str
+    form: str
+    url: str
+
+
+@dataclass(frozen=True)
+class CompanyFilings:
+    """Everything the Company section shows for one stock."""
+
+    instrument_id: str
+    latest_filing: FilingRef | None
+    insiders: InsiderSummary
+    holders_period: date | None  # the 13F as-of quarter end (filed up to 45 days after it)
+    holders: tuple[HolderChange, ...]
+
+
+def _known_at(df: pd.DataFrame, column: str, at: datetime) -> pd.DataFrame:
+    """Rows of ``df`` whose ``column`` (tz-aware) is not after ``at``."""
+    if df.empty:
+        return df
+    stamps = pd.to_datetime(df[column], utc=True)
+    return df[stamps <= pd.Timestamp(ensure_utc(at))].reset_index(drop=True)
+
+
+def _opt(value: Any) -> Any:
+    """``None`` for pandas' missing markers, else the value."""
+    if value is None:
+        return None
+    try:
+        return None if bool(pd.isna(value)) else value
+    except (TypeError, ValueError):
+        return value
+
+
+def current_events(
+    events: pd.DataFrame,
+    source_log: pd.DataFrame | None,
+    now: datetime,
+    horizon_days: int,
+) -> list[EventItem]:
+    """Current events dated ET ``today .. today + horizon_days``, by date then time then title.
+
+    ``events`` and ``source_log`` are the stored tables (any partitions); rows known after
+    ``now`` are ignored, then ``current_rows("events", ...)`` picks each scope's newest run.
+    """
+    known = _known_at(events, "ingested_at", now)
+    log = _known_at(source_log, "responded_at", now) if source_log is not None else None
+    cur = current_rows("events", known, log)
+    today = et_date(now)
+    last = today + timedelta(days=horizon_days)
+    out: list[EventItem] = []
+    for r in cur.to_dict("records"):
+        day = r["event_date"]
+        if not today <= day <= last:
+            continue
+        at = _opt(r["scheduled_at"])
+        out.append(
+            EventItem(
+                event_date=day,
+                scheduled_at=ensure_utc(at.to_pydatetime()) if at is not None else None,
+                kind=str(r["kind"]),
+                title=str(r["title"]),
+                source=str(r["source"]),
+                dataset=str(r["dataset"]),
+                period=_opt(r["period"]),
+                url=_opt(r["url"]),
+                details=json.loads(r["details_json"]) if r["details_json"] else {},
+            )
+        )
+    far = datetime.max.replace(tzinfo=ensure_utc(now).tzinfo)
+    out.sort(key=lambda e: (e.event_date, e.scheduled_at or far, e.title, e.source))
+    return out
+
+
+def events_today(
+    datasets: Datasets,
+    now: datetime,
+    horizon_days: int,
+    *,
+    source_log: pd.DataFrame | None = None,
+) -> list[EventItem]:
+    """:func:`current_events` over the stored ``events`` and ``source_log`` tables.
+
+    Pass ``source_log`` when it is already read (the dashboard caches it) to skip that read.
+    """
+    log = source_log if source_log is not None else datasets.read("source_log")
+    return current_events(datasets.read("events"), log, now, horizon_days)
+
+
+def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
+    """Keep, for each original, only its latest amendment (P-024 review, round 3).
+
+    ``current_rows`` drops a filing that a current amendment names in ``amends_accession``,
+    but two amendments of one original would both survive and double-count. Among the filing
+    rows (``seq = 0``) naming the same ``(instrument_id, amends_accession)`` the one with the
+    latest ``filed_date`` (ties: the larger accession) is kept, with all its rows; the other
+    amendments' rows are dropped.
+    """
+    if filings.empty:
+        return filings
+    heads = filings[(filings["seq"] == 0) & filings["amends_accession"].notna()]
+    drop: set[tuple[str, str]] = set()
+    for _, grp in heads.groupby(["instrument_id", "amends_accession"], sort=False):
+        ranked = sorted(
+            zip(grp["filed_date"], grp["accession"], grp["instrument_id"], strict=True),
+            reverse=True,
+        )
+        drop.update((inst, acc) for _, acc, inst in ranked[1:])
+    if not drop:
+        return filings
+    keep = [
+        (i, a) not in drop
+        for i, a in zip(filings["instrument_id"], filings["accession"], strict=True)
+    ]
+    return filings[keep].reset_index(drop=True)
+
+
+def _insiders(rows: pd.DataFrame, since: date, until: date) -> InsiderSummary:
+    trades: list[InsiderTrade] = []
+    sel = rows[(rows["row_kind"] == "insider_trade")]
+    for r in sel.to_dict("records"):
+        if not since <= r["filed_date"] <= until:
+            continue
+        trades.append(
+            InsiderTrade(
+                accession=str(r["accession"]),
+                form=str(r["form"]),
+                filed_date=r["filed_date"],
+                trade_date=r["trade_date"],
+                party=str(r["party"]),
+                party_role=_opt(r["party_role"]),
+                trade_code=str(r["trade_code"]),
+                side=str(r["side"]),
+                shares=float(r["shares"]),
+                price=_opt(r["price"]),
+                value_usd=_opt(r["value_usd"]),
+                plan_10b5_1=bool(r["plan_10b5_1"]),
+                url=str(r["url"]),
+            )
+        )
+    trades.sort(key=lambda t: (t.trade_date, t.filed_date, t.accession), reverse=True)
+    buys = [t for t in trades if t.side == "buy"]
+    sells = [t for t in trades if t.side == "sell"]
+    buys_usd = sum(t.value_usd for t in buys if t.value_usd is not None)
+    sells_usd = sum(t.value_usd for t in sells if t.value_usd is not None)
+    return InsiderSummary(
+        since=since,
+        trades=tuple(trades),
+        n_buys=len(buys),
+        n_sells=len(sells),
+        buys_usd=float(buys_usd),
+        sells_usd=float(sells_usd),
+        net_usd=float(buys_usd - sells_usd),
+        n_10b5_1=sum(t.plan_10b5_1 for t in trades),
+        n_unpriced=sum(t.value_usd is None for t in buys + sells),
+    )
+
+
+def _holders(rows: pd.DataFrame) -> tuple[date | None, tuple[HolderChange, ...]]:
+    sel = rows[rows["row_kind"] == "holder_change"]
+    if sel.empty:
+        return None, ()
+    period = max(sel["period"])
+    best: dict[str, HolderChange] = {}
+    for r in sel[sel["period"] == period].to_dict("records"):
+        change = HolderChange(
+            party=str(r["party"]),
+            party_cik=str(r["party_cik"]),
+            period=r["period"],
+            filed_date=r["filed_date"],
+            shares=float(r["shares"]),
+            shares_change=float(r["shares_change"]),
+            value_usd=_opt(r["value_usd"]),
+            accession=str(r["accession"]),
+            form=str(r["form"]),
+            url=str(r["url"]),
+        )
+        prior = best.get(change.party_cik)
+        if prior is None or (change.filed_date, change.accession) > (
+            prior.filed_date,
+            prior.accession,
+        ):
+            best[change.party_cik] = change
+    ordered = sorted(best.values(), key=lambda h: (-abs(h.shares_change), h.party))
+    return period, tuple(ordered)
+
+
+def company_filings_from_frame(
+    filings: pd.DataFrame, instrument_id: str, now: datetime, insider_days: int
+) -> CompanyFilings:
+    """The Company section for one stock from the stored ``filings`` table.
+
+    Rows known after ``now`` are ignored; then ``current_rows`` and
+    :func:`latest_amendments_only`. Latest filing: the 10-Q or 10-K with the latest
+    ``filed_date`` (ties: the larger accession). Insiders: Form 4 rows filed in the last
+    ``insider_days`` up to ET today. Holders: the 13F ``holder_change`` rows of the latest
+    ``period``, one per holder (the latest filed), largest change first.
+    """
+    known = _known_at(filings, "ingested_at", now)
+    cur = latest_amendments_only(current_rows("filings", known))
+    rows = cur[cur["instrument_id"] == instrument_id] if not cur.empty else cur
+    today = et_date(now)
+    since = today - timedelta(days=insider_days)
+    latest: FilingRef | None = None
+    if not rows.empty:
+        heads = rows[(rows["seq"] == 0) & rows["form"].isin(["10-K", "10-Q"])]
+        if not heads.empty:
+            top = max(
+                heads.to_dict("records"), key=lambda r: (r["filed_date"], str(r["accession"]))
+            )
+            latest = FilingRef(
+                accession=str(top["accession"]),
+                form=str(top["form"]),
+                filed_date=top["filed_date"],
+                period=_opt(top["period"]),
+                url=str(top["url"]),
+            )
+    if rows.empty:
+        insiders = InsiderSummary(since, (), 0, 0, 0.0, 0.0, 0.0, 0, 0)
+        return CompanyFilings(instrument_id, latest, insiders, None, ())
+    period, holders = _holders(rows)
+    return CompanyFilings(instrument_id, latest, _insiders(rows, since, today), period, holders)
+
+
+def company_filings(
+    datasets: Datasets, instrument_id: str, now: datetime, insider_days: int
+) -> CompanyFilings:
+    """:func:`company_filings_from_frame` over the stored ``filings`` table."""
+    return company_filings_from_frame(datasets.read("filings"), instrument_id, now, insider_days)

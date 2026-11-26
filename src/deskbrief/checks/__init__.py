@@ -26,6 +26,7 @@ from deskbrief.checks import (  # noqa: F401  (importing registers each check)
     completeness,
     freshness,
     revision,
+    table_freshness,  # T65: events and filings datasets
     uniqueness,
     validity,
 )

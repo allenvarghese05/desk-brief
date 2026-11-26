@@ -1,0 +1,20 @@
+{
+  "_synthetic": "SYNTHETIC FIXTURE: invented 13F filer Invented Asset Management; shape of data.sec.gov submissions.",
+  "cik": "7777777",
+  "name": "INVENTED ASSET MANAGEMENT",
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0007777777-26-000004", "0007777777-26-000003", "0007777777-26-000002",
+                          "0007777777-26-000001"],
+      "filingDate": ["2026-11-20", "2026-11-10", "2026-08-10", "2026-05-10"],
+      "reportDate": ["2026-09-30", "2026-09-30", "2026-06-30", "2026-03-31"],
+      "acceptanceDateTime": ["2026-11-20T16:01:00.000Z", "2026-11-10T16:01:00.000Z",
+                             "2026-08-10T16:01:00.000Z", "2026-05-10T16:01:00.000Z"],
+      "form": ["13F-HR/A", "13F-HR", "13F-HR", "13F-HR"],
+      "primaryDocument": ["xslForm13F_X02/primary_doc.xml", "xslForm13F_X02/primary_doc.xml",
+                          "xslForm13F_X02/primary_doc.xml", "xslForm13F_X02/primary_doc.xml"],
+      "primaryDocDescription": ["", "", "", ""]
+    },
+    "files": []
+  }
+}

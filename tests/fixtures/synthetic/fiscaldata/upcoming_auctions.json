@@ -1,0 +1,23 @@
+{
+  "_synthetic": "SYNTHETIC FIXTURE: shape of fiscaldata upcoming_auctions; every value invented.",
+  "data": [
+    {"record_date": "2026-11-23", "security_type": "Bill", "security_term": "4-Week",
+     "reopening": "No", "cusip": "EXMPB0011", "offering_amt": "10000000000",
+     "announcemt_date": "2026-11-23", "auction_date": "2026-11-27", "issue_date": "2026-12-01"},
+    {"record_date": "2026-11-25", "security_type": "Bill", "security_term": "4-Week",
+     "reopening": "No", "cusip": "EXMPB0011", "offering_amt": "11000000000",
+     "announcemt_date": "2026-11-23", "auction_date": "2026-11-27", "issue_date": "2026-12-01"},
+    {"record_date": "2026-11-25", "security_type": "Bill", "security_term": "26-Week",
+     "reopening": "No", "cusip": "EXMPB0029", "offering_amt": "20000000000",
+     "announcemt_date": "2026-11-25", "auction_date": "2026-11-30", "issue_date": "2026-12-03"},
+    {"record_date": "2026-11-25", "security_type": "Note", "security_term": "2-Year",
+     "reopening": "No", "cusip": "null", "offering_amt": "null",
+     "announcemt_date": "null", "auction_date": "2026-12-01", "issue_date": "2026-12-04"},
+    {"record_date": "2026-11-25", "security_type": "Bond", "security_term": "20-Year",
+     "reopening": "Yes", "cusip": "EXMPN0037", "offering_amt": "13000000000",
+     "announcemt_date": "2026-12-10", "auction_date": "2026-12-15", "issue_date": "2026-12-18"}
+  ],
+  "meta": {"count": 5, "total-count": 5, "total-pages": 1},
+  "links": {"self": "&page%5Bnumber%5D=1&page%5Bsize%5D=100", "first": null, "prev": null,
+            "next": null, "last": null}
+}

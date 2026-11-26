@@ -156,3 +156,42 @@ out of the repo unless confirmed redistributable):
     returns all observations in one response (the count is the second number).
 
 Record the date, HTTP statuses and any surprises in the PR and update this file.
+
+## Release dates (card T65, P-024 "Today")
+
+Dataset `release_dates`, table `events` (not observations). In the `morning` job only, one
+request per `config.events.fred_releases` entry:
+`GET https://api.stlouisfed.org/fred/release/dates` with `release_id`, `file_type=json`,
+`realtime_start=<target date>`, `realtime_end=<target date + events.horizon_days>`,
+`include_release_dates_with_no_data=true` (otherwise future dates are left out) and
+`sort_order=asc`. The key is the same `FRED_API_KEY`, sent as a secret param.
+
+Each date in the window becomes one `release` event: `event_id = release:<id>:<date>`, title from
+the config entry, `scheduled_at` = the date at the entry's `time_et` in New York (FRED gives no
+time), `details_json` = release id and FRED's release name, `url` =
+`https://fred.stlouisfed.org/release?rid=<id>`. All release fetches share one scope
+`(fred, release_dates)`: if one fails or is quarantined, that run writes no release events and
+the previous run's stay current. Tests use a SYNTHETIC FIXTURE
+(`tests/fixtures/synthetic/fred_releases/`).
+
+**`events.fred_releases` is still empty** in `config.yaml`. The T64 contract test
+`test_events_settings` pins it to `()` until the ids are confirmed, so filling it also updates
+that test. The release ids were not verified by the implementer (no key, no live call). Candidates
+to confirm with the probe's `--list` (FRED's own release ids and names), then by fetching them:
+
+| Release (as FRED names it) | Candidate id | time_et |
+|---|---|---|
+| Consumer Price Index | 10 | 08:30 |
+| Employment Situation | 50 | 08:30 |
+| Gross Domestic Product | 53 | 08:30 |
+| Personal Income and Outlays (PCE) | 54 | 08:30 |
+| Advance durable goods (Manufacturers' Shipments, Inventories, and Orders) | confirm with `--list` | 08:30 |
+| Consumer confidence | FRED may not carry the Conference Board release; University of Michigan Surveys of Consumers is the usual FRED alternative (confirm with `--list`) | 10:00 |
+
+```bash
+FRED_API_KEY=... PYTHONPATH=src .venv/bin/python scripts/probes/probe_t65_fred_releases.py --list
+FRED_API_KEY=... PYTHONPATH=src .venv/bin/python scripts/probes/probe_t65_fred_releases.py 10 50 53 54
+```
+
+The second prints, per release, the HTTP status, fetch status, row count and newest date in the
+horizon. **Probe: left to the owner.**

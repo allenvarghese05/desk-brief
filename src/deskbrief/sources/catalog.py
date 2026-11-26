@@ -26,8 +26,17 @@ KNOWN_SOURCE_MODULES: tuple[str, ...] = (
     "deskbrief.sources.cftc",
 )
 
+#: Table sources (card T65): they feed ``events``/``filings``, not observations
+#: (``sources/tables.py``). Loaded by default with the observation sources.
+TABLE_SOURCE_MODULES: tuple[str, ...] = (
+    "deskbrief.sources.fiscaldata",
+    "deskbrief.sources.edgar",
+)
 
-def load_all(modules: Iterable[str] = KNOWN_SOURCE_MODULES) -> list[str]:
+
+def load_all(
+    modules: Iterable[str] = KNOWN_SOURCE_MODULES + TABLE_SOURCE_MODULES,
+) -> list[str]:
     """Import each source module; return the names that imported successfully."""
     log = get_logger()
     loaded: list[str] = []
