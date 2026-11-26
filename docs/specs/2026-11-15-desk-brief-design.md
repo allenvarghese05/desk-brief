@@ -150,6 +150,9 @@ sources:
   stooq:      {rate_per_min: 20, timeout_s: 15, retries: 2}
   yahoo:      {rate_per_min: 30, timeout_s: 15, retries: 2}
   cboe:       {rate_per_min: 10, timeout_s: 15, retries: 2}
+  fiscaldata: {rate_per_min: 30, timeout_s: 20, retries: 3}              # P-024: Treasury upcoming auctions
+  edgar:      {rate_per_min: 300, timeout_s: 20, retries: 2,             # P-024: SEC allows 10/s (600/min max)
+               user_agent_env: DESKBRIEF_SEC_USER_AGENT}                 # contact UA from a secret, never committed
 instruments:
   - id: SPY
     name: SPDR S&P 500 ETF
@@ -203,6 +206,35 @@ dashboard:
   mode_env: DESKBRIEF_DISPLAY_MODE    # hosted | local
   refresh_seconds: 60
   hosted_hidden_tiers: [1]
+brief:                          # P-024 (contract T64); the read, Check before using, the note
+  regime_rules:                 # a label whose min_met rules are met while no other set has one met;
+    - label: Risk-off           # "Quiet" when nothing is ranked; "Mixed" otherwise. Rankable moves only.
+      min_met: 2
+      rules:                    # market, direction, and min_sigma OR (min_change + change_unit pct|bp|pts|pp)
+        - {market: ES_F, direction: down, min_sigma: 1.0, label: Equity futures down}
+        # ... VIX up, HY_OAS up, UST_2Y down; Risk-on mirrors them
+  quiet_label: Quiet
+  mixed_label: Mixed
+  related_pairs:                # flagged when both rankable changes differ by more than limit (unit)
+    - {pair: [BRENT, WTI], limit: 1.0, unit: pct}
+    - {pair: [GOLD_F, GLD], limit: 1.0, unit: pct}
+  note:                         # T66; inert without the key
+    model: claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY
+    max_sentences: 5
+    timeout_s: 30
+    max_output_tokens: 2000
+    monthly_cap_usd: 5.0
+    price_input_usd_per_mtok: 2.0
+    price_output_usd_per_mtok: 10.0
+    forbidden_words: [buy, sell, target, will rise, ...]
+events:                         # Today's calendar (T65)
+  horizon_days: 7
+  fred_releases: []             # each {release_id, title, time_et: "HH:MM"}; FRED gives dates only
+filings:                        # SEC EDGAR (T65), instruments of kind stock only
+  companies: []                 # each {instrument, cik: 10 digits, cusip (optional, for 13F)}
+  insider_days: 90              # Form 4 look-back
+  holders: []                   # 13F filers compared quarter on quarter: {cik, name}
 ```
 
 All thresholds above are starting values; tuning them is expected and each tuning is an INCIDENTS.md entry ("false alarm tuned").
@@ -354,6 +386,8 @@ deskbrief-data/
   derived/alerts/date={…}/run={run_id}.parquet
   derived/runs/date={…}/run={run_id}.parquet
   derived/scorecard_daily/date={…}.parquet          # overwritten per day
+  derived/events/date={ingested ET date}/run={run_id}.parquet    # P-024: Today's calendar
+  derived/filings/date={ingested ET date}/run={run_id}.parquet   # P-024: SEC EDGAR facts
   serving/latest_snapshot.parquet  serving/health.json  serving/scorecard_30d.parquet
   serving/crosschecks_7d.parquet   serving/series_30d.parquet  serving/runs_14d.parquet
   reports/date={YYYY-MM-DD}/v{n}/brief.html|brief.xlsx|brief.xlsm|model.json
@@ -428,6 +462,14 @@ erDiagram
 **runs** — `run_id, job (morning|intraday|eod|backfill|rebuild|history), trigger (schedule|manual|catchup), target_date, scheduled_for, started_at, finished_at, status (ok|degraded|failed), git_sha, config_hash, n_fetch, n_fetch_failed, n_obs, n_dq_fail, n_dq_warn, report_key, schedule_delay_s`
 
 **scorecard_daily** — `source, date, fetches, ok_rate, median_latency_ms, p95_latency_ms, median_data_age_s, error_rate, disagreement_rate, n_crosschecks`
+
+**events** (derived, P-024) — natural key `(source, dataset, event_id)`; not an observation table (no `obs_latest`, checks or σ); re-fetched each run, readers keep the newest `ingested_at` per key
+
+`event_id, source (fiscaldata|fred), dataset, kind (release|auction), title, event_date (ET date), scheduled_at (UTC, null when only the date is known), period (reference period as the source names it), previous_value, previous_unit (a unit above), url, details_json, fetch_id, run_id, ingested_at`
+
+**filings** (derived, P-024) — natural key `(instrument_id, accession, seq)`; seq 0 is the filing, 1.. the facts parsed from it; not an observation table; readers keep the newest `ingested_at` per key
+
+`instrument_id, cik (10 digits), accession (0000000000-00-000000), seq, row_kind (filing|insider_trade|holder_change), form (10-K, 10-K/A, 10-Q, 10-Q/A, 4, 4/A, 13F-HR, 13F-HR/A), filed_date, period (period of report; 13F as-of quarter end), url (EDGAR), party (Form 4 owner or 13F filer), party_cik, party_role, trade_date, trade_code (Form 4 code), side (buy|sell|other), shares (shares; ≥ 0), shares_change (13F, vs previous quarter; may be negative), price (USD per share; ≥ 0), value_usd (USD; ≥ 0), plan_10b5_1 (true only when the Form 4 row says so), details_json, source (edgar), dataset, fetch_id, run_id, ingested_at`
 
 **reports** (in runs + `model.json`) — `report_date, version, run_id, html_key, xlsx_key, xlsm_key, email_status, recipients_count, sent_at`
 

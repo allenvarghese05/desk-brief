@@ -26,6 +26,13 @@ currency per unit of base, ``index_pts``, ``USD``, ``shares`` (volume), ``index`
 value that may be negative, e.g. NFCI), ``contracts`` (futures contracts; a net position may
 be negative). Fields: ``level`` = an index value that is neither a price nor a rate;
 ``net_position`` = net speculative position; ``open_interest`` = open interest.
+
+Two tables are not observation tables (P-024, card T64): ``events`` (Today's scheduled releases
+and auctions) and ``filings`` (SEC EDGAR filings, Form 4 trades and 13F holder changes per
+instrument). Neither feeds ``obs_all``/``obs_latest``, the checks, sigma or the change ranking.
+Both are re-fetched each run, so a key can appear in several runs: readers keep, per natural key
+(``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``), the row with the newest ``ingested_at``.
+``filings`` units: ``shares`` in shares, ``price`` in USD per share, ``value_usd`` in USD.
 """
 
 from __future__ import annotations
@@ -38,7 +45,18 @@ import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 
-from deskbrief.models import CheckType, DQStatus, FetchStatus, JobKind, RunStatus, Trigger
+from deskbrief.models import (
+    CheckType,
+    DQStatus,
+    EventKind,
+    FetchStatus,
+    FilingForm,
+    FilingRowKind,
+    JobKind,
+    RunStatus,
+    TradeSide,
+    Trigger,
+)
 
 ENUMS: dict[str, tuple[str, ...]] = {
     "field": (
@@ -74,6 +92,10 @@ ENUMS: dict[str, tuple[str, ...]] = {
         "stale",
     ),
     "severity": ("info", "warn", "crit"),
+    "event_kind": tuple(k.value for k in EventKind),
+    "filing_form": tuple(f.value for f in FilingForm),
+    "filing_row": tuple(r.value for r in FilingRowKind),
+    "trade_side": tuple(s.value for s in TradeSide),
 }
 
 # Backwards-friendly names
@@ -233,6 +255,54 @@ TABLES: dict[str, dict[str, str]] = {
         "disagreement_rate": "float?",
         "n_crosschecks": "int",
     },
+    # P-024 / T64: Today's calendar. One row per scheduled event per fetch.
+    "events": {
+        "event_id": "str",  # stable per source+dataset, built by the adapter
+        "source": "str",  # fiscaldata | fred
+        "dataset": "str",
+        "kind": "enum:event_kind",
+        "title": "str",  # e.g. "Consumer Price Index", "7-Year Note auction"
+        "event_date": "date",  # ET calendar date of the event
+        "scheduled_at": "ts?",  # UTC instant when the time is known, else null
+        "period": "str?",  # reference period as the source names it, e.g. "2026-02"
+        "previous_value": "float?",  # only where the source gives one
+        "previous_unit": "enum:unit?",  # unit of previous_value
+        "url": "str?",  # the source page for the event
+        "details_json": "str",  # source-specific extras (term, CUSIP, offering, release id)
+        "fetch_id": "str",
+        "run_id": "str",
+        "ingested_at": "ts",
+    },
+    # P-024 / T64: SEC EDGAR, per instrument of kind stock. Row seq 0 is the filing itself;
+    # rows 1.. are the facts parsed from it (Form 4 transactions, 13F holder positions).
+    "filings": {
+        "instrument_id": "str",
+        "cik": "str",  # issuer CIK, 10 digits, zero-padded
+        "accession": "str",  # EDGAR accession number, 0000000000-00-000000
+        "seq": "int",  # 0 = the filing; 1.. = parsed facts in document order
+        "row_kind": "enum:filing_row",
+        "form": "enum:filing_form",
+        "filed_date": "date",  # EDGAR filing date (ET)
+        "period": "date?",  # period of report: quarter or year end; 13F as-of quarter end
+        "url": "str",  # EDGAR link to the filing
+        "party": "str?",  # Form 4 reporting owner, or 13F filer (holder) name
+        "party_cik": "str?",  # that party's CIK, 10 digits
+        "party_role": "str?",  # Form 4 relationship, e.g. "Director", "Officer: CFO"
+        "trade_date": "date?",  # Form 4 transaction date
+        "trade_code": "str?",  # Form 4 transaction code (P, S, A, M, F, G, ...)
+        "side": "enum:trade_side?",  # Form 4 only
+        "shares": "float?",  # Form 4 shares traded; 13F shares held at period end
+        "shares_change": "float?",  # 13F: shares held minus the previous quarter's
+        "price": "float?",  # Form 4 price per share, USD
+        "value_usd": "float?",  # Form 4 shares x price; 13F market value, USD
+        "plan_10b5_1": "bool",  # Form 4 row marked as under a Rule 10b5-1 plan; else false
+        "details_json": "str",  # extras (security title, ownership form, 13F class)
+        "source": "str",  # edgar
+        "dataset": "str",
+        "fetch_id": "str",
+        "run_id": "str",
+        "ingested_at": "ts",
+    },
 }
 
 _NONNEG_INT = {
@@ -247,6 +317,7 @@ _NONNEG_INT = {
     "n_dq_warn",
     "fetches",
     "n_crosschecks",
+    "seq",
 }
 _EXTRA_CHECKS: dict[str, list[pa.Check]] = {
     "tier": [pa.Check.isin([1, 2, 3])],
@@ -255,6 +326,13 @@ _EXTRA_CHECKS: dict[str, list[pa.Check]] = {
     "result_id": [pa.Check.str_length(min_value=1)],
     "fetch_id": [pa.Check.str_length(min_value=1)],
     "run_id": [pa.Check.str_length(min_value=1)],
+    "event_id": [pa.Check.str_length(min_value=1)],
+    "cik": [pa.Check.str_matches(r"^\d{10}$")],
+    "party_cik": [pa.Check.str_matches(r"^\d{10}$")],
+    "accession": [pa.Check.str_matches(r"^\d{10}-\d{2}-\d{6}$")],
+    "shares": [pa.Check.ge(0)],
+    "price": [pa.Check.ge(0)],
+    "value_usd": [pa.Check.ge(0)],
 }
 
 #: Natural key of an observation; multiple ingested versions of a key are revisions.
@@ -266,6 +344,12 @@ OBS_NATURAL_KEY: tuple[str, ...] = (
     "interval",
     "as_of",
 )
+
+#: Natural key of a calendar event (``events``); readers keep the newest ``ingested_at``.
+EVENTS_NATURAL_KEY: tuple[str, ...] = ("source", "dataset", "event_id")
+
+#: Natural key of a filing row (``filings``); readers keep the newest ``ingested_at``.
+FILINGS_NATURAL_KEY: tuple[str, ...] = ("instrument_id", "accession", "seq")
 
 # ---------------------------------------------------------------------------
 # kind -> pandera checks / pandas dtype
@@ -382,6 +466,8 @@ REVISIONS_SCHEMA = TABLE_SCHEMAS["revisions"]
 ALERTS_SCHEMA = TABLE_SCHEMAS["alerts"]
 RUNS_SCHEMA = TABLE_SCHEMAS["runs"]
 SCORECARD_SCHEMA = TABLE_SCHEMAS["scorecard_daily"]
+EVENTS_SCHEMA = TABLE_SCHEMAS["events"]
+FILINGS_SCHEMA = TABLE_SCHEMAS["filings"]
 
 
 def columns(table: str) -> tuple[str, ...]:

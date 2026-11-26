@@ -74,6 +74,42 @@ class CheckType(StrEnum):
     RECONCILIATION = "reconciliation"
 
 
+class EventKind(StrEnum):
+    """What a row of the ``events`` table is (P-024, card T64): Today's calendar."""
+
+    RELEASE = "release"  # a scheduled data release (FRED release calendar), e.g. CPI
+    AUCTION = "auction"  # a Treasury auction (fiscaldata upcoming auctions)
+
+
+class FilingForm(StrEnum):
+    """SEC EDGAR form types stored in the ``filings`` table (P-024, card T64)."""
+
+    FORM_10K = "10-K"
+    FORM_10K_A = "10-K/A"
+    FORM_10Q = "10-Q"
+    FORM_10Q_A = "10-Q/A"
+    FORM_4 = "4"
+    FORM_4_A = "4/A"
+    FORM_13F_HR = "13F-HR"
+    FORM_13F_HR_A = "13F-HR/A"
+
+
+class FilingRowKind(StrEnum):
+    """What a row of the ``filings`` table describes."""
+
+    FILING = "filing"  # the filing itself (seq 0): form, dates, link
+    INSIDER_TRADE = "insider_trade"  # one Form 4 non-derivative transaction
+    HOLDER_CHANGE = "holder_change"  # one 13F holder's position, against its previous quarter
+
+
+class TradeSide(StrEnum):
+    """Direction of a Form 4 transaction, from its transaction code."""
+
+    BUY = "buy"  # code P (open-market or private purchase)
+    SELL = "sell"  # code S (open-market or private sale)
+    OTHER = "other"  # every other code (grants, exercises, tax withholding, gifts, ...)
+
+
 _SECRET_PARAM = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|passwd|auth|key[_-]?id|access[_-]?key)", re.I
 )

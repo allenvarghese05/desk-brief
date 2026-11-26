@@ -25,8 +25,23 @@ from yaml.nodes import MappingNode
 from deskbrief.timeutil import parse_hhmm
 
 KNOWN_SOURCES: frozenset[str] = frozenset(
-    {"treasury", "fred", "ecb", "stooq", "cboe", "alpaca", "twelvedata", "yahoo", "cftc"}
+    {
+        "treasury",
+        "fred",
+        "ecb",
+        "stooq",
+        "cboe",
+        "alpaca",
+        "twelvedata",
+        "yahoo",
+        "cftc",
+        "fiscaldata",  # P-024 / T64: Treasury upcoming auctions (keyless)
+        "edgar",  # P-024 / T64: SEC EDGAR filings, Form 4, 13F
+    }
 )
+
+#: SEC EDGAR fair-access limit: 10 requests per second, so at most 600 per minute (P-024).
+SEC_MAX_RATE_PER_MIN: float = 600.0
 
 Tier = Literal[1, 2, 3]
 AssetClass = Literal["equity", "rates", "fx", "commodity", "index", "vol", "macro"]
@@ -34,6 +49,11 @@ Kind = Literal["etf", "stock", "future", "index", "yield", "fx", "macro"]
 Unit = Literal["USD", "pct", "fx_rate", "index_pts", "index", "contracts"]
 Relation = Literal["same", "return", "inverse_duration", "level"]
 CalendarName = Literal["XNYS", "SIFMA_US", "TARGET"]
+#: Units of an overnight change (``deskbrief.query.ChangeRow.change_unit``).
+ChangeUnit = Literal["pct", "bp", "pts", "pp"]
+
+_ENV_NAME = r"^[A-Z][A-Z0-9_]*$"
+_CIK = r"^\d{10}$"
 
 
 class _Model(BaseModel):
@@ -47,6 +67,17 @@ class SourceSettings(_Model):
     retries: int = Field(ge=0, le=10)
     daily_budget: int | None = Field(default=None, gt=0)
     user_agent: str | None = None
+    #: Name of the environment variable that holds the User-Agent (P-024: SEC EDGAR reads its
+    #: contact User-Agent from the secret ``DESKBRIEF_SEC_USER_AGENT``, so no address is
+    #: committed). The value is a secret: never logged, never stored. Exclusive with
+    #: ``user_agent``.
+    user_agent_env: str | None = Field(default=None, pattern=_ENV_NAME)
+
+    @model_validator(mode="after")
+    def _one_user_agent(self) -> Self:
+        if self.user_agent is not None and self.user_agent_env is not None:
+            raise ValueError("set user_agent or user_agent_env, not both")
+        return self
 
 
 class StorageSettings(_Model):
@@ -242,6 +273,187 @@ class DashboardSettings(_Model):
     hosted_hidden_tiers: tuple[Tier, ...] = (1,)
 
 
+class RegimeRule(_Model):
+    """One condition of a regime rule set (P-024 "the read"), over one market's overnight move.
+
+    Met when the market's rankable change (``ChangeRow.rankable``, P-024: like-for-like and new
+    since the previous brief) goes in ``direction`` by at least
+    ``min_sigma`` (its size in sigma against its own recent daily moves) or, for a size rule, by at
+    least ``min_change`` in ``change_unit`` (the unit of ``ChangeRow.change_unit``). Exactly one
+    of ``min_sigma`` and ``min_change`` is set.
+    """
+
+    market: str  # instrument id
+    direction: Literal["up", "down"]
+    label: str = Field(min_length=1)  # shown next to the read, e.g. "Equity futures down"
+    min_sigma: float | None = Field(default=None, gt=0)
+    min_change: float | None = Field(default=None, gt=0)
+    change_unit: ChangeUnit | None = None
+
+    @model_validator(mode="after")
+    def _one_threshold(self) -> Self:
+        if (self.min_sigma is None) == (self.min_change is None):
+            raise ValueError(f"rule {self.label!r}: set exactly one of min_sigma, min_change")
+        if (self.min_change is None) != (self.change_unit is None):
+            raise ValueError(f"rule {self.label!r}: change_unit goes with min_change only")
+        return self
+
+
+class RegimeRuleSet(_Model):
+    """The rules behind one regime label (e.g. "Risk-off")."""
+
+    label: str = Field(min_length=1)
+    rules: tuple[RegimeRule, ...] = Field(min_length=1)
+    min_met: int = Field(ge=1)  # how many rules must be met for this label
+
+    @model_validator(mode="after")
+    def _reachable(self) -> Self:
+        if self.min_met > len(self.rules):
+            raise ValueError(f"regime {self.label!r}: min_met exceeds the number of rules")
+        return self
+
+
+class RelatedPair(_Model):
+    """Two markets that usually move together (P-024 "Check before using").
+
+    Flagged when both have a rankable change (so both moves cover the same overnight) and the
+    changes differ by more than ``limit`` in
+    ``unit`` (for prices, percentage points of the two % changes).
+    """
+
+    pair: tuple[str, str]  # instrument ids
+    limit: float = Field(gt=0)
+    unit: ChangeUnit = "pct"
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Self:
+        if self.pair[0] == self.pair[1]:
+            raise ValueError(f"related pair {self.pair}: the two markets must differ")
+        return self
+
+
+class NoteSettings(_Model):
+    """The morning note written by Claude (P-024, card T66). Inert without the API key."""
+
+    enabled: bool = True
+    model: str = "claude-sonnet-5-5"
+    api_key_env: str = Field(default="ANTHROPIC_API_KEY", pattern=_ENV_NAME)
+    max_sentences: int = Field(default=5, ge=1, le=10)
+    timeout_s: float = Field(default=30.0, gt=0, le=300)
+    max_output_tokens: int = Field(default=2000, ge=100, le=64000)
+    #: Monthly spend cap in USD; when the month's estimated spend reaches it, no call is made.
+    monthly_cap_usd: float = Field(default=5.0, gt=0)
+    #: Prices used to estimate spend from the reply's token usage, USD per million tokens.
+    price_input_usd_per_mtok: float = Field(default=2.0, gt=0)
+    price_output_usd_per_mtok: float = Field(default=10.0, gt=0)
+    #: A sentence containing any of these (lower case, matched as whole words) is dropped.
+    forbidden_words: tuple[str, ...] = ()
+
+    @field_validator("forbidden_words")
+    @classmethod
+    def _words(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        for w in v:
+            if not w.strip() or w != w.strip().lower():
+                raise ValueError(f"forbidden word {w!r} must be non-empty, trimmed lower case")
+        if len(v) != len(set(v)):
+            raise ValueError("forbidden_words has duplicates")
+        return v
+
+
+class BriefSettings(_Model):
+    """The brief shared by Home and the email (P-024): the read, Check before using, the note.
+
+    The read: nothing ranked gives ``quiet_label``; a rule set whose ``min_met`` rules are met,
+    while no other set has any rule met, gives its label; anything else gives ``mixed_label``.
+    """
+
+    regime_rules: tuple[RegimeRuleSet, ...] = ()
+    quiet_label: str = Field(default="Quiet", min_length=1)
+    mixed_label: str = Field(default="Mixed", min_length=1)
+    related_pairs: tuple[RelatedPair, ...] = ()
+    note: NoteSettings = NoteSettings()
+
+    @model_validator(mode="after")
+    def _labels(self) -> Self:
+        labels = [s.label for s in self.regime_rules]
+        fixed = {self.quiet_label, self.mixed_label}
+        if len(fixed) != 2:
+            raise ValueError("quiet_label and mixed_label must differ")
+        if len(labels) != len(set(labels)):
+            raise ValueError("regime rule sets have duplicate labels")
+        clash = sorted(set(labels) & fixed)
+        if clash:
+            raise ValueError(f"regime labels {clash} are reserved for quiet/mixed")
+        pairs = [frozenset(p.pair) for p in self.related_pairs]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("related_pairs has a duplicate pair")
+        return self
+
+
+class FredRelease(_Model):
+    """A FRED release shown in Today (P-024, card T65). FRED gives dates only, so the time is
+    configured here."""
+
+    release_id: int = Field(gt=0, strict=True)
+    title: str = Field(min_length=1)  # e.g. "Consumer Price Index"
+    time_et: str  # HH:MM, America/New_York
+
+    @field_validator("time_et")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        parse_hhmm(v)
+        return v
+
+
+class EventsSettings(_Model):
+    """Today's calendar (``events`` table): Treasury auctions and FRED release dates."""
+
+    horizon_days: int = Field(default=7, ge=1, le=31)  # fetch events this many days ahead
+    fred_releases: tuple[FredRelease, ...] = ()
+
+    @model_validator(mode="after")
+    def _unique(self) -> Self:
+        ids = [r.release_id for r in self.fred_releases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("events.fred_releases has a duplicate release_id")
+        return self
+
+
+class FilingsCompany(_Model):
+    """A single stock whose SEC filings are fetched (P-024 Company section)."""
+
+    instrument: str  # instrument id, kind stock
+    cik: str = Field(pattern=_CIK)  # issuer CIK, 10 digits, zero-padded
+    #: Matches the stock in 13F information tables, which identify securities by CUSIP.
+    cusip: str | None = Field(default=None, pattern=r"^[0-9A-Z]{8}[0-9]$")
+
+
+class FilingsHolder(_Model):
+    """A 13F filer whose quarter-on-quarter position changes are shown."""
+
+    cik: str = Field(pattern=_CIK)
+    name: str = Field(min_length=1)
+
+
+class FilingsSettings(_Model):
+    """SEC EDGAR (``filings`` table, card T65): which stocks, how far back, which holders."""
+
+    companies: tuple[FilingsCompany, ...] = ()
+    insider_days: int = Field(default=90, ge=1, le=365)  # Form 4 look-back
+    holders: tuple[FilingsHolder, ...] = ()
+
+    @model_validator(mode="after")
+    def _unique(self) -> Self:
+        for what, keys in (
+            ("instrument", [c.instrument for c in self.companies]),
+            ("cik", [c.cik for c in self.companies]),
+            ("holder cik", [h.cik for h in self.holders]),
+        ):
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"filings: duplicate {what}")
+        return self
+
+
 class Config(_Model):
     version: Literal[1]
     timezone_report: Literal["America/New_York"] = "America/New_York"
@@ -255,6 +467,9 @@ class Config(_Model):
     crosschecks: CrosscheckSettings
     report: ReportSettings
     dashboard: DashboardSettings = DashboardSettings()
+    brief: BriefSettings = BriefSettings()
+    events: EventsSettings = EventsSettings()
+    filings: FilingsSettings = FilingsSettings()
 
     @model_validator(mode="after")
     def _cross_references(self) -> Self:
@@ -346,9 +561,42 @@ class Config(_Model):
                 errors.append(f"official_pair: {fred_id!r} is not a configured fred feed")
             if tsy_col not in tsy_syms:
                 errors.append(f"official_pair: {tsy_col!r} is not a configured treasury feed")
+        errors.extend(self._p024_errors(by_id))
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+    def _p024_errors(self, by_id: dict[str, Instrument]) -> list[str]:
+        """Cross-references of the P-024 sections: brief, events, filings, edgar."""
+        errors: list[str] = []
+        for rule_set in self.brief.regime_rules:
+            for rule in rule_set.rules:
+                if rule.market not in by_id:
+                    errors.append(f"regime {rule_set.label!r}: unknown market {rule.market!r}")
+        for rp in self.brief.related_pairs:
+            for m in rp.pair:
+                if m not in by_id:
+                    errors.append(f"related pair {rp.pair}: unknown market {m!r}")
+        if self.events.fred_releases and "fred" not in self.sources:
+            errors.append("events.fred_releases needs the fred source")
+        for company in self.filings.companies:
+            inst = by_id.get(company.instrument)
+            if inst is None:
+                errors.append(f"filings: unknown instrument {company.instrument!r}")
+            elif inst.kind != "stock":
+                errors.append(f"filings: {company.instrument} is a {inst.kind}, not a stock")
+        if (self.filings.companies or self.filings.holders) and "edgar" not in self.sources:
+            errors.append("filings needs the edgar source")
+        edgar = self.sources.get("edgar")
+        if edgar is not None:
+            if edgar.user_agent_env is None:
+                errors.append("sources.edgar: user_agent_env is required (SEC contact User-Agent)")
+            if edgar.rate_per_min > SEC_MAX_RATE_PER_MIN:
+                errors.append(
+                    f"sources.edgar: rate_per_min {edgar.rate_per_min:g} exceeds SEC's "
+                    f"{SEC_MAX_RATE_PER_MIN:g} (10 per second)"
+                )
+        return errors
 
     # -- convenience lookups (pure, no IO) --------------------------------
     def instrument(self, instrument_id: str) -> Instrument:
