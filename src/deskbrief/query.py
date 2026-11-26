@@ -81,13 +81,17 @@ Own-market bases and ranking (P-024, T61)
   close). Like-for-like closes are preferred; a **futures** price never falls back to another
   series (Brent's ``BZ=F`` is never compared with FRED's spot ``DCOILBRENTEU``).
 * A yield quote (a Yahoo ``^IRX`` tick) compares with its own like-for-like close before the
-  quote's date when one is stored (``"previous yahoo close"``); otherwise with the previous
+  quote's date when one is stored (``"previous Yahoo close"``); otherwise with the previous
   official value, noted, as before.
+* A move over more than one period is shown with a note but never ranked: an FX baseline that
+  had to walk back past a missing 17:00 close, a yield quote whose own close is older than the
+  previous SIFMA session.
 * ``ChangeRow.rankable`` is True only for an ``ok`` change whose baseline is like-for-like and
   whose value is new since the previous scheduled brief (the previous XNYS session at the
-  report's ET clock time: a dated row must be dated on or after that session, an intraday row
-  must be later than that instant). ``unranked_reason`` says why not. The brief scores sigma
-  only for rankable changes.
+  report's ET clock time). "New" compares with the value that brief showed, point-in-time on
+  ``ingested_at``: a print first stored after it is new even if dated earlier (FRED's day-late
+  series), once; it must belong to a later trading day, or the same day at a later instant.
+  ``unranked_reason`` says why not. The brief scores sigma only for rankable changes.
 """
 
 from __future__ import annotations
@@ -125,6 +129,18 @@ BASIS_NYSE_CLOSE = "previous NYSE close"
 BASIS_OFFICIAL = "previous official value"
 BASIS_WEEKLY = "previous weekly value"
 BASIS_NY_CLOSE = "previous NY close"
+
+#: how a provider is named in basis text ("previous Yahoo close"); unknown ids are shown as is
+SOURCE_NAMES: Mapping[str, str] = {
+    "yahoo": "Yahoo", "stooq": "Stooq", "cboe": "Cboe", "alpaca": "Alpaca",
+    "twelvedata": "Twelve Data", "treasury": "Treasury", "fred": "FRED", "ecb": "ECB",
+    "cftc": "CFTC",
+}  # fmt: skip
+
+
+def source_name(source: str) -> str:
+    return SOURCE_NAMES.get(source, source)
+
 
 #: FX: the New York close is 17:00 ET; a stored quote within two hours of it stands in for it
 FX_CLOSE_HHMM = "17:00"
@@ -484,6 +500,10 @@ def overnight_changes(
     session = is_business_day("XNYS", report_date)
     # the previous scheduled brief: the previous XNYS session at this report's ET clock time
     since = et_to_utc(nyse_prev, f"{to_et(report_time):%H:%M}")
+    # what that brief showed, point-in-time on ingested_at (a late print is new once)
+    shown = {
+        r.instrument_id: r for r in _snapshot(duck, since, nyse_prev, exclude_tiers=exclude_tiers)
+    }
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
@@ -499,7 +519,7 @@ def overnight_changes(
                 ch = _off_session_price_change(last, history)
         else:
             ch = _official_change(last, history)
-        out.append(_ranked(ch, nyse_prev, since))
+        out.append(_ranked(ch, shown.get(last.instrument_id), since))
     return tuple(out)
 
 
@@ -513,16 +533,50 @@ def like_for_like(value: ValueRow, baseline: ValueRow) -> bool:
     return v == b or (v, b) in LIKE_FOR_LIKE
 
 
-def _is_new_since(row: ValueRow, since_date: date, since: datetime) -> bool:
-    """New since the previous brief: dated on or after its date, or stamped after its cut."""
-    if row.interval in OFFICIAL_INTERVALS:
-        return _et(row) >= since_date
-    return ensure_utc(row.as_of) > ensure_utc(since)
+def _session_day(row: ValueRow) -> date:
+    """The trading day a value belongs to: a dated row's own date; an intraday row's date in its
+    home exchange's zone for a foreign index (Tokyo's Tuesday quote at 01:45 ET), else in ET."""
+    home = HOME_EXCHANGES.get(row.instrument_id)
+    if row.interval in OFFICIAL_INTERVALS or home is None:
+        return _et(row)
+    return ensure_utc(row.as_of).astimezone(ZoneInfo(home.tz)).date()
 
 
-def _ranked(ch: ChangeRow, since_date: date, since: datetime) -> ChangeRow:
-    if ch.status != "ok" or ch.previous is None:
-        return ch
+def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | None:
+    """Why ``last`` is not new since the previous brief, which showed ``shown``; None if new.
+
+    P-024 and the planner's ruling on T61. ``shown`` is that brief's own value, point-in-time on
+    ``ingested_at``: a value first stored after the brief is new even when dated earlier (FRED
+    publishes a day late), and a value the brief already had is not. The value must belong to a
+    later trading day than ``shown``, or (a US market) the same day at a later instant. A
+    foreign index's session is scored once: a later quote of the session the previous brief
+    already showed, against the same previous-session close, is not scored again.
+    """
+    if shown is None:
+        return None
+    brief = to_et(since)
+    when = f"{brief.day} {brief:%b} {brief:%H:%M} ET"
+    day, shown_day = _session_day(last), _session_day(shown)
+    home = HOME_EXCHANGES.get(last.instrument_id)
+    if day == shown_day and home is not None:
+        exchange = home.basis.removeprefix("previous ").removesuffix(" close")
+        return f"{exchange} session of {day.day} {day:%b} already in the previous brief ({when})"
+    if day > shown_day or (
+        day == shown_day
+        and last.interval not in OFFICIAL_INTERVALS
+        and ensure_utc(last.as_of) > ensure_utc(shown.as_of)
+    ):
+        return None
+    dated = to_et(last.as_of)
+    text = f"{dated.day} {dated:%b}"
+    if last.interval not in OFFICIAL_INTERVALS:
+        text += f" {dated:%H:%M} ET"
+    return f"value dated {text}, not new since the previous brief ({when})"
+
+
+def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow:
+    if ch.status != "ok" or ch.previous is None or ch.unranked_reason is not None:
+        return ch  # a builder already said why it may not rank (a move spanning two periods)
     if not like_for_like(ch.last, ch.previous):
         prev = ch.previous
         return replace(
@@ -530,13 +584,9 @@ def _ranked(ch: ChangeRow, since_date: date, since: datetime) -> ChangeRow:
             unranked_reason=f"baseline is another series ({prev.source} {prev.dataset} "
             f"{prev.field}), not {ch.last.source} {ch.last.dataset} {ch.last.field}",
         )
-    if not _is_new_since(ch.last, since_date, since):
-        when = to_et(ch.last.as_of)
-        return replace(
-            ch,
-            unranked_reason=f"value dated {when.day} {when:%b}, not new since the previous "
-            f"brief ({since_date.day} {since_date:%b})",
-        )
+    reason = _not_new(ch.last, shown, since)
+    if reason is not None:
+        return replace(ch, unranked_reason=reason)
     return replace(ch, rankable=True)
 
 
@@ -641,12 +691,23 @@ def _fx_change(last: ValueRow, quotes: list[ValueRow]) -> ChangeRow:
         if (q.source, q.dataset, q.field) == (last.source, last.dataset, last.field)
         and ensure_utc(q.as_of) < ensure_utc(last.as_of)
     ]
-    for close in _ny_closes_before(last.as_of):
+    closes = _ny_closes_before(last.as_of)
+    for close in closes:
         near = [q for q in series if abs(ensure_utc(q.as_of) - close) <= FX_CLOSE_WINDOW]
         if near:
             prev = min(near, key=lambda q: (abs(ensure_utc(q.as_of) - close), -q.as_of.timestamp()))
             basis = f"{BASIS_NY_CLOSE}, {to_et(prev.as_of):%H:%M} ET quote"
-            return _change(last, prev, basis, "ok")
+            ch = _change(last, prev, basis, "ok")
+            if close == closes[0] or ch.status != "ok":
+                return ch
+            # walked back past a missing close: a move over more than one FX day, never ranked
+            want = to_et(closes[0])
+            return replace(
+                ch,
+                note=f"no {last.source} quote stored near the {want:%a} {want.day} {want:%b} "
+                "NY close",
+                unranked_reason="spans more than one FX day",
+            )
     return _change(last, None, BASIS_NY_CLOSE, "no_baseline")
 
 
@@ -656,7 +717,18 @@ def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
         # official par yield measures something else (P-024, T61)
         own = [r for r in history if like_for_like(last, r) and _et(r) < _et(last)]
         if own:
-            return _change(last, own[0], f"previous {own[0].source} close", "ok")
+            prev = own[0]
+            ch = _change(last, prev, f"previous {source_name(prev.source)} close", "ok")
+            session = prev_business_day("SIFMA_US", _et(last))
+            if ch.status != "ok" or _et(prev) >= session:
+                return ch
+            # a missing close in between: a move over more than one session, never ranked
+            return replace(
+                ch,
+                note=f"baseline close dated {_et(prev).day} {_et(prev):%b}, not the previous "
+                f"session ({session.day} {session:%b})",
+                unranked_reason="spans more than one session",
+            )
     earlier = [r for r in history if r.as_of < last.as_of]
     if last.interval in OFFICIAL_INTERVALS:
         same = [

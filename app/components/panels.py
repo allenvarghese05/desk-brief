@@ -47,7 +47,16 @@ from app.components.values import (
 )
 
 from deskbrief.calendars import is_business_day
-from deskbrief.query import BASIS_NYSE_CLOSE, field_label
+from deskbrief.query import (
+    BASIS_NY_CLOSE,
+    BASIS_NYSE_CLOSE,
+    HOME_EXCHANGES,
+    OFFICIAL_INTERVALS,
+    ChangeRow,
+    field_label,
+    like_for_like,
+    source_name,
+)
 from deskbrief.report.model import SPREAD_ID, Row, Section
 from deskbrief.timeutil import to_et
 
@@ -197,13 +206,32 @@ def _day(ts: datetime) -> date:
     return to_et(ts).date()
 
 
+def _own_close(ch: ChangeRow) -> bool:
+    """A quoted (intraday) non-price value against its own previous close (T61: Yahoo ``^IRX``
+    against Yahoo's ``^IRX`` close), not against an official value."""
+    assert ch.previous is not None
+    return ch.last.interval not in OFFICIAL_INTERVALS and like_for_like(ch.last, ch.previous)
+
+
+def _exchange_word(basis: str) -> str | None:
+    """ "Tokyo" for "previous Tokyo close": a foreign index's own exchange (T61)."""
+    for home in HOME_EXCHANGES.values():
+        if basis == home.basis:
+            return basis.removeprefix("previous ").removesuffix(" close")
+    return None
+
+
 def move_label(row: Row) -> str:
-    """The short basis of a row's 1D change, as the strip says it (P-023).
+    """The short basis of a row's 1D change, as the strip says it (P-023), from the change's own
+    basis so the strip and the email always name the same baseline (T61).
 
     * a weekly value: "week on week";
     * an official value against the one before (a yield, a rate): the value's weekday ("Fri");
-      a quote against an official baseline: "vs official";
+      a quote against its own previous close (a Yahoo yield quote): "vs Fri close"; a quote
+      against an official baseline: "vs official";
     * a price on an XNYS session day: "vs Fri close", naming the baseline's day;
+    * an FX pair against its own New York close: "vs NY close"; a foreign index against its own
+      exchange's previous session: "vs Tokyo close";
     * a price on a day that is not an XNYS session (T60 bug 4; ``query.overnight_changes``
       then names the baseline "<weekday> close"): the last session's weekday ("Fri") when the
       value is from a session, else "since Fri close" (a market that traded on an XNYS
@@ -217,15 +245,23 @@ def move_label(row: Row) -> str:
     if last.interval == "1w":
         return "week on week"
     if ch.family != "price":
+        if _own_close(ch):
+            return f"vs {_day(prev.as_of):%a} close"
         return f"{_day(last.as_of):%a}" if last.tier == 3 else "vs official"
     if ch.basis == BASIS_NYSE_CLOSE:
         return f"vs {_day(prev.as_of):%a} close"
+    if ch.basis.startswith(BASIS_NY_CLOSE):
+        return "vs NY close"
+    exchange = _exchange_word(ch.basis)
+    if exchange is not None:
+        return f"vs {exchange} close"
     s = _day(last.as_of)
     return f"{s:%a}" if is_business_day("XNYS", s) else f"since {ch.basis}"
 
 
 def basis_text(row: Row) -> str:
-    """The longer basis inside the hero pill: what the 1D change spans, with dates."""
+    """The longer basis inside the hero pill: what the 1D change spans, with dates. It names
+    the same baseline as the email's basis text (T61)."""
     ch = row.change
     if ch is None or ch.previous is None or not _has_change(row):
         return ""
@@ -235,9 +271,16 @@ def basis_text(row: Row) -> str:
     if last.interval == "1w":
         return f"week on week, vs {then}"
     if ch.family != "price":
+        if _own_close(ch):
+            return f"vs {pd_:%a} {then} {source_name(prev.source)} close"
         return f"vs {then} official" + ("" if last.tier == 3 else " value")
     if ch.basis == BASIS_NYSE_CLOSE:
         return f"vs {pd_:%a} {then} close"
+    if ch.basis.startswith(BASIS_NY_CLOSE):
+        return f"vs {pd_:%a} {then} NY close ({to_et(prev.as_of):%H:%M} ET quote)"
+    exchange = _exchange_word(ch.basis)
+    if exchange is not None:
+        return f"vs {pd_:%a} {then} {exchange} close"
     s = _day(last.as_of)
     if is_business_day("XNYS", s):
         return f"{s:%a} vs {pd_:%a} {then} close"

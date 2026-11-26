@@ -196,26 +196,38 @@ def _cmd_diagnose_changes(args: argparse.Namespace) -> int:
     dataset, field, interval, tier, symbol, ET as-of, value), the basis, status and note, then
     the series stored for it in the last ``DIAGNOSE_SERIES_DAYS`` days (newest ET date per
     source, dataset, field and interval), and finally the moves the brief scored as notable.
-    It fetches nothing and writes nothing; no credential, URL or bucket key is printed.
+    It fetches nothing and writes nothing. Errors print their type only, never the message,
+    so no credential, path, URL or bucket key is printed.
     """
     from deskbrief.timeutil import et_to_utc, parse_hhmm
 
     try:
         parse_hhmm(args.time)
+    except ValueError:
+        print("diagnose: --time must be HH:MM (24h)", file=sys.stderr)
+        return 2
+    # every failure below names the error type only: messages from config loading, storage
+    # and DuckDB's lazy R2 reads can carry a path, an endpoint, a bucket URL or a key
+    try:
         config = load_config(args.config)
-    except (ValueError, OSError) as exc:
-        print(f"diagnose: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"diagnose: config unavailable: {type(exc).__name__}", file=sys.stderr)
         return 2
     try:
         store = build_store(config)
         from deskbrief.store import duck as duck_store
 
         conn = duck_store.connect(store, config)
-    except Exception as exc:  # e.g. missing R2 credentials: name the error type only
+    except Exception as exc:  # e.g. missing R2 credentials
         print(f"storage unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     cut = et_to_utc(args.date, args.time)
-    for line in diagnose_changes_lines(conn, config, args.date, cut, values=not args.no_values):
+    try:
+        lines = diagnose_changes_lines(conn, config, args.date, cut, values=not args.no_values)
+    except Exception as exc:  # a lazy read of the store failed mid-query
+        print(f"diagnose: read failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    for line in lines:
         print(line)
     return 0
 

@@ -724,10 +724,11 @@ def test_diagnose_changes_prints_last_value_and_baseline_and_writes_nothing(
 # ---------------------------------------------------------------------------
 # T61 (P-024): own-market baselines, like-for-like ranking, values new since the last brief.
 # The dates are real calendar days (Tokyo's Labour Thanksgiving Day, the UK summer bank holiday,
-# MLK day); every value is made up.
+# MLK day); every value is invented, none is copied from or derived from a real store or email.
 # ---------------------------------------------------------------------------
 
 TUE24, MON23, FRI20, THU19 = (date(2026, 11, d) for d in (24, 23, 20, 19))
+WED25 = date(2026, 11, 25)
 TUE24_0700 = et(TUE24, "07:00")
 FRED = {"source": "fred", "dataset": "series", "tier": 3}
 
@@ -764,6 +765,23 @@ def test_fx_without_a_quote_near_the_ny_close_has_no_baseline(tmp_path: Path) ->
     )
     fx = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "EURUSD")
     assert (fx.status, fx.basis, fx.previous) == ("no_baseline", query.BASIS_NY_CLOSE, None)
+
+
+def test_fx_walking_back_past_a_missing_close_is_shown_but_not_ranked(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            tick("EURUSD", et(FRI20, "17:30"), 1.10, unit="fx_rate"),  # Friday's close only
+            tick("EURUSD", et(TUE24, "06:16"), 1.111, unit="fx_rate"),
+        ]
+    )
+    fx = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "EURUSD")
+    assert fx.status == "ok"
+    assert fx.previous is not None
+    assert fx.previous.as_of == et(FRI20, "17:30")
+    assert fx.change == pytest.approx(1.0)
+    assert fx.note == "no yahoo quote stored near the Mon 23 Nov NY close"
+    assert (fx.rankable, fx.unranked_reason) == (False, "spans more than one FX day")
 
 
 def test_n225_on_a_tokyo_holiday_uses_tokyos_previous_session(tmp_path: Path) -> None:
@@ -812,9 +830,9 @@ def test_dax_after_an_nyse_holiday_uses_frankfurts_own_previous_session(tmp_path
     w = World(tmp_path)
     w.observations(
         [
-            daily("DAX", fri, 20000.0, unit="index_pts", **YH_HIST),
-            daily("DAX", mlk, 25000.0, unit="index_pts", **YH_HIST),
-            tick("DAX", et(tue, "06:00"), 25250.0, unit="index_pts"),
+            daily("DAX", fri, 15000.0, unit="index_pts", **YH_HIST),
+            daily("DAX", mlk, 16000.0, unit="index_pts", **YH_HIST),
+            tick("DAX", et(tue, "06:00"), 16160.0, unit="index_pts"),
         ]
     )
     dax = change_of(query.overnight_changes(w.connect(), tue, et(tue, "07:00")), "DAX")
@@ -824,6 +842,29 @@ def test_dax_after_an_nyse_holiday_uses_frankfurts_own_previous_session(tmp_path
     assert dax.change == pytest.approx(1.0)
 
 
+def test_foreign_session_the_previous_brief_scored_is_not_ranked_again(tmp_path: Path) -> None:
+    # no fresh London quote on Tuesday: the last value is Monday's later quote, against the same
+    # Friday close Monday's brief already used. Monday's session is not scored a second time
+    mon, tue = date(2026, 11, 16), date(2026, 11, 17)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("FTSE", FRI, 8000.0, unit="index_pts", **YH_HIST),
+            tick("FTSE", et(mon, "06:00"), 8040.0, unit="index_pts"),  # in Monday's brief
+            tick("FTSE", et(mon, "11:35"), 8080.0, unit="index_pts"),  # London's close
+            daily("FTSE", mon, 8080.0, unit="index_pts", **YH_HIST),  # stored Monday 20:00
+        ]
+    )
+    ftse = change_of(query.overnight_changes(w.connect(), tue, et(tue, "07:00")), "FTSE")
+    assert ftse.last.as_of == et(mon, "11:35")
+    assert (ftse.status, ftse.basis) == ("ok", "previous London close")
+    assert ftse.change == pytest.approx(1.0)
+    assert not ftse.rankable
+    assert ftse.unranked_reason == (
+        "London session of 16 Nov already in the previous brief (16 Nov 07:00 ET)"
+    )
+
+
 _TSY_3M = {"source": "treasury", "dataset": "par_curve", "field": "yield", "unit": "pct"}
 
 
@@ -831,14 +872,14 @@ def test_ust_3m_quote_against_the_treasury_yield_is_shown_but_not_ranked(tmp_pat
     w = World(tmp_path)
     w.observations(
         [
-            daily("UST_3M", FRI20, 4.36, **_TSY_3M),
-            daily("UST_3M", MON23, 4.37, **_TSY_3M),
-            tick("UST_3M", et(MON23, "14:59"), 4.147, unit="pct"),  # ^IRX: a discount rate
+            daily("UST_3M", FRI20, 3.80, **_TSY_3M),
+            daily("UST_3M", MON23, 3.81, **_TSY_3M),
+            tick("UST_3M", et(MON23, "14:59"), 3.62, unit="pct"),  # ^IRX: a discount rate
         ]
     )
     y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
     assert (y.status, y.basis) == ("ok", query.BASIS_OFFICIAL)
-    assert y.change == pytest.approx(-22.3)
+    assert y.change == pytest.approx(-19.0)
     assert y.note == "yahoo tick value against an official treasury baseline"
     assert not y.rankable
     assert y.unranked_reason is not None
@@ -849,41 +890,81 @@ def test_ust_3m_quote_ranks_against_yahoos_own_previous_close(tmp_path: Path) ->
     w = World(tmp_path)
     w.observations(
         [
-            daily("UST_3M", FRI20, 4.36, **_TSY_3M),
-            daily("UST_3M", MON23, 4.37, **_TSY_3M),
-            daily("UST_3M", FRI20, 4.10, unit="pct", **YH_HIST),
-            daily("UST_3M", MON23, 4.147, unit="pct", **YH_HIST),  # the quote's own day
-            tick("UST_3M", et(MON23, "14:59"), 4.147, unit="pct"),
+            daily("UST_3M", FRI20, 3.80, **_TSY_3M),
+            daily("UST_3M", MON23, 3.81, **_TSY_3M),
+            daily("UST_3M", FRI20, 3.55, unit="pct", **YH_HIST),
+            daily("UST_3M", MON23, 3.62, unit="pct", **YH_HIST),  # the quote's own day
+            tick("UST_3M", et(MON23, "14:59"), 3.62, unit="pct"),
         ]
     )
     y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
-    assert (y.status, y.basis, y.note) == ("ok", "previous yahoo close", None)
+    assert (y.status, y.basis, y.note) == ("ok", "previous Yahoo close", None)
     assert y.previous is not None
     assert (y.previous.source, y.previous.dataset, y.previous.as_of) == (
         "yahoo",
         "history",
         et(FRI20),
     )
-    assert y.change == pytest.approx(4.7)
+    assert y.change == pytest.approx(7.0)
     assert y.rankable
 
 
-def test_fred_value_dated_before_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
+def test_ust_3m_quote_against_an_older_own_close_is_not_ranked(tmp_path: Path) -> None:
     w = World(tmp_path)
     w.observations(
         [
-            daily("HY_OAS", THU19, 3.52, field="rate", unit="pct", **FRED),
-            daily("HY_OAS", FRI20, 3.76, field="rate", unit="pct", **FRED),
-            daily("UST_2Y", FRI20, 4.63, **_TSY_3M),
-            daily("UST_2Y", MON23, 4.60, **_TSY_3M),  # dated the previous brief's day: new
+            daily("UST_3M", THU19, 3.55, unit="pct", **YH_HIST),  # Friday's close is missing
+            tick("UST_3M", et(MON23, "14:59"), 3.62, unit="pct"),
+        ]
+    )
+    y = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "UST_3M")
+    assert (y.status, y.basis) == ("ok", "previous Yahoo close")
+    assert y.change == pytest.approx(7.0)
+    assert y.note == "baseline close dated 19 Nov, not the previous session (20 Nov)"
+    assert (y.rankable, y.unranked_reason) == (False, "spans more than one session")
+
+
+def test_fred_value_already_shown_by_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("HY_OAS", THU19, 2.90, field="rate", unit="pct", **FRED),
+            daily("HY_OAS", FRI20, 3.05, field="rate", unit="pct", **FRED),  # stored Fri 20:00
+            daily("UST_2Y", FRI20, 3.70, **_TSY_3M),
+            daily("UST_2Y", MON23, 3.67, **_TSY_3M),  # stored Mon 20:00: new for Tuesday
         ]
     )
     changes = query.overnight_changes(w.connect(), TUE24, TUE24_0700)
     hy = change_of(changes, "HY_OAS")
-    assert (hy.status, hy.change) == ("ok", pytest.approx(0.24))  # shown in pp, with its date
+    assert (hy.status, hy.change) == ("ok", pytest.approx(0.15))  # shown in pp, with its date
     assert not hy.rankable
-    assert hy.unranked_reason == ("value dated 20 Nov, not new since the previous brief (23 Nov)")
+    assert hy.unranked_reason == (
+        "value dated 20 Nov, not new since the previous brief (23 Nov 07:00 ET)"
+    )
     assert change_of(changes, "UST_2Y").rankable
+
+
+def test_late_published_fred_value_is_ranked_once(tmp_path: Path) -> None:
+    # FRED publishes a day late: Friday's value first stored on Monday is new for Tuesday's
+    # brief (the first after it landed), and no longer new for Wednesday's
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("HY_OAS", THU19, 2.90, field="rate", unit="pct", **FRED),
+            daily("HY_OAS", FRI20, 3.05, field="rate", unit="pct",
+                  ingested_at=et(MON23, "10:00"), **FRED),
+        ]
+    )  # fmt: skip
+    db = w.connect()
+    tue = change_of(query.overnight_changes(db, TUE24, TUE24_0700), "HY_OAS")
+    assert tue.last.as_of == et(FRI20)  # the row keeps the value's own date
+    assert (tue.status, tue.rankable) == ("ok", True)
+    wed = change_of(query.overnight_changes(db, WED25, et(WED25, "07:00")), "HY_OAS")
+    assert wed.last.as_of == et(FRI20)
+    assert not wed.rankable
+    assert wed.unranked_reason == (
+        "value dated 20 Nov, not new since the previous brief (24 Nov 07:00 ET)"
+    )
 
 
 def test_tick_older_than_the_previous_brief_is_not_rankable(tmp_path: Path) -> None:
@@ -897,16 +978,17 @@ def test_tick_older_than_the_previous_brief_is_not_rankable(tmp_path: Path) -> N
     es = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "ES_F")
     assert es.status == "ok"
     assert not es.rankable
-    assert es.unranked_reason is not None
-    assert "not new since the previous brief" in es.unranked_reason
+    assert es.unranked_reason == (
+        "value dated 23 Nov 06:30 ET, not new since the previous brief (23 Nov 07:00 ET)"
+    )
 
 
 def test_brent_baseline_is_never_fred_spot(tmp_path: Path) -> None:
     oil = {"unit": "USD"}
-    spot = daily("BRENT", MON23, 70.0, symbol="DCOILBRENTEU", **FRED, **oil)  # tier 3 ranks first
-    quote = tick("BRENT", et(TUE24, "06:06"), 86.70, symbol="BZ=F", **oil)
+    spot = daily("BRENT", MON23, 50.0, symbol="DCOILBRENTEU", **FRED, **oil)  # tier 3 ranks first
+    quote = tick("BRENT", et(TUE24, "06:06"), 61.20, symbol="BZ=F", **oil)
     w = World(tmp_path / "with_own_close")
-    w.observations([spot, quote, daily("BRENT", MON23, 85.0, symbol="BZ=F", **YH_HIST, **oil)])
+    w.observations([spot, quote, daily("BRENT", MON23, 60.0, symbol="BZ=F", **YH_HIST, **oil)])
     brent = change_of(query.overnight_changes(w.connect(), TUE24, TUE24_0700), "BRENT")
     assert brent.previous is not None
     assert (brent.previous.source, brent.previous.dataset) == ("yahoo", "history")
@@ -917,3 +999,39 @@ def test_brent_baseline_is_never_fred_spot(tmp_path: Path) -> None:
     w2.observations([spot, quote])
     brent = change_of(query.overnight_changes(w2.connect(), TUE24, TUE24_0700), "BRENT")
     assert (brent.status, brent.previous, brent.change) == ("no_baseline", None, None)
+
+
+_SECRET = "https://acct.r2.example.com/bucket-name/observations?X-Amz-Credential=AKIDSECRET"
+
+
+def test_diagnose_failures_print_the_error_type_only(
+    world: World,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deskbrief import cli
+
+    # a config path that does not exist: its path is not echoed
+    missing = tmp_path / "private-folder" / "config.yaml"
+    assert cli.main(["diagnose", "changes", "--date", "2026-11-16", "--config", str(missing)]) == 2
+    err = capsys.readouterr().err
+    assert err.strip() == "diagnose: config unavailable: FileNotFoundError"
+    assert "private-folder" not in err
+
+    # a lazy store read that fails mid-query with an endpoint, bucket and key in its message
+    cfg = tmp_path / "config.yaml"
+    text = (Path(__file__).resolve().parents[2] / "config.yaml").read_text(encoding="utf-8")
+    cfg.write_text(
+        text.replace("local_root: ./.data", f"local_root: {world.store.root}"), encoding="utf-8"
+    )
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise OSError(f"HTTP 403 reading {_SECRET}")
+
+    monkeypatch.setattr(query, "overnight_changes", boom)
+    assert cli.main(["diagnose", "changes", "--date", "2026-11-16", "--config", str(cfg)]) == 1
+    out, err = capsys.readouterr()
+    assert err.strip() == "diagnose: read failed: OSError"
+    for leak in ("r2.example", "bucket-name", "AKIDSECRET", "403"):
+        assert leak not in out + err
