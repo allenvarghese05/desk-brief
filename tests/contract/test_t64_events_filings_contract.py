@@ -51,9 +51,11 @@ from deskbrief.schemas import (
     FILINGS_NATURAL_KEY,
     FILINGS_SCHEMA,
     OBS_NATURAL_KEY,
+    REPLACE_SCOPE,
     TABLE_SCHEMAS,
     TABLES,
     columns,
+    current_rows,
     empty_frame,
     to_frame,
     validate,
@@ -135,8 +137,6 @@ EVENTS_COLUMNS = {
     "event_date": "date",
     "scheduled_at": "ts?",
     "period": "str?",
-    "previous_value": "float?",
-    "previous_unit": "enum:unit?",
     "url": "str?",
     "details_json": "str",
     "fetch_id": "str",
@@ -162,8 +162,6 @@ def _event(**over: Any) -> dict[str, Any]:
         "event_date": date(2026, 3, 10),
         "scheduled_at": datetime(2026, 3, 10, 13, 0, tzinfo=ET),
         "period": None,
-        "previous_value": None,
-        "previous_unit": None,
         "url": None,
         "details_json": '{"offering_usd":"invented"}',
         "fetch_id": "F1",
@@ -184,8 +182,6 @@ def test_auction_and_release_rows_validate() -> None:
         event_date=date(2026, 3, 11),
         scheduled_at=None,  # date only
         period="2026-02",
-        previous_value=2.5,
-        previous_unit="pct",
         url="https://fred.example.test/releases/10",
     )
     df = to_frame("events", [_event(), release])
@@ -198,7 +194,8 @@ def test_auction_and_release_rows_validate() -> None:
     "bad",
     [
         {"kind": "earnings"},  # earnings dates are out of scope (P-024)
-        {"previous_unit": "bananas"},
+        # 13:00 ET on the 11th is not on event_date (the 10th)
+        {"scheduled_at": datetime(2026, 3, 11, 13, 0, tzinfo=ET)},
         {"event_id": ""},
     ],
 )
@@ -361,6 +358,186 @@ def test_insider_trade_rejects_bad_values(bad: dict[str, Any]) -> None:
         validate("filings", to_frame("filings", [_insider_trade(**bad)]))
 
 
+@pytest.mark.parametrize("missing", ["party", "trade_date", "trade_code", "side", "shares"])
+def test_insider_trade_rows_carry_their_trade_fields(missing: str) -> None:
+    with pytest.raises(SchemaErrors, match="insider_trade rows need"):
+        validate("filings", to_frame("filings", [_insider_trade(**{missing: None})]))
+
+
+@pytest.mark.parametrize("missing", ["party", "party_cik", "shares", "shares_change"])
+def test_holder_change_rows_carry_their_holdings(missing: str) -> None:
+    with pytest.raises(SchemaErrors, match="holder_change rows need"):
+        validate("filings", to_frame("filings", [_holder_change(**{missing: None})]))
+
+
+def test_thirteen_f_rows_carry_period() -> None:
+    with pytest.raises(SchemaErrors, match="13F rows need period"):
+        validate("filings", to_frame("filings", [_holder_change(period=None)]))
+    filing_13f = _filing(form="13F-HR", accession="0007777777-26-000003", period=None)
+    with pytest.raises(SchemaErrors, match="13F rows need period"):
+        validate("filings", to_frame("filings", [filing_13f]))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"seq": 1},  # a filing row is seq 0
+        {"row_kind": "insider_trade", "seq": 0},  # seq 0 is only the filing row
+    ],
+)
+def test_seq_zero_is_exactly_the_filing_row(bad: dict[str, Any]) -> None:
+    row = _insider_trade(**bad) if bad.get("row_kind") else _filing(**bad)
+    with pytest.raises(SchemaErrors, match="seq 0 is the filing row"):
+        validate("filings", to_frame("filings", [row]))
+
+
+def test_facts_sit_on_their_form() -> None:
+    with pytest.raises(SchemaErrors, match="facts match their form"):
+        validate("filings", to_frame("filings", [_insider_trade(form="10-Q")]))
+    with pytest.raises(SchemaErrors, match="facts match their form"):
+        validate("filings", to_frame("filings", [_holder_change(form="4")]))
+
+
+def test_plan_flag_only_on_insider_trades() -> None:
+    with pytest.raises(SchemaErrors, match="plan_10b5_1 only"):
+        validate("filings", to_frame("filings", [_filing(plan_10b5_1=True)]))
+
+
+def test_scheduled_at_falls_on_event_date_in_et() -> None:
+    # 23:30 ET on the 10th is 03:30 UTC on the 11th: still the 10th in New York
+    late = _event(scheduled_at=datetime(2026, 3, 11, 3, 30, tzinfo=UTC))
+    validate("events", to_frame("events", [late]))
+    early = _event(scheduled_at=datetime(2026, 3, 10, 3, 30, tzinfo=UTC))  # 23:30 ET on the 9th
+    with pytest.raises(SchemaErrors, match="scheduled_at must fall on event_date"):
+        validate("events", to_frame("events", [early]))
+
+
+# ---------------------------------------------------------------------------------------------
+# current_rows: the newest run replaces a whole scope (review B1)
+# ---------------------------------------------------------------------------------------------
+
+RUN1_AT = datetime(2026, 3, 9, 10, 5, tzinfo=UTC)  # Monday's run
+RUN2_AT = datetime(2026, 3, 10, 10, 5, tzinfo=UTC)  # Tuesday's run
+
+
+def _cpi(day: int, run: str, at: datetime) -> dict[str, Any]:
+    return _event(
+        event_id=f"release:10:2026-03-{day:02d}",
+        source="fred",
+        dataset="release_dates",
+        kind="release",
+        title="Consumer Price Index",
+        event_date=date(2026, 3, day),
+        scheduled_at=datetime(2026, 3, day, 8, 30, tzinfo=ET),
+        run_id=run,
+        fetch_id=f"F-{run}",
+        ingested_at=at,
+    )
+
+
+def _log(
+    run: str, at: datetime, status: str = "ok", dataset: str = "release_dates"
+) -> dict[str, Any]:
+    return {
+        "fetch_id": f"F-{run}-{dataset}-{status}",
+        "run_id": run,
+        "source": "fred",
+        "dataset": dataset,
+        "symbols": "",
+        "request_redacted": "GET /releases/dates",
+        "requested_at": at,
+        "responded_at": at,
+        "latency_ms": 100,
+        "http_status": 200 if status in ("ok", "empty") else 500,
+        "status": status,
+        "bytes": 10,
+        "rows_parsed": 0,
+        "rows_quarantined": 0,
+        "attempt": 1,
+    }
+
+
+def test_replace_scopes_pinned() -> None:
+    assert REPLACE_SCOPE == {
+        "events": ("source", "dataset"),
+        "filings": ("instrument_id", "accession"),
+    }
+
+
+def test_rescheduled_event_disappears_from_its_old_date() -> None:
+    """Monday's fetch had CPI on the 11th; Tuesday's has it moved to the 12th."""
+    auction = _event(run_id="R1", fetch_id="F-R1-a", ingested_at=RUN1_AT)  # another dataset
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT), auction, _cpi(12, "R2", RUN2_AT)])
+    current = current_rows("events", rows)
+    validate("events", current)
+    cpi = current[current["source"] == "fred"]
+    assert list(cpi["event_date"]) == [date(2026, 3, 12)]
+    # the fiscaldata scope was not re-fetched: Monday's auction stays current
+    assert list(current[current["source"] == "fiscaldata"]["run_id"]) == ["R1"]
+
+
+def test_newer_successful_empty_fetch_empties_the_scope() -> None:
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "empty")])
+    assert current_rows("events", rows, log).empty
+    # without the log the reader cannot know; it keeps the last rows written
+    assert len(current_rows("events", rows)) == 1
+
+
+def test_newer_failed_fetch_keeps_the_previous_rows() -> None:
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame(
+        "source_log",
+        [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "empty"), _log("R2", RUN2_AT, "error")],
+    )
+    assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+
+
+def test_newer_fetch_of_another_dataset_changes_nothing() -> None:
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, dataset="other")])
+    assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+
+
+def _trades(run: str, at: datetime, n: int) -> list[dict[str, Any]]:
+    common = {"run_id": run, "fetch_id": f"F-{run}", "ingested_at": at}
+    out = [
+        _filing(accession="0009999999-26-000002", form="4", period=None, dataset="form4", **common)
+    ]
+    out += [_insider_trade(seq=i, **common) for i in range(1, n + 1)]
+    return out
+
+
+def test_reparse_with_fewer_facts_leaves_no_phantom_rows() -> None:
+    """Monday's parse found three trades in one Form 4; Tuesday's re-parse finds two."""
+    other = _filing(run_id="R1", fetch_id="F-R1", ingested_at=RUN1_AT)  # another accession
+    rows = to_frame("filings", [*_trades("R1", RUN1_AT, 3), other, *_trades("R2", RUN2_AT, 2)])
+    current = current_rows("filings", rows)
+    validate("filings", current)
+    form4 = current[current["accession"] == "0009999999-26-000002"]
+    assert list(form4["seq"]) == [0, 1, 2]
+    assert set(form4["run_id"]) == {"R2"}
+    assert list(current[current["accession"] == "0009999999-26-000001"]["run_id"]) == ["R1"]
+
+
+def test_one_run_writing_an_accession_from_two_fetches_stays_whole() -> None:
+    """The filing row and its facts may come from two fetches of the same run."""
+    filing_row = _trades("R2", RUN1_AT, 0)  # seq 0, fetched first
+    facts = [
+        _insider_trade(seq=i, run_id="R2", fetch_id="F-R2-b", ingested_at=RUN2_AT) for i in (1, 2)
+    ]
+    current = current_rows("filings", to_frame("filings", [*filing_row, *facts]))
+    assert list(current["seq"]) == [0, 1, 2]
+
+
+def test_current_rows_keeps_dtypes_and_handles_empty() -> None:
+    assert current_rows("events", empty_frame("events")).empty
+    assert current_rows("filings", empty_frame("filings")).empty
+    rows = to_frame("filings", _trades("R1", RUN1_AT, 1))
+    current = current_rows("filings", rows)
+    assert list(current.dtypes) == list(rows.dtypes)
+
+
 # ---------------------------------------------------------------------------------------------
 # store: layer, partition, round trip; neither table is an observation table
 # ---------------------------------------------------------------------------------------------
@@ -496,7 +673,11 @@ def test_edgar_rate_above_sec_limit_rejected() -> None:
 def test_real_config_regime_rules() -> None:
     brief = load_config(CONFIG_PATH).brief
     assert [s.label for s in brief.regime_rules] == ["Risk-off", "Risk-on"]
-    assert (brief.quiet_label, brief.mixed_label) == ("Quiet", "Mixed")
+    assert (brief.quiet_label, brief.mixed_label, brief.unclear_label) == (
+        "Quiet",
+        "Mixed",
+        "No clear read",
+    )
     risk_off = brief.regime_rules[0]
     assert risk_off.min_met == 2
     assert [(r.market, r.direction) for r in risk_off.rules] == [
@@ -537,7 +718,8 @@ def test_real_config_note() -> None:
     assert note.api_key_env == "ANTHROPIC_API_KEY"
     assert note.max_sentences == 5
     assert note.timeout_s == 30
-    assert note.max_output_tokens == 2000
+    assert note.effort == "low"
+    assert note.max_output_tokens == 8000
     assert note.monthly_cap_usd == 5.0
     assert (note.price_input_usd_per_mtok, note.price_output_usd_per_mtok) == (2.0, 10.0)
     for word in ("buy", "sell", "target", "will rise", "will fall", "recommend", "predict"):
@@ -593,8 +775,67 @@ def test_brief_labels_unique_and_not_reserved() -> None:
         BriefSettings.model_validate({"regime_rules": [one, one]})
     with pytest.raises(ValidationError, match="reserved"):
         BriefSettings.model_validate({"regime_rules": [{**one, "label": "Quiet"}]})
+    with pytest.raises(ValidationError, match="reserved"):
+        BriefSettings.model_validate({"regime_rules": [{**one, "label": "No clear read"}]})
     with pytest.raises(ValidationError, match="must differ"):
         BriefSettings.model_validate({"quiet_label": "Calm", "mixed_label": "Calm"})
+    with pytest.raises(ValidationError, match="must differ"):
+        BriefSettings.model_validate({"unclear_label": "Mixed"})
+
+
+def _rule(market: str, direction: str) -> dict[str, Any]:
+    return {
+        "market": market,
+        "direction": direction,
+        "label": f"{market} {direction}",
+        "min_sigma": 1,
+    }
+
+
+READ = BriefSettings.model_validate(
+    {
+        "regime_rules": [
+            {
+                "label": "Risk-off",
+                "min_met": 2,
+                "rules": [_rule("ES_F", "down"), _rule("VIX", "up"), _rule("HY_OAS", "up")],
+            },
+            {
+                "label": "Risk-on",
+                "min_met": 2,
+                "rules": [_rule("ES_F", "up"), _rule("VIX", "down"), _rule("HY_OAS", "down")],
+            },
+        ]
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("n_ranked", "met", "label"),
+    [
+        (0, {}, "Quiet"),  # nothing ranked
+        (0, {"Risk-off": 3}, "Quiet"),  # rules never outrank "nothing ranked"
+        (3, {"Risk-off": 2}, "Risk-off"),  # min_met reached, no other label touched
+        (3, {"Risk-off": 3, "Risk-on": 0}, "Risk-off"),
+        (2, {"Risk-on": 2}, "Risk-on"),
+        (3, {"Risk-off": 2, "Risk-on": 1}, "Mixed"),  # the rules split
+        (3, {"Risk-off": 1, "Risk-on": 1}, "Mixed"),
+        (3, {"Risk-off": 1}, "No clear read"),  # some met, not enough
+        (3, {}, "No clear read"),  # moves ranked, no rule met
+        (3, {"Unknown": 5}, "No clear read"),  # counts for labels that are not rule sets
+    ],
+)
+def test_read_label(n_ranked: int, met: dict[str, int], label: str) -> None:
+    assert READ.read_label(n_ranked, met) == label
+
+
+def test_real_config_read_labels() -> None:
+    brief = load_config(CONFIG_PATH).brief
+    assert brief.read_label(0, {}) == "Quiet"
+    assert brief.read_label(4, {"Risk-off": 4}) == "Risk-off"
+    assert brief.read_label(4, {"Risk-on": 2}) == "Risk-on"
+    assert brief.read_label(4, {"Risk-off": 2, "Risk-on": 1}) == "Mixed"
+    assert brief.read_label(4, {"Risk-off": 1}) == "No clear read"
 
 
 def test_related_pair_shape() -> None:
@@ -624,7 +865,11 @@ def test_note_defaults_and_bounds() -> None:
     assert note.model == "claude-sonnet-5-5"
     assert note.monthly_cap_usd == 5.0
     assert note.forbidden_words == ()
+    assert note.effort == "low"
+    assert note.max_output_tokens == 8000  # thinking counts against it; the note is ~200
     for bad in (
+        {"effort": "minimal"},
+        {"max_output_tokens": 1999},  # too small: thinking could starve the visible text
         {"monthly_cap_usd": 0},
         {"max_sentences": 0},
         {"timeout_s": 0},
@@ -709,12 +954,25 @@ def test_filings_settings() -> None:
     for bad in (
         {"companies": [{**company, "cik": "123"}]},
         {"companies": [{**company, "cusip": "short"}]},
-        {"companies": [company, company]},
+        {"companies": [company, company]},  # instrument ids stay unique
         {"holders": [{"cik": "0007777777", "name": "a"}, {"cik": "0007777777", "name": "b"}]},
         {"insider_days": 0},
     ):
         with pytest.raises(ValidationError):
             FilingsSettings.model_validate(bad)
+
+
+def test_two_instruments_may_share_an_issuer_cik() -> None:
+    """Share classes: one issuer, two listed instruments (ruling 4)."""
+    s = FilingsSettings.model_validate(
+        {
+            "companies": [
+                {"instrument": "AAPL", "cik": EXMP_CIK},
+                {"instrument": "MSFT", "cik": EXMP_CIK},
+            ]
+        }
+    )
+    assert [c.cik for c in s.companies] == [EXMP_CIK, EXMP_CIK]
 
 
 def test_filings_companies_must_be_configured_stocks() -> None:

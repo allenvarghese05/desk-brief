@@ -30,14 +30,19 @@ be negative). Fields: ``level`` = an index value that is neither a price nor a r
 Two tables are not observation tables (P-024, card T64): ``events`` (Today's scheduled releases
 and auctions) and ``filings`` (SEC EDGAR filings, Form 4 trades and 13F holder changes per
 instrument). Neither feeds ``obs_all``/``obs_latest``, the checks, sigma or the change ranking.
-Both are re-fetched each run, so a key can appear in several runs: readers keep, per natural key
-(``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``), the row with the newest ``ingested_at``.
-``filings`` units: ``shares`` in shares, ``price`` in USD per share, ``value_usd`` in USD.
+Both are re-fetched each run, and a later fetch may no longer contain a key an earlier one had
+(a rescheduled release, a re-parse with fewer facts). So the newest run *replaces* a whole scope
+(``REPLACE_SCOPE``) rather than single keys; every reader goes through :func:`current_rows`.
+Writer rules: within one run a natural key (``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``)
+appears once; a run writes a scope only when every fetch of it succeeded, and writes all of
+it (``events``: every event of that source and dataset in the horizon; ``filings``: the filing
+row and every fact parsed from that accession). ``filings`` units: ``shares`` in shares,
+``price`` in USD per share, ``value_usd`` in USD.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from datetime import date, datetime
 from typing import Any
 
@@ -255,9 +260,9 @@ TABLES: dict[str, dict[str, str]] = {
         "disagreement_rate": "float?",
         "n_crosschecks": "int",
     },
-    # P-024 / T64: Today's calendar. One row per scheduled event per fetch.
+    # P-024 / T64: Today's calendar. One row per scheduled event per run.
     "events": {
-        "event_id": "str",  # stable per source+dataset, built by the adapter
+        "event_id": "str",  # unique per source+dataset in a run; includes the event date
         "source": "str",  # fiscaldata | fred
         "dataset": "str",
         "kind": "enum:event_kind",
@@ -265,8 +270,6 @@ TABLES: dict[str, dict[str, str]] = {
         "event_date": "date",  # ET calendar date of the event
         "scheduled_at": "ts?",  # UTC instant when the time is known, else null
         "period": "str?",  # reference period as the source names it, e.g. "2026-02"
-        "previous_value": "float?",  # only where the source gives one
-        "previous_unit": "enum:unit?",  # unit of previous_value
         "url": "str?",  # the source page for the event
         "details_json": "str",  # source-specific extras (term, CUSIP, offering, release id)
         "fetch_id": "str",
@@ -345,11 +348,19 @@ OBS_NATURAL_KEY: tuple[str, ...] = (
     "as_of",
 )
 
-#: Natural key of a calendar event (``events``); readers keep the newest ``ingested_at``.
+#: Key of a calendar event (``events``), unique within one run. Not a cross-run dedup key:
+#: readers use :func:`current_rows`.
 EVENTS_NATURAL_KEY: tuple[str, ...] = ("source", "dataset", "event_id")
 
-#: Natural key of a filing row (``filings``); readers keep the newest ``ingested_at``.
+#: Key of a filing row (``filings``), unique within one run. Readers use :func:`current_rows`.
 FILINGS_NATURAL_KEY: tuple[str, ...] = ("instrument_id", "accession", "seq")
+
+#: The unit one run replaces as a whole (P-024 review B1): the newest run that wrote a scope
+#: is its only current version, so keys a later fetch dropped do not linger.
+REPLACE_SCOPE: dict[str, tuple[str, ...]] = {
+    "events": ("source", "dataset"),
+    "filings": ("instrument_id", "accession"),
+}
 
 # ---------------------------------------------------------------------------
 # kind -> pandera checks / pandas dtype
@@ -443,9 +454,74 @@ def _dtype(kind: str) -> Any:
     raise ValueError(kind)  # pragma: no cover
 
 
+_ET = "America/New_York"
+_FORM4 = ("4", "4/A")
+_FORM13F = ("13F-HR", "13F-HR/A")
+
+
+def _scheduled_on_event_date(df: pd.DataFrame) -> pd.Series:
+    """``scheduled_at``, when known, falls on ``event_date`` in New York."""
+    known = df["scheduled_at"].notna()
+    if not known.any():
+        return pd.Series(True, index=df.index)
+    et_day = pd.to_datetime(df["scheduled_at"], utc=True).dt.tz_convert(_ET).dt.date
+    return ~known | (et_day == df["event_date"])
+
+
+def _required_where(mask: pd.Series, df: pd.DataFrame, cols: tuple[str, ...]) -> pd.Series:
+    ok = pd.Series(True, index=df.index)
+    for c in cols:
+        ok &= df[c].notna()
+    return ~mask | ok
+
+
+def _filing_row_shape(df: pd.DataFrame) -> pd.Series:
+    """seq 0 is exactly the filing row; each fact kind sits on its own form."""
+    kind, form = df["row_kind"], df["form"]
+    return (
+        ((df["seq"] == 0) == (kind == "filing"))
+        & ((kind != "insider_trade") | form.isin(_FORM4))
+        & ((kind != "holder_change") | form.isin(_FORM13F))
+    )
+
+
+def _insider_trade_fields(df: pd.DataFrame) -> pd.Series:
+    cols = ("party", "trade_date", "trade_code", "side", "shares")
+    return _required_where(df["row_kind"] == "insider_trade", df, cols)
+
+
+def _holder_change_fields(df: pd.DataFrame) -> pd.Series:
+    cols = ("party", "party_cik", "shares", "shares_change")
+    return _required_where(df["row_kind"] == "holder_change", df, cols)
+
+
+def _thirteen_f_period(df: pd.DataFrame) -> pd.Series:
+    return _required_where(df["form"].isin(_FORM13F), df, ("period",))
+
+
+def _plan_flag_on_trades_only(df: pd.DataFrame) -> pd.Series:
+    return ~df["plan_10b5_1"].astype(bool) | (df["row_kind"] == "insider_trade")
+
+
+#: Cross-column (row-wise) rules, P-024 review round 1.
+_FRAME_CHECKS: dict[str, list[pa.Check]] = {
+    "events": [
+        pa.Check(_scheduled_on_event_date, error="scheduled_at must fall on event_date (ET)"),
+    ],
+    "filings": [
+        pa.Check(_filing_row_shape, error="seq 0 is the filing row; facts match their form"),
+        pa.Check(_insider_trade_fields, error="insider_trade rows need party, trade fields"),
+        pa.Check(_holder_change_fields, error="holder_change rows need party, holdings"),
+        pa.Check(_thirteen_f_period, error="13F rows need period (the as-of quarter end)"),
+        pa.Check(_plan_flag_on_trades_only, error="plan_10b5_1 only on insider_trade rows"),
+    ],
+}
+
+
 def _schema(name: str, decl: Mapping[str, str]) -> pa.DataFrameSchema:
     return pa.DataFrameSchema(
         {c: _column(c, k) for c, k in decl.items()},
+        checks=_FRAME_CHECKS.get(name, []),
         strict=True,
         ordered=False,
         name=name,
@@ -512,3 +588,52 @@ def to_frame(table: str, rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
 def validate(table: str, df: pd.DataFrame) -> pd.DataFrame:
     """Validate ``df`` against the table schema; raises ``pandera.errors.SchemaErrors``."""
     return TABLE_SCHEMAS[table].validate(df, lazy=True)
+
+
+_FETCH_OK = (FetchStatus.OK.value, FetchStatus.EMPTY.value)
+
+
+def _newest_by(
+    records: Iterable[Mapping[Hashable, Any]], key: tuple[str, ...], at: str
+) -> dict[tuple[Any, ...], tuple[Any, str]]:
+    """``{key values: (latest at, run_id)}``; ties go to the larger ``run_id``."""
+    best: dict[tuple[Any, ...], tuple[Any, str]] = {}
+    for rec in records:
+        k = tuple(rec[c] for c in key)
+        cand = (rec[at], str(rec["run_id"]))
+        if k not in best or cand > best[k]:
+            best[k] = cand
+    return best
+
+
+def current_rows(
+    table: str, df: pd.DataFrame, source_log: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """The current version of ``events`` or ``filings``: per ``REPLACE_SCOPE``, only the rows of
+    the newest run that wrote that scope (P-024 review B1). Every reader uses this.
+
+    "Newest" is the run's latest ``ingested_at`` in that scope (ties go to the larger
+    ``run_id``). For ``events``, pass the ``source_log`` rows too: a newer run whose every fetch
+    of that source and dataset succeeded (``ok`` or ``empty``) but wrote no rows means nothing is
+    scheduled any more, so the scope is emptied. Returns the same columns and dtypes.
+    """
+    scope = REPLACE_SCOPE[table]
+    if df.empty:
+        return df.reset_index(drop=True)
+    cols = [*scope, "run_id", "ingested_at"]
+    records: list[dict[Hashable, Any]] = df[cols].to_dict("records")
+    newest = _newest_by(records, scope, "ingested_at")
+    current = {k: run for k, (_, run) in newest.items()}
+    if table == "events" and source_log is not None and not source_log.empty:
+        log: list[dict[Hashable, Any]] = source_log[
+            ["source", "dataset", "run_id", "status", "responded_at"]
+        ].to_dict("records")
+        failed = {
+            (r["source"], r["dataset"], r["run_id"]) for r in log if r["status"] not in _FETCH_OK
+        }
+        ok_runs = [r for r in log if (r["source"], r["dataset"], r["run_id"]) not in failed]
+        for k, (at, run) in _newest_by(ok_runs, ("source", "dataset"), "responded_at").items():
+            if k in newest and at > newest[k][0] and run != current[k]:
+                del current[k]  # a newer complete fetch found nothing: the scope is empty
+    mask = [current.get(tuple(r[c] for c in scope)) == r["run_id"] for r in records]
+    return df[mask].reset_index(drop=True)

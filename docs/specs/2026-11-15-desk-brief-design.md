@@ -207,15 +207,16 @@ dashboard:
   refresh_seconds: 60
   hosted_hidden_tiers: [1]
 brief:                          # P-024 (contract T64); the read, Check before using, the note
-  regime_rules:                 # a label whose min_met rules are met while no other set has one met;
-    - label: Risk-off           # "Quiet" when nothing is ranked; "Mixed" otherwise. Rankable moves only.
+  regime_rules:                 # a label whose min_met rules are met while no other label has one met;
+    - label: Risk-off           # rankable moves only (T61). BriefSettings.read_label decides.
       min_met: 2
       rules:                    # market, direction, and min_sigma OR (min_change + change_unit pct|bp|pts|pp)
         - {market: ES_F, direction: down, min_sigma: 1.0, label: Equity futures down}
         # ... VIX up, HY_OAS up, UST_2Y down; Risk-on mirrors them
-  quiet_label: Quiet
-  mixed_label: Mixed
-  related_pairs:                # flagged when both rankable changes differ by more than limit (unit)
+  quiet_label: Quiet            # nothing ranked
+  mixed_label: Mixed            # rules met for more than one label
+  unclear_label: No clear read  # moves ranked, but no label's rules met far enough
+  related_pairs:                # flagged when both rankable changes, over matching windows, differ by more than limit
     - {pair: [BRENT, WTI], limit: 1.0, unit: pct}
     - {pair: [GOLD_F, GLD], limit: 1.0, unit: pct}
   note:                         # T66; inert without the key
@@ -223,7 +224,8 @@ brief:                          # P-024 (contract T64); the read, Check before u
     api_key_env: ANTHROPIC_API_KEY
     max_sentences: 5
     timeout_s: 30
-    max_output_tokens: 2000
+    effort: low                 # adaptive thinking kept short
+    max_output_tokens: 8000     # covers thinking + the note, so thinking cannot starve the text
     monthly_cap_usd: 5.0
     price_input_usd_per_mtok: 2.0
     price_output_usd_per_mtok: 10.0
@@ -232,7 +234,7 @@ events:                         # Today's calendar (T65)
   horizon_days: 7
   fred_releases: []             # each {release_id, title, time_et: "HH:MM"}; FRED gives dates only
 filings:                        # SEC EDGAR (T65), instruments of kind stock only
-  companies: []                 # each {instrument, cik: 10 digits, cusip (optional, for 13F)}
+  companies: []                 # each {instrument, cik: 10 digits, cusip (optional, for 13F)}; share classes may share a cik
   insider_days: 90              # Form 4 look-back
   holders: []                   # 13F filers compared quarter on quarter: {cik, name}
 ```
@@ -463,11 +465,11 @@ erDiagram
 
 **scorecard_daily** — `source, date, fetches, ok_rate, median_latency_ms, p95_latency_ms, median_data_age_s, error_rate, disagreement_rate, n_crosschecks`
 
-**events** (derived, P-024) — natural key `(source, dataset, event_id)`; not an observation table (no `obs_latest`, checks or σ); re-fetched each run, readers keep the newest `ingested_at` per key
+**events** (derived, P-024) — key `(source, dataset, event_id)` unique within a run (`event_id` includes the event date); not an observation table (no `obs_latest`, checks or σ). Re-fetched each run: the newest run that wrote a `(source, dataset)` replaces it whole, and a newer complete fetch with no rows empties it (`schemas.current_rows`, the one reader rule). A run writes a scope only when every fetch of it succeeded. `scheduled_at`, when known, falls on `event_date` in ET.
 
-`event_id, source (fiscaldata|fred), dataset, kind (release|auction), title, event_date (ET date), scheduled_at (UTC, null when only the date is known), period (reference period as the source names it), previous_value, previous_unit (a unit above), url, details_json, fetch_id, run_id, ingested_at`
+`event_id, source (fiscaldata|fred), dataset, kind (release|auction), title, event_date (ET date), scheduled_at (UTC, null when only the date is known), period (reference period as the source names it), url, details_json, fetch_id, run_id, ingested_at`
 
-**filings** (derived, P-024) — natural key `(instrument_id, accession, seq)`; seq 0 is the filing, 1.. the facts parsed from it; not an observation table; readers keep the newest `ingested_at` per key
+**filings** (derived, P-024) — key `(instrument_id, accession, seq)` unique within a run; seq 0 is exactly the filing row, 1.. the facts parsed from it; not an observation table. The newest run that wrote an `(instrument_id, accession)` replaces all of its rows (`schemas.current_rows`), so a re-parse with fewer facts leaves none behind. Insider-trade rows (Form 4 only) carry party, trade date, code, side and shares; holder-change rows (13F only) carry party, party CIK, shares and shares change; 13F rows carry `period`; `plan_10b5_1` only on insider trades.
 
 `instrument_id, cik (10 digits), accession (0000000000-00-000000), seq, row_kind (filing|insider_trade|holder_change), form (10-K, 10-K/A, 10-Q, 10-Q/A, 4, 4/A, 13F-HR, 13F-HR/A), filed_date, period (period of report; 13F as-of quarter end), url (EDGAR), party (Form 4 owner or 13F filer), party_cik, party_role, trade_date, trade_code (Form 4 code), side (buy|sell|other), shares (shares; ≥ 0), shares_change (13F, vs previous quarter; may be negative), price (USD per share; ≥ 0), value_usd (USD; ≥ 0), plan_10b5_1 (true only when the Form 4 row says so), details_json, source (edgar), dataset, fetch_id, run_id, ingested_at`
 

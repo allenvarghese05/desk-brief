@@ -573,8 +573,8 @@ dashboard:
 
 # P-024: the brief shared by Home and the email. Starting values; tuning is a normal PR.
 brief:
-  # The read: a label whose min_met rules are met while no other set has a rule met; "Quiet"
-  # when nothing is ranked; "Mixed" otherwise. Rules look at rankable moves only (T61).
+  # The read: a label whose min_met rules are met while no other label has a rule met.
+  # Rules look at rankable moves only (T61).
   regime_rules:
     - label: Risk-off
       min_met: 2
@@ -590,9 +590,11 @@ brief:
         - {market: VIX,    direction: down, min_sigma: 1.0, label: VIX down}
         - {market: HY_OAS, direction: down, min_sigma: 1.0, label: High-yield spreads tighter}
         - {market: UST_2Y, direction: up,   min_sigma: 1.0, label: Front-end yields up}
-  quiet_label: Quiet
-  mixed_label: Mixed
-  # Check before using: two related markets whose moves differ by more than limit (pct points).
+  quiet_label: Quiet                  # nothing ranked
+  mixed_label: Mixed                  # rules met for more than one label
+  unclear_label: No clear read        # moves ranked, but no label's rules met far enough
+  # Check before using: two related markets whose moves differ by more than limit (pct points),
+  # compared over matching windows (gold futures trade overnight, GLD does not; T62 matches them).
   related_pairs:
     - {pair: [BRENT, WTI], limit: 1.0, unit: pct}
     - {pair: [GOLD_F, GLD], limit: 1.0, unit: pct}
@@ -603,7 +605,8 @@ brief:
     api_key_env: ANTHROPIC_API_KEY
     max_sentences: 5
     timeout_s: 30
-    max_output_tokens: 2000
+    effort: low                       # adaptive thinking kept short
+    max_output_tokens: 8000           # covers thinking + the ~200-token note; thinking must not starve the text
     monthly_cap_usd: 5.0              # pending the owner's confirmation (P-024 open question)
     price_input_usd_per_mtok: 2.0     # claude-sonnet-5-5 list price, for the spend estimate
     price_output_usd_per_mtok: 10.0

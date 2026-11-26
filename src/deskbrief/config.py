@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, Self
 
@@ -316,8 +317,10 @@ class RegimeRuleSet(_Model):
 class RelatedPair(_Model):
     """Two markets that usually move together (P-024 "Check before using").
 
-    Flagged when both have a rankable change (so both moves cover the same overnight) and the
-    changes differ by more than ``limit`` in
+    Flagged when both have a rankable change and the changes differ by more than ``limit`` in
+    ``unit``. The two changes must cover matching windows (for example gold futures, which
+    trade overnight, against GLD, which does not, are compared over the same span): T62 decides
+    how, and skips the pair when it cannot match them. ``limit`` is in
     ``unit`` (for prices, percentage points of the two % changes).
     """
 
@@ -340,7 +343,12 @@ class NoteSettings(_Model):
     api_key_env: str = Field(default="ANTHROPIC_API_KEY", pattern=_ENV_NAME)
     max_sentences: int = Field(default=5, ge=1, le=10)
     timeout_s: float = Field(default=30.0, gt=0, le=300)
-    max_output_tokens: int = Field(default=2000, ge=100, le=64000)
+    #: Claude's effort level; low keeps adaptive thinking short for a 4-5 sentence note.
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
+    #: The reply's token ceiling. Thinking tokens count against it too, so it is sized far above
+    #: the visible note (about 200 tokens) to keep thinking from crowding out the text; a reply
+    #: that stops at this ceiling is treated as no note (T66).
+    max_output_tokens: int = Field(default=8000, ge=2000, le=64000)
     #: Monthly spend cap in USD; when the month's estimated spend reaches it, no call is made.
     monthly_cap_usd: float = Field(default=5.0, gt=0)
     #: Prices used to estimate spend from the reply's token usage, USD per million tokens.
@@ -363,31 +371,49 @@ class NoteSettings(_Model):
 class BriefSettings(_Model):
     """The brief shared by Home and the email (P-024): the read, Check before using, the note.
 
-    The read: nothing ranked gives ``quiet_label``; a rule set whose ``min_met`` rules are met,
-    while no other set has any rule met, gives its label; anything else gives ``mixed_label``.
+    The read (:meth:`read_label`, P-024 review ruling 1):
+
+    * nothing ranked: ``quiet_label`` ("Quiet");
+    * rules met for more than one label (the rules split): ``mixed_label`` ("Mixed");
+    * one label has at least its ``min_met`` rules met and no other label has any: that label;
+    * otherwise (moves ranked, but no label's rules met far enough): ``unclear_label``
+      ("No clear read").
     """
 
     regime_rules: tuple[RegimeRuleSet, ...] = ()
     quiet_label: str = Field(default="Quiet", min_length=1)
     mixed_label: str = Field(default="Mixed", min_length=1)
+    unclear_label: str = Field(default="No clear read", min_length=1)
     related_pairs: tuple[RelatedPair, ...] = ()
     note: NoteSettings = NoteSettings()
 
     @model_validator(mode="after")
     def _labels(self) -> Self:
         labels = [s.label for s in self.regime_rules]
-        fixed = {self.quiet_label, self.mixed_label}
-        if len(fixed) != 2:
-            raise ValueError("quiet_label and mixed_label must differ")
+        fixed = {self.quiet_label, self.mixed_label, self.unclear_label}
+        if len(fixed) != 3:
+            raise ValueError("quiet_label, mixed_label and unclear_label must differ")
         if len(labels) != len(set(labels)):
             raise ValueError("regime rule sets have duplicate labels")
         clash = sorted(set(labels) & fixed)
         if clash:
-            raise ValueError(f"regime labels {clash} are reserved for quiet/mixed")
+            raise ValueError(f"regime labels {clash} are reserved for quiet/mixed/unclear")
         pairs = [frozenset(p.pair) for p in self.related_pairs]
         if len(pairs) != len(set(pairs)):
             raise ValueError("related_pairs has a duplicate pair")
         return self
+
+    def read_label(self, n_ranked: int, met: Mapping[str, int]) -> str:
+        """The regime label from how many moves are ranked and, per rule-set label, how many of
+        its rules are met (labels not in ``met`` count as 0). Pure; T62 supplies the counts."""
+        if n_ranked <= 0:
+            return self.quiet_label
+        with_any = [s for s in self.regime_rules if met.get(s.label, 0) > 0]
+        if len(with_any) > 1:
+            return self.mixed_label
+        if with_any and met[with_any[0].label] >= with_any[0].min_met:
+            return with_any[0].label
+        return self.unclear_label
 
 
 class FredRelease(_Model):
@@ -420,7 +446,8 @@ class EventsSettings(_Model):
 
 
 class FilingsCompany(_Model):
-    """A single stock whose SEC filings are fetched (P-024 Company section)."""
+    """A single stock whose SEC filings are fetched (P-024 Company section). Two instruments may
+    share an issuer ``cik`` (share classes); instrument ids are unique."""
 
     instrument: str  # instrument id, kind stock
     cik: str = Field(pattern=_CIK)  # issuer CIK, 10 digits, zero-padded
@@ -446,7 +473,6 @@ class FilingsSettings(_Model):
     def _unique(self) -> Self:
         for what, keys in (
             ("instrument", [c.instrument for c in self.companies]),
-            ("cik", [c.cik for c in self.companies]),
             ("holder cik", [h.cik for h in self.holders]),
         ):
             if len(keys) != len(set(keys)):
