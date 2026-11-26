@@ -1,4 +1,3 @@
-# ruff: noqa: RUF001  (the sigma and minus signs are intentional output)
 """Add a P-024 morning to a synthetic store, for the Phase 4E screenshots (cards T62-T67).
 
 SYNTHETIC FIXTURE: every value written here is made up. It runs only on a store built by
@@ -42,7 +41,7 @@ from deskbrief.config import load_config
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.query import overnight_changes, series_by_feed, series_key
 from deskbrief.report.model import BriefModel, Note
-from deskbrief.report.note import check, facts, hidden_tiers, market_names, shown_numbers
+from deskbrief.report.note import check, hidden_tiers, market_aliases, slots
 from deskbrief.schemas import to_frame
 from deskbrief.store import duck
 from deskbrief.store.backend import report_key
@@ -265,28 +264,22 @@ def _note(config: Any, store: LocalBackend) -> None:
     conn = duck.connect(store, config)
     model = BriefModel.from_store(conn, config, FRI, NOW)
     conn.close()
-    by = {m.instrument_id: m for m in model.movers}
+    by = {m.instrument_id for m in model.movers}
     parts = []
     if "HY_OAS" in by:
-        hy = by["HY_OAS"]
-        parts.append(f"High-yield spreads widened {hy.change_text.lstrip('+')} to "
-                     f"{hy.value_text}, a {hy.sigma:.1f}σ move.")  # fmt: skip
+        parts.append(
+            "{HY_OAS.name} widened {HY_OAS.chg_1d} to {HY_OAS.level}, a {HY_OAS.sigma} move."
+        )
     if "ES_F" in by:
-        es = by["ES_F"]
-        parts.append(f"S&P futures fell {es.change_text.lstrip('−')} with VIX higher.")
+        parts.append("{ES_F.name} fell {ES_F.chg_1d}, with VIX higher.")
     if "BRENT" in by:
-        br = by["BRENT"]
-        parts.append(f"Brent fell {br.change_text.lstrip('−')}, far more than WTI; check "
-                     "that gap before relying on it.")  # fmt: skip
-    payload = facts(model, hidden_tiers(config))
+        parts.append("{BRENT.name} fell {BRENT.chg_1d}, far more than WTI; check that gap first.")
+    hidden = hidden_tiers(config)
     s = config.brief.note
     out = check(
-        "\n".join(parts),
-        shown_numbers(payload),
-        s.forbidden_words,
-        s.max_sentences,
-        market_names(payload),
-    )
+        "\n".join(parts), slots(model, hidden), s.forbidden_words, s.max_sentences,
+        market_aliases(model, hidden),
+    )  # fmt: skip
     note = Note(out.kept, out.n_numbers, out.n_numbers, model=f"{s.model} (synthetic)")
     body = replace(model, note=note).to_json().encode()
     store.put_bytes(report_key(FRI, 1, "model.json"), body)
