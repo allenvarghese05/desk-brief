@@ -81,6 +81,13 @@ class Series(TypedDict, total=False):
     meta: list[list[str]]
 
 
+class Marker(TypedDict):
+    """A note on the first series at one bar (T67: "10-Q filed" on the filing date)."""
+
+    time: str  # the bar's time key, as in ``points`` ("YYYY-MM-DD")
+    text: str
+
+
 # ---- the vendored bundle -----------------------------------------------------------------
 def expected_sha256() -> str | None:
     """The bundle's checksum as recorded in ``SHA256SUMS`` (``<hex>  <name>`` lines)."""
@@ -211,8 +218,12 @@ def spec(
     precision: int = 2,
     last: float | None = None,
     label: str = "Price chart",
+    markers: Sequence[Marker] = (),
 ) -> dict[str, Any]:
-    """The JSON the frontend receives: theme tokens, series, options and a ``sig``."""
+    """The JSON the frontend receives: theme tokens, series, options and a ``sig``.
+    ``markers`` (T67) are ``{"time": "YYYY-MM-DD", "text": ...}`` notes on the first series
+    (a filing date); the key is left out when there are none, so older payloads keep their
+    signature."""
     out: dict[str, Any] = {
         "height": int(height),
         "precision": int(precision),
@@ -221,6 +232,8 @@ def spec(
         "theme": theme_tokens(),
         "series": [dict(s) for s in series],
     }
+    if markers:
+        out["markers"] = [{"time": str(m["time"]), "text": str(m["text"])} for m in markers]
     out["sig"] = signature(out)
     return out
 
@@ -313,6 +326,7 @@ def chart(
     last: float | None = None,
     label: str = "Price chart",
     with_attribution: bool = True,
+    markers: Sequence[Marker] = (),
 ) -> bool:
     """Draw one TradingView chart, then its attribution. Returns True when the TradingView
     chart was drawn, False when the Altair fallback was (it has no ``last`` price line).
@@ -325,7 +339,9 @@ def chart(
     be used, or when the browser reported that it could not draw this same payload (a new
     payload, e.g. another range or style, tries the chart again). Call it inside
     ``st.fragment`` so range and style changes rerun only the chart."""
-    payload = spec(series, height=height, precision=precision, last=last, label=label)
+    payload = spec(
+        series, height=height, precision=precision, last=last, label=label, markers=markers
+    )
     state = st.session_state.get(key)
     # the component keeps returning its last value on every rerun, so an error report arms the
     # fallback only the first time it is seen; otherwise a stale report would re-arm it when

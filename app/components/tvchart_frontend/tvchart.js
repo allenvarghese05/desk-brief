@@ -208,6 +208,13 @@
     if (hasVolume) {
       chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
     }
+    // T67: a note on the main series at a bar (a filing date), when the library has markers
+    if (spec.markers && spec.markers.length && LWC.createSeriesMarkers) {
+      LWC.createSeriesMarkers(drawn[0].api, spec.markers.map(function (m) {
+        return { time: m.time, position: "aboveBar", shape: "arrowDown", color: th.meta,
+                 text: m.text };
+      }));
+    }
     if (spec.last !== null && spec.last !== undefined && isFinite(spec.last)) {
       drawn[0].api.createPriceLine({
         price: spec.last, color: th.text, lineWidth: 1, lineStyle: LWC.LineStyle.Dashed,

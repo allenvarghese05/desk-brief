@@ -46,7 +46,17 @@ for path in (ROOT, ROOT / "src"):  # `app` is a plain folder; src/ covers a non-
         sys.path.insert(0, str(path))
 
 from app import theme  # noqa: E402
-from app.components import brief, chart, data, instrument, kit, panels, tearsheet, tvchart  # noqa: E402
+from app.components import (  # noqa: E402
+    brief,
+    chart,
+    company,
+    data,
+    instrument,
+    kit,
+    panels,
+    tearsheet,
+    tvchart,
+)
 from app.components.values import TIER_NAME  # noqa: E402
 
 from deskbrief.config import Config, load_config  # noqa: E402
@@ -345,10 +355,38 @@ def _draw(
     drawn = tvchart.chart(
         chart.tv_series(view, style=style), key="db-tv", height=CHART_HEIGHT,
         precision=chart.tv_precision(view), last=last, label=f"{name} price chart",
-        with_attribution=False,
+        with_attribution=False, markers=_filing_marker(config, row, view),
     )  # fmt: skip
     # the Altair fallback draws no latest-value line, so its footer does not mention one
     return chart.caption(view, latest_line=drawn and last is not None), drawn
+
+
+def _is_stock(config: Config, iid: str) -> bool:
+    """Single stocks only (P-024): ETFs, indices and futures never show the Company section."""
+    return any(i.id == iid and i.kind == "stock" for i in config.instruments)
+
+
+def _filing_marker(config: Config, row: Row, view: pd.DataFrame) -> list[tvchart.Marker]:
+    """The latest 10-Q/10-K as a note on the chart at the first bar on or after its filed date
+    (T67), when that bar is in the range shown."""
+    if view.empty or not _is_stock(config, row.instrument_id):
+        return []
+    mark = company.marker(data.load_company(config, row.instrument_id))
+    if mark is None:
+        return []
+    filed, text = mark
+    bars = [d.date() for d in pd.to_datetime(view["d"])]
+    at = next((d for d in bars if d >= filed), None)
+    return [{"time": f"{at:%Y-%m-%d}", "text": text}] if at is not None else []
+
+
+def _company(config: Config, row: Row) -> None:
+    """The Company section under the hero, for single stocks only (T67)."""
+    if not _is_stock(config, row.instrument_id):
+        return
+    co = data.load_company(config, row.instrument_id)
+    with st.container(key="db-company"):
+        _html(st, company.section_html(co, config.filings.insider_days))
 
 
 @st.fragment
@@ -465,7 +503,7 @@ def _notes(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) 
 def main() -> None:
     st.set_page_config(page_title="Desk Brief", layout="wide", initial_sidebar_state="collapsed")
     theme.apply()
-    _html(st, panels.HOME_CSS + brief.BRIEF_CSS)
+    _html(st, panels.HOME_CSS + brief.BRIEF_CSS + company.COMPANY_CSS)
     st.html(SLASH_JS, unsafe_allow_javascript=True)
     path = os.environ.get("DESKBRIEF_CONFIG") or str(ROOT / "config.yaml")
     config = _config(path)
@@ -513,6 +551,7 @@ def main() -> None:
         with hero_col, st.container(key="db-hero"):
             if sel:
                 _hero(config, ov, rows[sel], hidden)
+                _company(config, rows[sel])
                 _notes(config, ov, rows[sel], hidden)
             else:
                 _html(st, '<div class="db-empty">No instruments to chart yet.</div>')

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -35,7 +36,13 @@ import streamlit as st
 from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
-from deskbrief.query import Lineage, latest_check_run, series_all
+from deskbrief.query import (
+    CompanyFilings,
+    Lineage,
+    company_filings_from_frame,
+    latest_check_run,
+    series_all,
+)
 from deskbrief.report.model import (
     BriefModel,
     Caveat,
@@ -531,6 +538,63 @@ def load_series(
         config, config.storage.backend, _where(config), tuple(instrument_ids), hidden, days,
         data_version(config),
     )  # fmt: skip
+
+
+#: the Company section reads the filings fetched in the last this many days: every morning run
+#: re-fetches each current filing, so older fetches only hold rows newer ones replaced (T67)
+FILINGS_READ_DAYS = 14
+
+
+def _recent_table(
+    store: LocalBackend | R2Backend, table: str, days: int, now: datetime
+) -> pd.DataFrame:
+    """Rows of a ``derived/`` table from partitions dated in the last ``days`` days (ET)."""
+    import io
+
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
+    from deskbrief.schemas import empty_frame
+    from deskbrief.store.backend import table_prefix
+
+    first = et_date(now) - timedelta(days=days)
+    keys = []
+    for k in store.list(table_prefix(table, current_clean_version(store))):
+        m = re.search(r"/date=(\d{4}-\d{2}-\d{2})/", k)
+        if k.endswith(".parquet") and m and date.fromisoformat(m[1]) >= first:
+            keys.append(k)
+    template = empty_frame(table)
+    if not keys:
+        return template
+    frames = [pq.read_table(io.BytesIO(store.get_bytes(k))).to_pandas() for k in keys]
+    merged = pd.concat(frames, ignore_index=True)
+    return merged[list(template.columns)].astype(dict(template.dtypes))
+
+
+def build_company(
+    config: Config, env: Mapping[str, str], now: datetime, instrument_id: str
+) -> CompanyFilings:
+    """The Company section's facts for one stock (``query.company_filings_from_frame``)."""
+    frame = _recent_table(_store(config, env), "filings", FILINGS_READ_DAYS, now)
+    return company_filings_from_frame(frame, instrument_id, now, config.filings.insider_days)
+
+
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_company(
+    _config: Config, backend: str, where: str, instrument_id: str, hour: datetime
+) -> CompanyFilings | None:
+    # filings change once a morning: an hour's cache keeps a click from re-reading the store
+    try:
+        return build_company(_config, os.environ, current_time(), instrument_id)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard filings unreadable: %s", type(exc).__name__)
+        return None
+
+
+def load_company(config: Config, instrument_id: str) -> CompanyFilings | None:
+    """The Company section's facts, cached for the hour; None when the store cannot be read."""
+    hour = current_time().replace(minute=0, second=0, microsecond=0)
+    s = config.storage
+    return _cached_company(config, s.backend, _where(config), instrument_id, hour)
 
 
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
