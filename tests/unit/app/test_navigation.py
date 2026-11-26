@@ -219,7 +219,8 @@ def test_no_full_reload_links_anywhere_on_markets(run_home: Run) -> None:
 
 
 def test_hosted_and_local_markets_agree_on_tier1(run_home: Run) -> None:
-    hosted, local = page(run_home("hosted")), page(run_home("local"))
+    # P-024: "Unusual first" folds the groups; "By group" shows every row
+    hosted, local = page(by_group(run_home("hosted"))), page(by_group(run_home("local")))
     assert 'data-tier="1"' not in hosted
     assert 'data-tier="1"' in local
     legend = 'class="db-glyphs"'

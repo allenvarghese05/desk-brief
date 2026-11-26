@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import io
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -69,7 +70,10 @@ def test_only_the_morning_row_gets_the_report_hooks() -> None:
         assert (steps.build_report, steps.notify) == (default.build_report, default.notify)
 
 
-def test_build_archives_html_xlsx_and_model_json_per_spec_6(ctx: RunContext, world: World) -> None:
+def test_build_archives_html_xlsx_and_model_json_per_spec_6(
+    ctx: RunContext, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # T66: never a live call here
     build, _ = report_steps(NullNotifier())
     key = build(ctx)
     assert key == f"{PREFIX}/v1/brief.html"
@@ -77,9 +81,13 @@ def test_build_archives_html_xlsx_and_model_json_per_spec_6(ctx: RunContext, wor
         f"{PREFIX}/v1/{n}" for n in ("brief.html", "brief.xlsx", "model.json")
     ]
     model = BriefModel.from_store(world.connect(), world.config, MON, MON_0700)
-    assert world.store.get_bytes(f"{PREFIX}/v1/model.json").decode() == model.to_json()
+    archived = BriefModel.from_json(world.store.get_bytes(f"{PREFIX}/v1/model.json").decode())
+    # P-024 (T66): the note is written in this step and stored with the brief
+    assert archived.note is not None
+    assert archived.note.reason == "no API key is configured"
+    assert replace(archived, note=None) == model
     assert world.store.get_bytes(f"{PREFIX}/v1/brief.xlsx")[:2] == b"PK"
-    assert model.title in world.store.get_bytes(key).decode()
+    assert model.subject in world.store.get_bytes(key).decode()  # T63: the read is the title
 
 
 def test_a_rerun_archives_a_new_version(ctx: RunContext, world: World) -> None:
@@ -97,7 +105,7 @@ def test_notify_sends_the_archived_html_with_the_workbook_attached(
     notify(ctx)
     (msg,) = null.messages
     assert msg.html == world.store.get_bytes(key).decode()
-    assert msg.subject.startswith("Desk Brief — Mon 16 Nov 2026, 07:00 ET")
+    assert msg.subject == "Quiet · Desk Brief · Mon 16 Nov"  # P-024 (T63): the read first
     assert [a.filename for a in msg.attachments] == ["brief-2026-11-16.xlsx"]
     assert msg.attachments[0].data == world.store.get_bytes(f"{PREFIX}/v1/brief.xlsx")
     assert "Not investment advice" in msg.text
