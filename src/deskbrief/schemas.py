@@ -33,11 +33,23 @@ instrument). Neither feeds ``obs_all``/``obs_latest``, the checks, sigma or the 
 Both are re-fetched each run, and a later fetch may no longer contain a key an earlier one had
 (a rescheduled release, a re-parse with fewer facts). So the newest run *replaces* a whole scope
 (``REPLACE_SCOPE``) rather than single keys; every reader goes through :func:`current_rows`.
-Writer rules: within one run a natural key (``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``)
-appears once; a run writes a scope only when every fetch of it succeeded, and writes all of
-it (``events``: every event of that source and dataset in the horizon; ``filings``: the filing
-row and every fact parsed from that accession). ``filings`` units: ``shares`` in shares,
-``price`` in USD per share, ``value_usd`` in USD.
+Writer rules:
+
+* within one run a natural key (``EVENTS_NATURAL_KEY`` / ``FILINGS_NATURAL_KEY``) appears once;
+* a run writes a scope only when every fetch of it succeeded, and writes all of it (``events``:
+  every event of that source and dataset in the horizon; ``filings``: the filing row and every
+  fact parsed from that accession);
+* ``events.source`` / ``events.dataset`` are exactly the ``source_log`` source and dataset of
+  the fetch, so a genuinely empty fetch can be matched to the scope it empties;
+* an ``/A`` filing names the accession it amends in ``amends_accession`` when the filing says
+  which one; readers then drop the amended filing (:func:`current_rows`).
+
+Reader rules (:func:`current_rows`): the newest run replaces a scope; for ``events`` only a
+fetch logged ``empty`` with nothing quarantined can empty it; old accessions are never replaced
+by newer ones, so readers filter by date (Form 4 by ``filed_date`` within
+``filings.insider_days``; 13F by the latest ``period``; the latest 10-Q/10-K by ``filed_date``).
+
+``filings`` units: ``shares`` in shares, ``price`` in USD per share, ``value_usd`` in USD.
 """
 
 from __future__ import annotations
@@ -300,6 +312,7 @@ TABLES: dict[str, dict[str, str]] = {
         "value_usd": "float?",  # Form 4 shares x price; 13F market value, USD
         "plan_10b5_1": "bool",  # Form 4 row marked as under a Rule 10b5-1 plan; else false
         "details_json": "str",  # extras (security title, ownership form, 13F class)
+        "amends_accession": "str?",  # an /A filing: the accession it amends, when known
         "source": "str",  # edgar
         "dataset": "str",
         "fetch_id": "str",
@@ -333,6 +346,7 @@ _EXTRA_CHECKS: dict[str, list[pa.Check]] = {
     "cik": [pa.Check.str_matches(r"^\d{10}$")],
     "party_cik": [pa.Check.str_matches(r"^\d{10}$")],
     "accession": [pa.Check.str_matches(r"^\d{10}-\d{2}-\d{6}$")],
+    "amends_accession": [pa.Check.str_matches(r"^\d{10}-\d{2}-\d{6}$")],
     "shares": [pa.Check.ge(0)],
     "price": [pa.Check.ge(0)],
     "value_usd": [pa.Check.ge(0)],
@@ -499,6 +513,12 @@ def _thirteen_f_period(df: pd.DataFrame) -> pd.Series:
     return _required_where(df["form"].isin(_FORM13F), df, ("period",))
 
 
+def _amends_only_from_amendments(df: pd.DataFrame) -> pd.Series:
+    """``amends_accession`` only on an ``/A`` form, and never the filing's own accession."""
+    named = df["amends_accession"].notna()
+    return ~named | (df["form"].str.endswith("/A") & (df["amends_accession"] != df["accession"]))
+
+
 def _plan_flag_on_trades_only(df: pd.DataFrame) -> pd.Series:
     return ~df["plan_10b5_1"].astype(bool) | (df["row_kind"] == "insider_trade")
 
@@ -514,6 +534,7 @@ _FRAME_CHECKS: dict[str, list[pa.Check]] = {
         pa.Check(_holder_change_fields, error="holder_change rows need party, holdings"),
         pa.Check(_thirteen_f_period, error="13F rows need period (the as-of quarter end)"),
         pa.Check(_plan_flag_on_trades_only, error="plan_10b5_1 only on insider_trade rows"),
+        pa.Check(_amends_only_from_amendments, error="amends_accession only on an /A form"),
     ],
 }
 
@@ -590,7 +611,13 @@ def validate(table: str, df: pd.DataFrame) -> pd.DataFrame:
     return TABLE_SCHEMAS[table].validate(df, lazy=True)
 
 
-_FETCH_OK = (FetchStatus.OK.value, FetchStatus.EMPTY.value)
+def _utc_column(df: pd.DataFrame, col: str, table: str) -> pd.Series:
+    """``df[col]`` as tz-aware UTC; a naive column is a writer bug, so it raises."""
+    ser = df[col]
+    if not isinstance(ser.dtype, pd.DatetimeTZDtype):
+        raise ValueError(f"{table}.{col} must be tz-aware UTC timestamps, got {ser.dtype}")
+    utc: pd.Series = ser.dt.tz_convert("UTC")
+    return utc
 
 
 def _newest_by(
@@ -606,34 +633,71 @@ def _newest_by(
     return best
 
 
+def _genuinely_empty_runs(source_log: pd.DataFrame) -> list[dict[Hashable, Any]]:
+    """One record per ``(source, dataset, run_id)`` whose every fetch was ``empty`` with nothing
+    quarantined: the provider said "nothing", so the scope is replaced by no rows.
+
+    Anything else leaves the previous rows current: a failed fetch, a quarantined parse (logged
+    ``ok`` with ``rows_quarantined > 0``; P-024 review N1), or ``ok`` with no rows written.
+    """
+    log = source_log.assign(responded_at=_utc_column(source_log, "responded_at", "source_log"))
+    log = log.assign(
+        _empty=(log["status"] == FetchStatus.EMPTY.value) & (log["rows_quarantined"] == 0)
+    )
+    runs = log.groupby(["source", "dataset", "run_id"], sort=False).agg(
+        empty=("_empty", "all"), responded_at=("responded_at", "max")
+    )
+    out: list[dict[Hashable, Any]] = runs[runs["empty"]].reset_index().to_dict("records")
+    return out
+
+
 def current_rows(
     table: str, df: pd.DataFrame, source_log: pd.DataFrame | None = None
 ) -> pd.DataFrame:
-    """The current version of ``events`` or ``filings``: per ``REPLACE_SCOPE``, only the rows of
-    the newest run that wrote that scope (P-024 review B1). Every reader uses this.
+    """The current version of ``events`` or ``filings``. Every reader uses this (P-024 B1, N1).
 
-    "Newest" is the run's latest ``ingested_at`` in that scope (ties go to the larger
-    ``run_id``). For ``events``, pass the ``source_log`` rows too: a newer run whose every fetch
-    of that source and dataset succeeded (``ok`` or ``empty``) but wrote no rows means nothing is
-    scheduled any more, so the scope is emptied. Returns the same columns and dtypes.
+    1. Per ``REPLACE_SCOPE``, only the rows of the newest run that wrote that scope survive.
+       "Newest" is the run with the latest ``ingested_at`` in the scope. Scheduled runs are
+       serialised (one ``deskbrief-pipeline`` concurrency group), so that is the latest run
+       start; runs that overlap (a manual local run beside CI) are not, and ties go to the
+       larger ``run_id`` (a ULID, which sorts by run start).
+    2. ``events`` with ``source_log``: a newer run that wrote no rows for a scope empties it only
+       when every fetch of that scope was ``empty`` with zero rows quarantined. A failed fetch,
+       a quarantined parse (logged ``ok``) or ``ok`` with no rows leaves the previous rows. This
+       matches on ``(source, dataset)``, so ``events.dataset`` must be the fetch's dataset.
+    3. ``filings``: a filing is superseded, and all its rows dropped, when a current row of the
+       same instrument names it in ``amends_accession``.
+
+    Old accessions are never replaced by newer ones (each is its own scope): readers also filter
+    by date (Form 4 by ``filed_date``, the last ``filings.insider_days``; 13F by the latest
+    ``period``; the latest 10-Q/10-K by ``filed_date``). Timestamps must be tz-aware (naive
+    raises). Returns the same columns and dtypes.
     """
     scope = REPLACE_SCOPE[table]
     if df.empty:
         return df.reset_index(drop=True)
-    cols = [*scope, "run_id", "ingested_at"]
-    records: list[dict[Hashable, Any]] = df[cols].to_dict("records")
+    ingested = _utc_column(df, "ingested_at", table)
+    keys = df[[*scope, "run_id"]].assign(ingested_at=ingested)
+    records: list[dict[Hashable, Any]] = keys.to_dict("records")
     newest = _newest_by(records, scope, "ingested_at")
-    current = {k: run for k, (_, run) in newest.items()}
+    current: dict[tuple[Any, ...], str | None] = {k: run for k, (_, run) in newest.items()}
     if table == "events" and source_log is not None and not source_log.empty:
-        log: list[dict[Hashable, Any]] = source_log[
-            ["source", "dataset", "run_id", "status", "responded_at"]
-        ].to_dict("records")
-        failed = {
-            (r["source"], r["dataset"], r["run_id"]) for r in log if r["status"] not in _FETCH_OK
+        empties = _genuinely_empty_runs(source_log)
+        for k, (at, run) in _newest_by(empties, ("source", "dataset"), "responded_at").items():
+            if k in newest and (at, run) > newest[k]:
+                current[k] = None  # a newer complete fetch said nothing is scheduled
+    mask = pd.Series(
+        [current.get(tuple(r[c] for c in scope)) == r["run_id"] for r in records], index=df.index
+    )
+    if table == "filings":
+        live = df[mask]
+        amended = {
+            (i, a)
+            for i, a in zip(live["instrument_id"], live["amends_accession"], strict=True)
+            if isinstance(a, str)
         }
-        ok_runs = [r for r in log if (r["source"], r["dataset"], r["run_id"]) not in failed]
-        for k, (at, run) in _newest_by(ok_runs, ("source", "dataset"), "responded_at").items():
-            if k in newest and at > newest[k][0] and run != current[k]:
-                del current[k]  # a newer complete fetch found nothing: the scope is empty
-    mask = [current.get(tuple(r[c] for c in scope)) == r["run_id"] for r in records]
+        not_amended = [
+            (i, a) not in amended for i, a in zip(df["instrument_id"], df["accession"], strict=True)
+        ]
+        mask &= pd.Series(not_amended, index=df.index)
     return df[mask].reset_index(drop=True)

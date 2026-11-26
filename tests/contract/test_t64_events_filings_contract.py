@@ -9,7 +9,7 @@ Every frame and config below is a SYNTHETIC FIXTURE built in code. The company i
 from __future__ import annotations
 
 import copy
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, get_args
 from zoneinfo import ZoneInfo
@@ -19,6 +19,7 @@ import yaml
 from pandera.errors import SchemaErrors
 from pydantic import ValidationError
 
+from deskbrief import schemas
 from deskbrief.config import (
     KNOWN_SOURCES,
     SEC_MAX_RATE_PER_MIN,
@@ -237,6 +238,7 @@ FILINGS_COLUMNS = {
     "value_usd": "float?",
     "plan_10b5_1": "bool",
     "details_json": "str",
+    "amends_accession": "str?",
     "source": "str",
     "dataset": "str",
     "fetch_id": "str",
@@ -436,10 +438,14 @@ def _cpi(day: int, run: str, at: datetime) -> dict[str, Any]:
 
 
 def _log(
-    run: str, at: datetime, status: str = "ok", dataset: str = "release_dates"
+    run: str,
+    at: datetime,
+    status: str = "ok",
+    dataset: str = "release_dates",
+    quarantined: int = 0,
 ) -> dict[str, Any]:
     return {
-        "fetch_id": f"F-{run}-{dataset}-{status}",
+        "fetch_id": f"F-{run}-{dataset}-{status}-{quarantined}",
         "run_id": run,
         "source": "fred",
         "dataset": dataset,
@@ -452,7 +458,7 @@ def _log(
         "status": status,
         "bytes": 10,
         "rows_parsed": 0,
-        "rows_quarantined": 0,
+        "rows_quarantined": quarantined,
         "attempt": 1,
     }
 
@@ -493,10 +499,81 @@ def test_newer_failed_fetch_keeps_the_previous_rows() -> None:
     assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
 
 
-def test_newer_fetch_of_another_dataset_changes_nothing() -> None:
+def test_scope_rule_needs_events_dataset_to_match_source_log() -> None:
+    """Writer rule: ``events.dataset`` is the fetch's ``source_log`` dataset. A genuinely empty
+    fetch logged under another dataset name cannot empty the scope (and must not)."""
     rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
-    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, dataset="other")])
+    log = to_frame(
+        "source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "empty", dataset="other")]
+    )
     assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+    same = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "empty")])
+    assert current_rows("events", rows, same).empty
+    doc = current_rows.__doc__ or ""
+    assert "``events.dataset`` must be the fetch's dataset" in doc
+    assert "exactly the ``source_log`` source and dataset" in (schemas.__doc__ or "")
+
+
+def test_newer_ok_but_quarantined_run_keeps_the_previous_rows() -> None:
+    """N1: a 200 whose parse failed is logged ``ok`` with rows quarantined and writes nothing."""
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "ok", quarantined=1)])
+    assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+
+
+def test_newer_ok_run_with_no_rows_keeps_the_previous_rows() -> None:
+    """N1: ``ok`` with zero rows written is not "nothing scheduled"; only ``empty`` says that."""
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "ok")])
+    assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+
+
+def test_newer_empty_run_with_quarantine_keeps_the_previous_rows() -> None:
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT)])
+    log = to_frame("source_log", [_log("R1", RUN1_AT), _log("R2", RUN2_AT, "empty", quarantined=1)])
+    assert list(current_rows("events", rows, log)["run_id"]) == ["R1"]
+
+
+def test_genuine_empty_replaces_and_only_when_newer() -> None:
+    rows = to_frame("events", [_cpi(11, "R2", RUN2_AT)])
+    newer_empty = to_frame("source_log", [_log("R3", RUN2_AT + timedelta(days=1), "empty")])
+    assert current_rows("events", rows, newer_empty).empty
+    older_empty = to_frame("source_log", [_log("R1", RUN1_AT, "empty")])
+    assert list(current_rows("events", rows, older_empty)["run_id"]) == ["R2"]
+    # a run whose fetches were partly empty and partly quarantined is not genuinely empty
+    mixed = to_frame(
+        "source_log",
+        [
+            _log("R3", RUN2_AT + timedelta(days=1), "empty"),
+            _log("R3", RUN2_AT + timedelta(days=1), "ok", quarantined=2),
+        ],
+    )
+    assert list(current_rows("events", rows, mixed)["run_id"]) == ["R2"]
+
+
+def test_newest_means_latest_run_ties_go_to_the_larger_run_id() -> None:
+    same_time = [_cpi(11, "01AAA", RUN2_AT), _cpi(12, "01BBB", RUN2_AT)]
+    current = current_rows("events", to_frame("events", same_time))
+    assert list(current["run_id"]) == ["01BBB"]
+    doc = current_rows.__doc__ or ""
+    assert "serialised" in doc
+    assert "ties go to the" in doc
+
+
+def test_current_rows_rejects_naive_and_normalises_zones() -> None:
+    rows = to_frame("events", [_cpi(11, "R1", RUN1_AT), _cpi(12, "R2", RUN2_AT)])
+    naive = rows.assign(ingested_at=rows["ingested_at"].dt.tz_localize(None))
+    with pytest.raises(ValueError, match="tz-aware"):
+        current_rows("events", naive)
+    log = to_frame("source_log", [_log("R3", RUN2_AT + timedelta(days=1), "empty")])
+    naive_log = log.assign(responded_at=log["responded_at"].dt.tz_localize(None))
+    with pytest.raises(ValueError, match="tz-aware"):
+        current_rows("events", rows, naive_log)
+    # an aware but non-UTC frame is compared in UTC and returned unchanged in type
+    in_et = rows.assign(ingested_at=rows["ingested_at"].dt.tz_convert(ET))
+    current = current_rows("events", in_et)
+    assert list(current["run_id"]) == ["R2"]
+    assert str(current["ingested_at"].dt.tz) == "America/New_York"
 
 
 def _trades(run: str, at: datetime, n: int) -> list[dict[str, Any]]:
@@ -536,6 +613,66 @@ def test_current_rows_keeps_dtypes_and_handles_empty() -> None:
     rows = to_frame("filings", _trades("R1", RUN1_AT, 1))
     current = current_rows("filings", rows)
     assert list(current.dtypes) == list(rows.dtypes)
+
+
+ORIGINAL = "0009999999-26-000002"  # the Form 4 in _trades
+AMENDMENT = "0009999999-26-000009"
+
+
+def _amendment(run: str, at: datetime) -> list[dict[str, Any]]:
+    common = {"run_id": run, "fetch_id": f"F-{run}-a", "ingested_at": at}
+    return [
+        _filing(
+            accession=AMENDMENT,
+            form="4/A",
+            period=None,
+            dataset="form4",
+            amends_accession=ORIGINAL,
+            **common,
+        ),
+        _insider_trade(accession=AMENDMENT, form="4/A", seq=1, **common),
+    ]
+
+
+def test_an_amended_filing_is_superseded() -> None:
+    rows = to_frame("filings", [*_trades("R1", RUN1_AT, 3), *_amendment("R2", RUN2_AT)])
+    validate("filings", rows)
+    current = current_rows("filings", rows)
+    assert set(current["accession"]) == {AMENDMENT}  # the original's 4 rows are gone
+    assert list(current["seq"]) == [0, 1]
+    doc = schemas.__doc__ or ""
+    assert "``amends_accession``" in doc
+
+
+def test_an_amendment_of_another_instrument_supersedes_nothing() -> None:
+    other = [{**r, "instrument_id": "OTHER"} for r in _amendment("R2", RUN2_AT)]
+    rows = to_frame("filings", [*_trades("R1", RUN1_AT, 1), *other])
+    assert set(current_rows("filings", rows)["accession"]) == {ORIGINAL, AMENDMENT}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"amends_accession": ORIGINAL},  # on a 10-Q, not an /A form
+        {"form": "10-Q/A", "amends_accession": "0009999999-26-000001"},  # amends itself
+        {"form": "10-Q/A", "amends_accession": "not-an-accession"},
+    ],
+)
+def test_amends_accession_rules(bad: dict[str, Any]) -> None:
+    with pytest.raises(SchemaErrors):
+        validate("filings", to_frame("filings", [_filing(**bad)]))
+
+
+def test_old_accessions_are_filtered_by_date_not_replaced() -> None:
+    """Each accession is its own scope: last quarter's 10-Q stays current next to this one, so
+    readers pick by ``filed_date`` / ``period`` (documented)."""
+    old = _filing(accession="0009999999-25-000001", filed_date=date(2025, 11, 1))
+    rows = to_frame("filings", [old, _filing(run_id="R2", ingested_at=RUN2_AT)])
+    assert len(current_rows("filings", rows)) == 2
+    doc = schemas.__doc__ or ""
+    assert "old accessions are never replaced" in doc
+    assert "``filings.insider_days``" in doc
+    assert "latest ``period``" in doc
 
 
 # ---------------------------------------------------------------------------------------------
