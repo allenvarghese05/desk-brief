@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from html import escape
@@ -57,36 +57,13 @@ from deskbrief.query import (
     like_for_like,
     source_name,
 )
-from deskbrief.report.model import SPREAD_ID, Row, Section
+from deskbrief.report.model import SHORT_LABELS, SPREAD_ID, Row, Section
 from deskbrief.timeutil import to_et
 
 NO_CHECKS = "No checks yet"
 
-#: what a trader calls each instrument; anything not listed shows its id (SPY, AAPL, EURUSD)
-SHORT = {
-    "ES_F": "S&P fut",
-    "UST_3M": "3M",
-    "UST_2Y": "2Y",
-    "UST_10Y": "10Y",
-    "UST_20Y": "20Y",
-    "UST_30Y": "30Y",
-    SPREAD_ID: "2s10s",
-    "GOLD_F": "Gold",
-    "BRENT": "Brent",
-    "N225": "Nikkei",
-    "UNRATE": "Unemployment",
-    "DFF": "Fed funds",
-    "UST_10Y_REAL": "10Y real",
-    "BEI_10Y": "10Y BEI",
-    "USD_BROAD": "Broad USD",
-    "HY_OAS": "HY OAS",
-    "COT_GC_NET": "Gold COT net",
-    "COT_ES_NET": "ES COT net",
-    "COT_ZN_NET": "10Y note COT net",
-    "COT_GC_OI": "Gold COT OI",
-    "COT_ES_OI": "ES COT OI",
-    "COT_ZN_OI": "10Y note COT OI",
-}
+#: what a trader calls each instrument (one map, shared with the email)
+SHORT = SHORT_LABELS
 _TENOR_YEARS = {"UST_3M": 0.25, "UST_2Y": 2, "UST_10Y": 10, "UST_20Y": 20, "UST_30Y": 30}
 NO_CHANGE = "—"
 NO_DATA = 'no data<span class="db-sr"> (data unavailable)</span>'
@@ -298,6 +275,8 @@ def strip_items(ov: Overview, sel: str = "") -> tuple[str, list[Item]]:
     Returns ``(lead, items)``: ``lead`` is the basis most items share, said once at the start
     of the strip ("Fri close"); an item whose basis differs says its own ("vs official")."""
     labels = {row.instrument_id: move_label(row) for _, row in ov.headline if row.available}
+    sigs = sigmas(ov) if hasattr(ov, "moves") else {}
+    checked = {i for c in getattr(ov, "caveats", ()) for i in c.instrument_ids}
     counts = Counter(v for v in labels.values() if v)
     common, n = counts.most_common(1)[0] if counts else ("", 0)
     common = common if n >= 2 else ""
@@ -309,9 +288,11 @@ def strip_items(ov: Overview, sel: str = "") -> tuple[str, list[Item]]:
             p = provenance_of(row, ov.as_of)
             own = labels.get(row.instrument_id, "")
             tag = f'<em class="db-sx-basis">{escape(own)}</em>' if own and own != common else ""
+            sig = sigma_tag(sigs.get(row.instrument_id))
+            mark = check_mark() if row.instrument_id in checked else ""
             body = (
                 f'<span class="db-sx-val">{_listed(row.value_text, p)}</span>'
-                f'<span class="db-sx-chg">{tag}{_change(row, p)}</span>'
+                f'<span class="db-sx-chg">{tag}{_change(row, p)}</span>{sig}{mark}'
             )
         cls = "db-sx is-sel" if row.instrument_id == sel else "db-sx"
         items.append(
@@ -367,6 +348,14 @@ def sigmas(ov: Overview) -> dict[str, tuple[str, str]]:
         text = n.text.replace(iid, short(row)) if row is not None else n.text
         out[iid] = (f"{m.group(1)}σ", text)
     return out
+
+
+def check_mark() -> str:
+    """The "check" marker of a market named in Check before using (P-024)."""
+    return (
+        '<span class="db-mark db-mark-warn db-check">check<span class="db-sr"> (see Check '
+        "before using)</span></span>"
+    )
 
 
 def sigma_tag(sig: tuple[str, str] | None) -> str:
@@ -425,6 +414,8 @@ def wl_row(
     sel: str,
     spark: Sequence[float] = (),
     sig: tuple[str, str] | None = None,
+    sub: str = "",
+    check: bool = False,
 ) -> str:
     """One watchlist row (P-023): the short name (never truncated) with a sigma tag for an
     unusual move, the full name under it (truncated with an ellipsis), then the value and the
@@ -434,9 +425,10 @@ def wl_row(
     tag = '<span class="db-tag">proxy</span>' if row.is_proxy and not row.available else ""
     hover = "; ".join((row.label, *row.qualifiers))
     cls = "db-wl-row db-row is-sel" if row.instrument_id == sel else "db-wl-row db-row"
+    mark = check_mark() if check else ""
     name = (
-        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}{sigma_tag(sig)}</b>'
-        f"<small>{escape(row.name)}</small>"
+        f'<span class="db-wl-name"><b>{escape(short(row))}{tag}{sigma_tag(sig)}{mark}</b>'
+        f"<small>{escape(sub or row.name)}</small>"
         f'<span class="db-sr"> ({escape(hover)})</span></span>'
     )
     if not row.available:
@@ -510,6 +502,48 @@ def watchlist(
     return out
 
 
+MOVERS_TITLE = "Moved more than usual"
+#: the watchlist switch (P-024): unusual first by default
+UNUSUAL, BY_GROUP = "Unusual first", "By group"
+
+
+def mover_sub(row: Row, now: datetime) -> str:
+    """The quiet line under a mover's name: source, tier and time ("Yahoo · delayed · 06:06")."""
+    if not row.available or row.tier is None:
+        return ""
+    p = provenance_of(row, now)
+    return f"{source_name(p.source)} · {TIER_NAME[p.tier]} · {row.as_of_text}"
+
+
+def movers_group(ov: Overview, sel: str) -> WatchGroup:
+    """The movers, largest sigma first, as the first watchlist group (P-024 "Unusual first"):
+    the one ranking of ``BriefModel.movers``, each with its sigma tag and any check marker."""
+    rows = {r.instrument_id: r for s in ov.sections for r in s.rows}
+    sigs = sigmas(ov)
+    checked = {i for c in ov.caveats for i in c.instrument_ids}
+    items = []
+    for m in ov.movers:
+        row = rows.get(m.instrument_id)
+        if row is None:
+            continue
+        body = wl_row(
+            row, ov.as_of, sel, (), sigs.get(m.instrument_id), mover_sub(row, ov.as_of),
+            m.instrument_id in checked,
+        )  # fmt: skip
+        items.append((m.instrument_id, body))
+    return WatchGroup(MOVERS_TITLE, items, [], tuple(i for i, _ in items))
+
+
+def without(sections: Sequence[Section], ids: Collection[str]) -> list[Section]:
+    """Sections with the rows in ``ids`` left out, empty sections dropped ("everything else")."""
+    out = []
+    for s in sections:
+        rows = tuple(r for r in s.rows if r.instrument_id not in ids)
+        if rows:
+            out.append(Section(s.asset_class, s.title, rows))
+    return out
+
+
 def group_title(title: str, *, folded: bool | None = None, count: int = 0) -> str:
     """A watchlist group header. ``folded`` is ``None`` for a header that does not fold (the
     T58 signature); otherwise a chevron says whether the group is open."""
@@ -566,13 +600,17 @@ def chart_header(row: Row, now: datetime) -> str:
         tone = direction(row.change_text).removeprefix("db-")
         chg = change_cell(row.change_text, p, row.basis, compact=True, glyph=False)
         basis = basis_text(row)
+        sig = f" · {row.sigma:.1f}σ" if row.sigma is not None else ""
         pill = (
             f'<span class="db-pill db-pill-{tone}">{chg}'
-            + (f'<span class="db-pill-basis">1D · {escape(basis)}</span>' if basis else "")
+            + (f'<span class="db-pill-basis">1D · {escape(basis)}{sig}</span>' if basis else "")
             + "</span>"
         )
     else:
-        pill = f'<span class="db-pill-none">{_no_change("no change yet")}</span>'
+        why = row.change.note if row.change is not None and row.change.note else ""
+        pill = f'<span class="db-pill-none">{_no_change("no change yet")}</span>' + (
+            f'<span class="db-pill-why">{escape(why)}</span>' if why else ""
+        )
     line = " · ".join(
         [
             f'<span class="db-field">{escape(p.field)}</span>',
@@ -580,6 +618,12 @@ def chart_header(row: Row, now: datetime) -> str:
             f'<span class="db-asof">{escape(p.hover or p.as_of)}</span>',
             f'<span class="db-src">{escape(p.source)}</span>',
             *(escape(n) for n in _header_notes(row)),
+            *((escape(row.sigma_note),) if row.sigma_note else ()),
+            *(
+                (escape(f"not ranked: {row.change.unranked_reason}"),)
+                if row.change is not None and row.change.unranked_reason
+                else ()
+            ),
         ]
     )
     return (
@@ -623,6 +667,7 @@ def _css() -> str:
     main = '[data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] .st-key-db-watch)'
     watch_col = '[data-testid="stColumn"]:has(.st-key-db-watch)'
     hero_col = '[data-testid="stColumn"]:has(.st-key-db-hero)'
+    brief_col = '[data-testid="stColumn"]:has(.st-key-db-brief)'
     return f"""
 <style>
 /* ---- T60 Home v3 (P-023): no containers; labels over hairlines; four type sizes ---- */
@@ -646,20 +691,36 @@ def _css() -> str:
 .db-sx-chg {{ font-size: {t.SIZE_BODY}px; }}
 .db-sx-basis {{ font-style: normal; color: {t.META}; font-size: {t.SIZE_META}px;
   margin-right: 5px; }}
+.db-sx .db-sig {{ margin-left: 2px; }}
 {pick}:hover .db-sx-name {{ color: {t.TEXT}; }}
 @media (max-width: 1280px) {{ .st-key-db-strip {{ gap: 8px 28px !important; }}
   .db-sx {{ flex-direction: column; gap: 0; }} }}
 @media (max-width: 640px) {{ .st-key-db-strip > div {{ flex: 1 1 28% !important; }} }}
 
-/* main row: the hero on the left, the watchlist (about 352 px) on the right; below 960 px the
-   watchlist drops under the hero at full width (columns stack below 640 px natively) */
+/* three aligned panes (P-024, T62). The source order is the phone order (brief, watchlist,
+   market); on a wide screen they sit watchlist (280 px), market, brief (380 px). Below 1280 px
+   the brief moves above the other two as a two-column block (brief.BRIEF_CSS); below 960 px
+   everything stacks in the source order, so a phone reads like the email. Each pane opens
+   with a label over a hairline, so the three labels share one baseline. */
 {main} {{ gap: {t.GAP}px; flex-wrap: nowrap; align-items: flex-start; }}
-{watch_col} {{ flex: 0 0 352px !important; width: 352px !important; min-width: 0; }}
-{hero_col} {{ flex: 1 1 0 !important; width: auto !important; min-width: 0; }}
-@media (max-width: 960px) {{
+{watch_col} {{ flex: 0 0 280px !important; width: 280px !important; min-width: 0; order: 1; }}
+{hero_col} {{ flex: 1 1 0 !important; width: auto !important; min-width: 0; order: 2; }}
+{brief_col} {{ flex: 0 0 380px !important; width: 380px !important; min-width: 0; order: 3; }}
+@media (max-width: 1280px) {{
   {main} {{ flex-wrap: wrap; gap: 40px; }}
-  {watch_col}, {hero_col} {{ flex: 1 1 100% !important; width: 100% !important; }}
+  {brief_col} {{ flex: 1 1 100% !important; width: 100% !important; order: 0; }}
+  {watch_col} {{ flex: 0 0 260px !important; width: 260px !important; }}
 }}
+@media (max-width: 960px) {{
+  {watch_col}, {hero_col}, {brief_col} {{ flex: 1 1 100% !important; width: 100% !important;
+    order: 0; }}
+}}
+/* the watchlist switch and the line under "Moved more than usual" */
+.st-key-db-wl-switch {{ margin: -4px 0 6px 0; }}
+.st-key-db-wl-switch [data-testid="stButtonGroup"] button {{ background: transparent; border: 0;
+  color: {t.META}; min-height: 26px; padding: 0 10px; font-size: {t.SIZE_META}px; }}
+.db-wl-since {{ padding: 0 10px 4px 10px; color: {t.META}; font-size: {t.SIZE_META}px; }}
+.db-check {{ background: transparent; padding: 0; margin-left: 6px; }}
 
 /* the hero: label, figure, pill, provenance line */
 .db-ch .db-ch-name {{ text-transform: uppercase; letter-spacing: .09em; font-weight: 600;
@@ -678,6 +739,7 @@ def _css() -> str:
 .db-pill .db-fig {{ display: inline; }}
 .db-pill-basis {{ color: {t.SECONDARY}; font-size: {t.SIZE_META}px; font-weight: 400; }}
 .db-pill-none {{ font-size: {t.SIZE_BODY}px; }}
+.db-pill-why {{ color: {t.META}; font-size: {t.SIZE_META}px; }}
 .db-ch-foot {{ color: {t.META}; font-size: {t.SIZE_META}px; margin-top: 12px; }}
 .db-ch-foot .db-tier {{ color: {t.META}; }}
 @media (max-width: 640px) {{ .db-ch-value {{ font-size: {t.SIZE_HERO_PHONE}px; }} }}

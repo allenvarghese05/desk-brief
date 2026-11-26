@@ -36,7 +36,17 @@ from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
 from deskbrief.query import Lineage, latest_check_run, series_all
-from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Notable, Row, Section
+from deskbrief.report.model import (
+    BriefModel,
+    Caveat,
+    HealthBlock,
+    KnownLimit,
+    Mover,
+    Notable,
+    Read,
+    Row,
+    Section,
+)
 from deskbrief.store import duck
 from deskbrief.store.backend import StorageError
 from deskbrief.store.datasets import current_clean_version
@@ -535,6 +545,11 @@ class Overview:
     moves: tuple[Notable, ...] = ()  # unusual moves, largest first (the report's own scoring)
     #: UST tenors: (ET date, yield, source) of official values, oldest first
     curve: dict[str, tuple[tuple[date, float, str], ...]] = field(default_factory=dict)
+    #: P-024 (T62): the one ranking, the read and Check before using, from the model
+    movers: tuple[Mover, ...] = ()
+    read: Read | None = None
+    caveats: tuple[Caveat, ...] = ()
+    previous_brief: datetime | None = None
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -580,4 +595,9 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         known_limits=model.known_limits
         + tuple(KnownLimit("dashboard", t) for t in DASHBOARD_LIMITS),
         withheld=len(model.rows()) - len(keep),
+        # a second guard: a mover or caveat about a withheld instrument never reaches the page
+        movers=tuple(m for m in model.movers if m.instrument_id in by_id and m.tier not in hidden),
+        read=model.read,
+        caveats=tuple(c for c in model.caveats if all(i in by_id for i in c.instrument_ids)),
+        previous_brief=model.previous_brief,
     )

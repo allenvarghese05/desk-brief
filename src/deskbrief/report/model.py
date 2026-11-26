@@ -37,7 +37,7 @@ import duckdb
 import numpy as np
 
 from deskbrief.checks.anomaly import MIN_MOVES, daily_moves
-from deskbrief.config import Config, Instrument, config_hash
+from deskbrief.config import BriefSettings, Config, Instrument, RelatedPair, config_hash
 from deskbrief.query import (
     BASIS_OFFICIAL,
     CHANGE_DECIMALS,
@@ -46,14 +46,19 @@ from deskbrief.query import (
     CheckItem,
     HealthSummary,
     Lineage,
+    SeriesKey,
     ValueRow,
     field_label,
     health_summary,
     instrument_flags,
     lineages,
     overnight_changes,
+    previous_brief_time,
     series,
     series_all,
+    series_by_feed,
+    series_key,
+    source_name,
     value_label,
 )
 from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
@@ -72,8 +77,32 @@ SECTIONS: tuple[tuple[str, str], ...] = (
 )
 TIER_GLYPH = {1: "●", 2: "◐", 3: "○"}
 TIER_NAME = {1: "live", 2: "delayed", 3: "official"}
-#: short names for the one-line headline; any other instrument falls back to its id
-SHORT_LABELS = {"ES_F": "S&P fut", "UST_10Y": "10Y", "UST_2Y": "2Y"}
+#: what a trader calls each instrument (the headline, the movers, the dashboard); anything not
+#: listed shows its id (SPY, AAPL, EURUSD)
+SHORT_LABELS = {
+    "ES_F": "S&P fut",
+    "UST_3M": "3M",
+    "UST_2Y": "2Y",
+    "UST_10Y": "10Y",
+    "UST_20Y": "20Y",
+    "UST_30Y": "30Y",
+    "UST_2S10S": "2s10s",
+    "GOLD_F": "Gold",
+    "BRENT": "Brent",
+    "N225": "Nikkei",
+    "UNRATE": "Unemployment",
+    "DFF": "Fed funds",
+    "UST_10Y_REAL": "10Y real",
+    "BEI_10Y": "10Y BEI",
+    "USD_BROAD": "Broad USD",
+    "HY_OAS": "HY OAS",
+    "COT_GC_NET": "Gold COT net",
+    "COT_ES_NET": "ES COT net",
+    "COT_ZN_NET": "10Y note COT net",
+    "COT_GC_OI": "Gold COT OI",
+    "COT_ES_OI": "ES COT OI",
+    "COT_ZN_OI": "10Y note COT OI",
+}
 UNAVAILABLE = "data unavailable"
 SPREAD_ID = "UST_2S10S"
 _FLAG_ORDER = ("none", "pass", "warn", "fail")  # worst last
@@ -122,6 +151,10 @@ class Row:
     # midnight ET of its date, not a publish time); the spread's is the midnight-ET stamp of the
     # date both legs share. None when unavailable.
     as_of: datetime | None = None
+    # P-024 (T62): the move's size in sigma against its own series' recent daily moves, for a
+    # rankable change only; ``sigma_note`` says why a rankable change has no sigma
+    sigma: float | None = None
+    sigma_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +202,77 @@ class KnownLimit:
 
 
 @dataclass(frozen=True)
+class Mover:
+    """One market that moved more than usual (P-024): a rankable change whose sigma is at or
+    above ``checks.anomaly.z_warn``. ``BriefModel.movers`` is the one ranking every surface
+    reads (the email, the strip, the watchlist and the brief)."""
+
+    instrument_id: str
+    short: str  # what a trader calls it ("HY OAS")
+    name: str
+    sigma: float  # rounded to 0.1
+    n_moves: int  # the earlier daily moves sigma was measured against
+    value_text: str
+    change_text: str
+    change_value: float
+    change_unit: str  # pct | bp | pts | pp
+    direction: str  # up | down
+    source: str
+    tier: int
+    as_of: datetime
+    as_of_text: str
+    basis: str  # the baseline with its date ("previous NYSE close (13 Nov)")
+    check: bool = False  # a Check before using item names this market
+    text: str = ""  # one sentence: "HY OAS +27bp is 3.6σ vs prior 30 daily moves"
+
+
+@dataclass(frozen=True)
+class RuleResult:
+    """One configured regime rule and whether today's moves meet it."""
+
+    regime: str  # the rule set's label ("Risk-off")
+    label: str  # the rule's own label ("VIX up")
+    market: str
+    met: bool
+
+
+@dataclass(frozen=True)
+class Read:
+    """The read (P-024): one regime label from the fixed rules in ``brief.regime_rules``.
+
+    ``kind`` is ``regime`` (a rule set's label), ``mixed`` (rules met for more than one label),
+    ``unclear`` (moves ranked, no label met far enough) or ``quiet`` (nothing ranked).
+    ``regime`` names the rule set listed under "Why" (None for mixed and quiet). ``tone`` is the
+    colour of the label: a regime takes its first rule's direction (Risk-off's equity futures
+    down: ``down``); every other kind is ``flat``. Claude never picks the label."""
+
+    label: str
+    kind: str
+    tone: str  # up | down | flat
+    regime: str | None
+    rules: tuple[RuleResult, ...]  # every configured rule, met or not, in config order
+    n_ranked: int  # markets that moved more than usual (``len(movers)``)
+    text: str  # the read as one line: "Risk-off. Equity futures down, VIX up."
+
+    @property
+    def met(self) -> tuple[RuleResult, ...]:
+        return tuple(r for r in self.rules if r.met)
+
+
+@dataclass(frozen=True)
+class Caveat:
+    """A "Check before using" item (P-024): something that touches today's read and needs a
+    second look. ``kind``: ``crosscheck`` (a failed or warning cross-check on a ranked market),
+    ``basis`` (a basis note on a ranked move) or ``pair`` (two related markets moving further
+    apart than ``brief.related_pairs`` allows)."""
+
+    kind: str
+    title: str  # "Brent vs WTI", "HY OAS"
+    text: str
+    instrument_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class BriefModel:
     schema_version: int
     report_date: date
@@ -181,6 +285,11 @@ class BriefModel:
     health: HealthBlock
     known_limits: tuple[KnownLimit, ...]
     lineage: tuple[Lineage, ...]
+    # P-024 (T62): the ranking, the read and Check before using, shared by every surface
+    movers: tuple[Mover, ...] = ()
+    read: Read | None = None
+    caveats: tuple[Caveat, ...] = ()
+    previous_brief: datetime | None = None  # the brief "new since" compares with (T61)
 
     @classmethod
     def from_store(
@@ -227,6 +336,12 @@ class BriefModel:
             )
             for i in config.instruments
         }
+        hidden = frozenset(exclude_tiers)
+        by_feed = series_by_feed(duck, config.checks.anomaly.window_days * 2, report_time)
+        best = series_all(duck, config.checks.anomaly.window_days * 2, report_time)
+        scores = _scores(config, list(changes.values()), by_feed, best, hidden)
+        for iid, sc in scores.items():
+            rows[iid] = replace(rows[iid], sigma=sc.sigma, sigma_note=sc.note)
         spread = _spread_row(duck, config, report_time)
         if spread:  # derived: as bad as its worst leg
             legs = [flags.get(i, "none") for i in ("UST_10Y", "UST_2Y")]
@@ -243,6 +358,10 @@ class BriefModel:
         )
         if spread:
             rows[SPREAD_ID] = spread
+        movers = _movers(config, rows, scores)
+        caveats = _caveats(config, rows, movers, summary, by_feed)
+        flagged = {i for c in caveats for i in c.instrument_ids}
+        movers = tuple(replace(m, check=m.instrument_id in flagged) for m in movers)
         headline = _headline(config, rows)
         health = _health(summary)
         return cls(
@@ -253,10 +372,14 @@ class BriefModel:
             config_hash=config_hash(config),
             headline=headline,
             sections=sections,
-            notable=_notable(duck, config, list(changes.values()), summary, report_time),
+            notable=_notable(movers, summary),
             health=health,
             known_limits=_known_limits(config, rows, snapshot, summary),
             lineage=lineages(duck, snapshot) + lineages(duck, baselines, role="baseline"),
+            movers=movers,
+            read=_read(config.brief, rows, len(movers)),
+            caveats=caveats,
+            previous_brief=previous_brief_time(report_date, report_time),
         )
 
     # -- serialisation ------------------------------------------------------
@@ -343,7 +466,7 @@ def _title(report_time: datetime) -> str:
 
 
 def _short(instrument_id: str) -> str:
-    return SHORT_LABELS.get(instrument_id, instrument_id)
+    return SHORT_LABELS.get(instrument_id, instrument_id.replace("_", " "))
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +505,8 @@ def _tail(change: ChangeRow) -> str:
             f"change unavailable ({change.basis} of {value_text(change.previous)} on "
             f"{prev.day} {prev:%b} was found and is zero)"
         )
-    return f"change unavailable ({change.basis} not found)"
+    note = f"; {change.note}" if change.note else ""
+    return f"change unavailable ({change.basis} not found{note})"
 
 
 def _row(
@@ -565,50 +689,319 @@ def _health(s: HealthSummary) -> HealthBlock:
 # ---------------------------------------------------------------------------
 
 
-def _notable(
-    duck: duckdb.DuckDBPyConnection,
+@dataclass(frozen=True)
+class _Score:
+    sigma: float | None
+    n_moves: int
+    note: str | None  # why a rankable change has no sigma
+
+
+def _sigma_history(
+    ch: ChangeRow,
+    by_feed: dict[SeriesKey, tuple[ValueRow, ...]],
+    best: dict[str, tuple[ValueRow, ...]],
+    hidden: frozenset[int],
+) -> tuple[tuple[ValueRow, ...], str | None]:
+    """The daily history a move is scored against, and why there is none (T61 review).
+
+    The baseline's own daily series first, so the move and its history share one basis (a
+    Yahoo ``^IRX`` quote against Yahoo's ``^IRX`` closes, Brent's future against its own
+    closes). Failing that, the best-tier daily history of the instrument (an FX pair's 17:00
+    quote has no daily series of its own), except for a quoted yield: the official par yield
+    is another basis, so it is left without sigma and says why.
+    """
+    assert ch.previous is not None
+    own = by_feed.get(series_key(ch.previous), ()) if ch.previous.interval == "1d" else ()
+    own = tuple(r for r in own if r.tier not in hidden)
+    if len(own) > MIN_MOVES:
+        return own, None
+    last = ch.last
+    if ch.family == "yield" and last.interval not in OFFICIAL_INTERVALS:
+        name = f"{source_name(ch.previous.source)} {ch.previous.dataset}"
+        return (), (
+            f"no sigma: fewer than {MIN_MOVES + 1} daily closes of {name} stored, and the "
+            "official yield history measures another basis"
+        )
+    return tuple(r for r in best.get(last.instrument_id, ()) if r.tier not in hidden), None
+
+
+def _scores(
     config: Config,
     changes: Sequence[ChangeRow],
-    summary: HealthSummary,
-    at: datetime,
-) -> tuple[Notable, ...]:
-    cfg = config.checks.anomaly
-    hist = series_all(duck, cfg.window_days * 2, at)
-    moves: list[tuple[float, Notable]] = []
+    by_feed: dict[SeriesKey, tuple[ValueRow, ...]],
+    best: dict[str, tuple[ValueRow, ...]],
+    hidden: frozenset[int],
+) -> dict[str, _Score]:
+    """Sigma of every rankable change: the T20 anomaly check's own scoring, |move| against the
+    mean and sample std of the |daily moves| before it, in the unit the check uses (bp for
+    yields, return otherwise). P-024: only honest moves are scored (``ChangeRow.rankable``)."""
+    window = config.checks.anomaly.window_days
+    out: dict[str, _Score] = {}
     for ch in changes:
-        past = hist.get(ch.last.instrument_id, ())
-        # P-024: only honest moves are scored: a like-for-like baseline and a value new since
-        # the previous brief (``ChangeRow.rankable``); the rest stay in the table with their note
-        if not ch.rankable or ch.previous is None or ch.change is None or not past:
+        if not ch.rankable or ch.previous is None or ch.change is None:
             continue
-        # the T20 anomaly check's own scoring: |move| against the mean and sample std of the
-        # |daily moves| before it, in the unit the check uses (bp for yields, return otherwise)
+        iid = ch.last.instrument_id
+        past, why = _sigma_history(ch, by_feed, best, hidden)
+        if why is not None:
+            out[iid] = _Score(None, 0, why)
+            continue
+        if not past:
+            out[iid] = _Score(None, 0, "no sigma: no daily history stored")
+            continue
         unit = past[-1].unit
         series_moves = daily_moves(np.array([p.value for p in past], dtype=float), unit)
         if past[-1].as_of == ch.last.as_of:
             # the scored move is the series' own last move (official-last yields, rates, FX
             # fixes): leave it out of its baseline, like T20's moves[-(window+1):-1]
             series_moves = series_moves[:-1]
-        prior = series_moves[-cfg.window_days :]
+        prior = series_moves[-window:]
         prior = prior[np.isfinite(prior)]
         last = float(daily_moves(np.array([ch.previous.value, ch.last.value]), unit)[0])
         std = float(prior.std(ddof=1)) if len(prior) > 1 else 0.0
         if len(prior) < MIN_MOVES or not np.isfinite(last) or std < 1e-12:
+            out[iid] = _Score(
+                None, len(prior), f"no sigma: fewer than {MIN_MOVES} earlier daily moves stored"
+            )
             continue
         z = (last - float(prior.mean())) / std
-        if z >= cfg.z_warn:
-            text = (
-                f"{_short(ch.last.instrument_id)} {change_text(ch)} is {z:.1f}σ "
-                f"vs prior {len(prior)} daily moves"
+        out[iid] = _Score(round(z, 2), len(prior), None)
+    return out
+
+
+def _direction(x: float) -> str:
+    return "up" if x > 0 else "down" if x < 0 else "flat"
+
+
+def _movers(config: Config, rows: dict[str, Row], scores: dict[str, _Score]) -> tuple[Mover, ...]:
+    """Rankable changes with sigma at or above the anomaly warn level, largest first."""
+    out: list[Mover] = []
+    for iid, sc in scores.items():
+        row = rows.get(iid)
+        if sc.sigma is None or sc.sigma < config.checks.anomaly.z_warn or row is None:
+            continue
+        ch = row.change
+        assert ch is not None
+        assert ch.change is not None
+        assert row.tier is not None
+        assert row.as_of is not None
+        text = (
+            f"{_short(iid)} {row.change_text} is {sc.sigma:.1f}σ vs prior {sc.n_moves} daily moves"
+        )
+        out.append(
+            Mover(
+                instrument_id=iid,
+                short=_short(iid),
+                name=row.name,
+                sigma=round(sc.sigma, 1),
+                n_moves=sc.n_moves,
+                value_text=row.value_text,
+                change_text=row.change_text,
+                change_value=ch.change,
+                change_unit=ch.change_unit,
+                direction=_direction(ch.change),
+                source=source_name(ch.last.source),
+                tier=row.tier,
+                as_of=row.as_of,
+                as_of_text=row.as_of_text,
+                basis=_basis_text(ch),
+                text=text,
             )
-            moves.append((z, Notable("move", text, ch.last.instrument_id)))
-    ordered = [n for _, n in sorted(moves, key=lambda m: (-m[0], m[1].instrument_id or ""))]
+        )
+    return tuple(
+        sorted(out, key=lambda m: (-(scores[m.instrument_id].sigma or 0.0), m.instrument_id))
+    )
+
+
+def _notable(movers: Sequence[Mover], summary: HealthSummary) -> tuple[Notable, ...]:
+    """The email's notable list: the movers' sentences, then failed or warning cross-checks."""
     crosschecks = [
         Notable("crosscheck", _crosscheck_text(i), i.instrument_id, _ref_label(i))
         for i in summary.issues
         if i.kind == "crosscheck"
     ]
-    return tuple(ordered + crosschecks)
+    return tuple([Notable("move", m.text, m.instrument_id) for m in movers] + crosschecks)
+
+
+# ---------------------------------------------------------------------------
+# the read and Check before using (P-024, T62)
+# ---------------------------------------------------------------------------
+
+
+def _rule_met(row: Row | None, direction: str, min_sigma: float | None,
+              min_change: float | None, change_unit: str | None) -> bool:  # fmt: skip
+    """A regime rule over one market's rankable move (``config.RegimeRule``)."""
+    ch = row.change if row is not None else None
+    if row is None or ch is None or not ch.rankable or ch.change is None:
+        return False
+    if _direction(ch.change) != direction:
+        return False
+    if min_sigma is not None:
+        return row.sigma is not None and row.sigma >= min_sigma
+    assert min_change is not None
+    return ch.change_unit == change_unit and abs(ch.change) >= min_change
+
+
+def _read(brief: BriefSettings, rows: dict[str, Row], n_ranked: int) -> Read:
+    results: list[RuleResult] = []
+    met: dict[str, int] = {}
+    for rs in brief.regime_rules:
+        for rule in rs.rules:
+            ok = _rule_met(
+                rows.get(rule.market), rule.direction, rule.min_sigma, rule.min_change,
+                rule.change_unit,
+            )  # fmt: skip
+            results.append(RuleResult(rs.label, rule.label, rule.market, ok))
+            met[rs.label] = met.get(rs.label, 0) + int(ok)
+    label = brief.read_label(n_ranked, met)
+    hits = [r for r in results if r.met]
+    if label == brief.quiet_label:
+        kind, regime = "quiet", None
+        text = f"{label}. Nothing moved more than usual."
+    elif label == brief.mixed_label:
+        kind, regime = "mixed", None
+        parts = [
+            f"{rs.label} ({', '.join(r.label for r in hits if r.regime == rs.label)})"
+            for rs in brief.regime_rules
+            if met.get(rs.label)
+        ]
+        text = f"{label}. Rules met for " + " and ".join(parts) + "."
+    elif label == brief.unclear_label:
+        kind = "unclear"
+        regime = (
+            max(brief.regime_rules, key=lambda rs: met.get(rs.label, 0)).label if hits else None
+        )
+        noun = "market" if n_ranked == 1 else "markets"
+        text = f"{label}. {n_ranked} {noun} moved more than usual"
+        if hits:
+            need = next(rs.min_met for rs in brief.regime_rules if rs.label == regime)
+            text += f"; {len(hits)} of the {need} {regime} rules needed are met"
+        text += "."
+    else:
+        kind, regime = "regime", label
+        text = f"{label}. " + _sentence([r.label for r in hits if r.regime == label]) + "."
+    tone = "flat"
+    if kind == "regime":
+        first = next(rs for rs in brief.regime_rules if rs.label == label).rules[0]
+        tone = first.direction
+    return Read(label, kind, tone, regime, tuple(results), n_ranked, text)
+
+
+def _sentence(labels: Sequence[str]) -> str:
+    """ "Equity futures down, VIX up and high-yield spreads wider" (first word kept, the rest
+    lower-cased only where they are plain words)."""
+    parts = [labels[0], *(_lower_first(x) for x in labels[1:])] if labels else []
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _lower_first(text: str) -> str:
+    """Lower-case the first word unless it is an acronym or ticker ("VIX up" stays)."""
+    word, _, rest = text.partition(" ")
+    if word[:1].isupper() and word[1:].islower():
+        word = word.lower()
+    return f"{word} {rest}".strip()
+
+
+def _windows_match(a: ChangeRow, b: ChangeRow) -> bool:
+    """Both moves span the same window: the same baseline day and last values of the same ET
+    day within two hours of each other (gold futures quoted at 06:55 against GLD's close the
+    evening before do not match)."""
+    assert a.previous is not None
+    assert b.previous is not None
+    if et_date(a.previous.as_of) != et_date(b.previous.as_of):
+        return False
+    ta, tb = ensure_utc(a.last.as_of), ensure_utc(b.last.as_of)
+    return et_date(ta) == et_date(tb) and abs((ta - tb).total_seconds()) <= 2 * 3600
+
+
+def _close_window(
+    a: ChangeRow, b: ChangeRow, by_feed: dict[SeriesKey, tuple[ValueRow, ...]]
+) -> tuple[float, float, date, date] | None:
+    """Both legs' % moves between the two latest ET dates on which both baseline series have a
+    daily close, and those dates; None when they share fewer than two."""
+    assert a.previous is not None
+    assert b.previous is not None
+    sa = {et_date(r.as_of): r.value for r in by_feed.get(series_key(a.previous), ())}
+    sb = {et_date(r.as_of): r.value for r in by_feed.get(series_key(b.previous), ())}
+    common = sorted(sa.keys() & sb.keys())
+    if len(common) < 2 or not sa[common[-2]] or not sb[common[-2]]:
+        return None
+    d0, d1 = common[-2], common[-1]
+    return (sa[d1] / sa[d0] - 1) * 100, (sb[d1] / sb[d0] - 1) * 100, d0, d1
+
+
+def _pair_caveat(
+    pair: RelatedPair, rows: dict[str, Row], by_feed: dict[SeriesKey, tuple[ValueRow, ...]]
+) -> Caveat | None:
+    """Two related markets whose moves differ by more than ``pair.limit``, compared over one
+    window (``config.RelatedPair``): today's moves when their windows match, else their daily
+    closes over the latest two dates both have; skipped when neither works."""
+    ra, rb = rows.get(pair.pair[0]), rows.get(pair.pair[1])
+    if ra is None or rb is None or ra.change is None or rb.change is None:
+        return None
+    a, b = ra.change, rb.change
+    if not (a.rankable and b.rankable) or a.change is None or b.change is None:
+        return None
+    if a.change_unit != pair.unit or b.change_unit != pair.unit:
+        return None
+    na, nb = _short(pair.pair[0]), _short(pair.pair[1])
+    if _windows_match(a, b):
+        ma, mb = a.change, b.change
+        assert a.previous is not None
+        p = to_et(a.previous.as_of)
+        window = f"since the {p:%a} {p.day} {p:%b} close"
+    else:
+        closes = _close_window(a, b, by_feed)
+        if closes is None:
+            return None
+        ma, mb, d0, d1 = closes
+        window = f"daily closes {d0:%a} {d0.day} {d0:%b} to {d1:%a} {d1.day} {d1:%b}"
+    gap = abs(ma - mb)
+    if gap <= pair.limit:
+        return None
+    sfx = _UNIT_SUFFIX[pair.unit]
+    dec = _UNIT_DECIMALS[pair.unit]
+    text = (
+        f"{signed(gap, dec).lstrip('+')}{sfx} apart ({na} {signed(ma, dec)}{sfx}, "
+        f"{nb} {signed(mb, dec)}{sfx}, {window}); they usually move within "
+        f"{pair.limit:g}{sfx}."
+    )
+    return Caveat("pair", f"{na} vs {nb}", text, pair.pair)
+
+
+def _caveats(
+    config: Config,
+    rows: dict[str, Row],
+    movers: Sequence[Mover],
+    summary: HealthSummary,
+    by_feed: dict[SeriesKey, tuple[ValueRow, ...]],
+) -> tuple[Caveat, ...]:
+    """Check before using (P-024): only items touching what is ranked; the full list of limits
+    and warnings stays on Data health."""
+    ranked = {m.instrument_id for m in movers}
+    members = {g.id: {m for m in (g.proxy, g.exact, g.official) if m} for g in config.groups}
+    out: list[Caveat] = []
+    for i in summary.issues:
+        if i.kind != "crosscheck":
+            continue
+        touched = ({i.instrument_id} if i.instrument_id else set()) | members.get(
+            i.group_id or "", set()
+        )
+        hit = sorted(touched & ranked)
+        if hit:
+            out.append(Caveat("crosscheck", ", ".join(_short(x) for x in hit),
+                              _crosscheck_text(i), tuple(hit)))  # fmt: skip
+    for m in movers:
+        ch = rows[m.instrument_id].change
+        if ch is not None and ch.note:
+            out.append(Caveat("basis", m.short, f"{ch.note[:1].upper()}{ch.note[1:]}.",
+                              (m.instrument_id,)))  # fmt: skip
+    for pair in config.brief.related_pairs:
+        c = _pair_caveat(pair, rows, by_feed)
+        if c is not None:
+            out.append(c)
+    return tuple(out)
 
 
 def _ref_label(i: CheckItem) -> str | None:
@@ -729,7 +1122,10 @@ def _decode(tp: Any, value: Any) -> Any:
         return tuple(_decode(get_args(tp)[0], v) for v in value)
     if isinstance(tp, type) and is_dataclass(tp):
         hints = get_type_hints(tp)
-        return tp(**{f.name: _decode(hints[f.name], value[f.name]) for f in fields(tp)})
+        # a field added later (with a default) may be missing from an older model.json
+        return tp(
+            **{f.name: _decode(hints[f.name], value[f.name]) for f in fields(tp) if f.name in value}
+        )
     if tp is datetime:
         return datetime.fromisoformat(value)
     if tp is date:
@@ -739,12 +1135,16 @@ def _decode(tp: Any, value: Any) -> Any:
 
 __all__ = [
     "BriefModel",
+    "Caveat",
     "Headline",
     "HeadlineItem",
     "HealthBlock",
     "KnownLimit",
+    "Mover",
     "Notable",
+    "Read",
     "Row",
+    "RuleResult",
     "Section",
     "field_label",
 ]

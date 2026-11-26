@@ -105,7 +105,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
-from deskbrief.calendars import ExchangeCalendar, is_business_day, prev_business_day
+from deskbrief.calendars import Calendar, ExchangeCalendar, is_business_day, prev_business_day
 from deskbrief.store.duck import DAILY_CLOSE_FIELDS
 from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et
 
@@ -147,6 +147,15 @@ FX_CLOSE_HHMM = "17:00"
 FX_CLOSE_WINDOW = timedelta(hours=2)
 #: how many weekday closes back an FX baseline is searched (a US holiday stores no quote)
 FX_CLOSE_LOOKBACK = 4
+
+
+#: the business-day calendar of each official daily series (``config.datasets``): a daily value
+#: whose previous stored value is older than the previous business day spans a gap (T61 review)
+_OFFICIAL_CALENDARS: Mapping[tuple[str, str], Calendar] = {
+    ("treasury", "par_curve"): "SIFMA_US",
+    ("fred", "series"): "SIFMA_US",
+    ("ecb", "eurofxref"): "TARGET",
+}
 
 
 @dataclass(frozen=True)
@@ -498,8 +507,7 @@ def overnight_changes(
         fx_quotes.setdefault(r.instrument_id, []).append(r)
     nyse_prev = prev_business_day("XNYS", report_date)
     session = is_business_day("XNYS", report_date)
-    # the previous scheduled brief: the previous XNYS session at this report's ET clock time
-    since = et_to_utc(nyse_prev, f"{to_et(report_time):%H:%M}")
+    since = previous_brief_time(report_date, report_time)
     # what that brief showed, point-in-time on ingested_at (a late print is new once)
     shown = {
         r.instrument_id: r for r in _snapshot(duck, since, nyse_prev, exclude_tiers=exclude_tiers)
@@ -521,6 +529,12 @@ def overnight_changes(
             ch = _official_change(last, history)
         out.append(_ranked(ch, shown.get(last.instrument_id), since))
     return tuple(out)
+
+
+def previous_brief_time(report_date: date, report_time: datetime) -> datetime:
+    """The previous scheduled brief (aware UTC): the previous XNYS session at this report's ET
+    clock time. "New since the previous brief" (P-024) compares with what that brief showed."""
+    return et_to_utc(prev_business_day("XNYS", report_date), f"{to_et(report_time):%H:%M}")
 
 
 def like_for_like(value: ValueRow, baseline: ValueRow) -> bool:
@@ -584,10 +598,32 @@ def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow
             unranked_reason=f"baseline is another series ({prev.source} {prev.dataset} "
             f"{prev.field}), not {ch.last.source} {ch.last.dataset} {ch.last.field}",
         )
-    reason = _not_new(ch.last, shown, since)
+    reason = _not_new(ch.last, shown, since) or _not_after_baseline(ch.last, ch.previous)
     if reason is not None:
         return replace(ch, unranked_reason=reason)
     return replace(ch, rankable=True)
+
+
+def _not_after_baseline(last: ValueRow, prev: ValueRow) -> str | None:
+    """Why ``last`` is not later than its baseline close; None when it is (T61 review).
+
+    A stale quote must never be ranked against a later close. A dated baseline (a daily close,
+    a weekly or monthly value) stands for its whole day, whose close time differs by market, so
+    the value must belong to a later trading day (:func:`_session_day`); an intraday baseline (an
+    FX pair's 17:00 ET quote) must be strictly earlier than the value.
+    """
+    if prev.interval in OFFICIAL_INTERVALS:
+        day, base = _session_day(last), _et(prev)
+        if day > base:
+            return None
+        dated = to_et(last.as_of)
+        when = f"{dated.day} {dated:%b}"
+        if last.interval not in OFFICIAL_INTERVALS:
+            when += f" {dated:%H:%M} ET"
+        return f"value dated {when}, not after its baseline close ({base.day} {base:%b})"
+    if ensure_utc(last.as_of) > ensure_utc(prev.as_of):
+        return None
+    return "value not later than its baseline quote"
 
 
 def _pick_close(last: ValueRow, closes: list[ValueRow]) -> tuple[ValueRow | None, str | None]:
@@ -605,9 +641,20 @@ def _pick_close(last: ValueRow, closes: list[ValueRow]) -> tuple[ValueRow | None
     return prev, f"baseline from {prev.source} {prev.dataset}, not {last.source} {last.dataset}"
 
 
-def _close_change(last: ValueRow, closes: list[ValueRow], basis: str) -> ChangeRow:
+def _close_change(
+    last: ValueRow, closes: list[ValueRow], basis: str, day: date | None = None
+) -> ChangeRow:
     prev, note = _pick_close(last, closes)
-    return _change(last, prev, basis, "ok" if prev else "no_baseline", note)
+    ch = _change(last, prev, basis, "ok" if prev else "no_baseline", note)
+    if prev is None and last.kind == "future":
+        # T61 review: say why a future has no change; it never falls back to another series
+        on = f" for {day:%a} {day.day} {day:%b}" if day is not None else ""
+        ch = replace(
+            ch,
+            note=f"no {source_name(last.source)} daily close stored{on}; a future is never "
+            "compared with another series",
+        )
+    return ch
 
 
 def _daily_closes(history: list[ValueRow], on: date) -> list[ValueRow]:
@@ -617,7 +664,7 @@ def _daily_closes(history: list[ValueRow], on: date) -> list[ValueRow]:
 def _price_change(last: ValueRow, history: list[ValueRow], nyse_prev: date) -> ChangeRow:
     if last.interval == "1d" and _et(last) >= nyse_prev:
         return _change(last, None, BASIS_NYSE_CLOSE, "no_move_yet")
-    return _close_change(last, _daily_closes(history, nyse_prev), BASIS_NYSE_CLOSE)
+    return _close_change(last, _daily_closes(history, nyse_prev), BASIS_NYSE_CLOSE, nyse_prev)
 
 
 def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
@@ -625,7 +672,7 @@ def _off_session_price_change(last: ValueRow, history: list[ValueRow]) -> Change
     # S <= L: the session before S. S > L (a holiday trade): L itself, which is also the
     # session before S, since no session lies between L and the report date.
     base = prev_business_day("XNYS", _et(last))
-    return _close_change(last, _daily_closes(history, base), session_close_basis(base))
+    return _close_change(last, _daily_closes(history, base), session_close_basis(base), base)
 
 
 def _home_session_change(last: ValueRow, history: list[ValueRow], home: HomeExchange) -> ChangeRow:
@@ -639,7 +686,7 @@ def _home_session_change(last: ValueRow, history: list[ValueRow], home: HomeExch
     else:
         local = ensure_utc(last.as_of).astimezone(ZoneInfo(home.tz)).date()
     base = prev_business_day(home.calendar, local)
-    return _close_change(last, _daily_closes(history, base), home.basis)
+    return _close_change(last, _daily_closes(history, base), home.basis, base)
 
 
 def _is_fx_price(row: ValueRow) -> bool:
@@ -745,7 +792,23 @@ def _official_change(last: ValueRow, history: list[ValueRow]) -> ChangeRow:
     elif previous is not None and previous.source != last.source:
         note = f"baseline from {previous.source}, not {last.source}"
     basis = BASIS_WEEKLY if last.interval == "1w" else BASIS_OFFICIAL
-    return _change(last, previous, basis, "ok" if previous else "no_baseline", note)
+    ch = _change(last, previous, basis, "ok" if previous else "no_baseline", note)
+    cal = _OFFICIAL_CALENDARS.get((last.source, last.dataset))
+    if ch.status != "ok" or previous is None or last.interval != "1d" or cal is None:
+        return ch
+    expected = prev_business_day(cal, _et(last))
+    if _et(previous) >= expected:
+        return ch
+    # T61 review: a missing day in an official series is a two-day move, never ranked as one
+    gap = (
+        f"baseline dated {_et(previous).day} {_et(previous):%b}, not the previous session "
+        f"({expected.day} {expected:%b})"
+    )
+    return replace(
+        ch,
+        note=f"{ch.note}; {gap}" if ch.note else gap,
+        unranked_reason="spans more than one session",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +832,39 @@ def series(
 ) -> tuple[ValueRow, ...]:
     """:func:`series_all` for one instrument (empty tuple if it has no data)."""
     return _series(duck, days, at, instrument_id).get(instrument_id, ())
+
+
+#: one daily series of one instrument: (instrument_id, source, dataset, field)
+SeriesKey = tuple[str, str, str, str]
+
+
+def series_key(row: ValueRow) -> SeriesKey:
+    return (row.instrument_id, row.source, row.dataset, row.field)
+
+
+def series_by_feed(
+    duck: duckdb.DuckDBPyConnection, days: int, at: datetime
+) -> dict[SeriesKey, tuple[ValueRow, ...]]:
+    """Daily (``1d``) values of the last ``days`` calendar days, oldest first, per
+    (instrument, source, dataset, field): one value per series and ET date (the latest
+    ingested), point-in-time at ``at``, the current ET date excluded.
+
+    Unlike :func:`series_all` it never mixes sources within a series, so a move can be scored
+    in sigma against the history of its own baseline series (T61 review: a quoted yield's
+    discount basis is not the official par yield's).
+    """
+    at = ensure_utc(at)
+    sql = (
+        f"{_SELECT} WHERE o.as_of <= ? AND o.as_of > ? AND o.interval = '1d' "
+        f"AND o.field IN ({_DAILY_FIELDS_SQL}) AND {_current_day_filter()} "
+        f"QUALIFY row_number() OVER (PARTITION BY o.instrument_id, o.source, o.dataset, "
+        f"o.field, {_ET_DATE} ORDER BY o.ingested_at DESC, o.fetch_id DESC) = 1 "
+        "ORDER BY o.instrument_id, o.source, o.dataset, o.field, o.as_of"
+    )
+    out: dict[SeriesKey, list[ValueRow]] = {}
+    for r in _rows(duck, sql, [at, at, at - timedelta(days=days), et_date(at)]):
+        out.setdefault(series_key(r), []).append(r)
+    return {k: tuple(v) for k, v in out.items()}
 
 
 def _series(

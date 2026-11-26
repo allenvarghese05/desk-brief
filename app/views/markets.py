@@ -27,6 +27,7 @@ range, style or compare change reruns only the hero.
 leaves the variable unset, which means ``hosted``: tier-1 rows are never rendered. Reads only;
 see ``app/components/data.py`` for the read-only connection.
 """
+# ruff: noqa: RUF001  (the sigma sign is intentional output)
 
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ for path in (ROOT, ROOT / "src"):  # `app` is a plain folder; src/ covers a non-
         sys.path.insert(0, str(path))
 
 from app import theme  # noqa: E402
-from app.components import chart, data, instrument, kit, panels, tearsheet, tvchart  # noqa: E402
+from app.components import brief, chart, data, instrument, kit, panels, tearsheet, tvchart  # noqa: E402
 from app.components.values import TIER_NAME  # noqa: E402
 
 from deskbrief.config import Config, load_config  # noqa: E402
@@ -59,7 +60,7 @@ def _config(path: str) -> Config:
     return load_config(path)
 
 
-SEARCH_HINT = "Search: 10y, gold, AAPL"
+SEARCH_HINT = "Search: 10y, gold, AAPL  ( / )"
 HEALTH_PAGE = "pages/4_Data_health.py"  # relative to the router, app/Home.py
 MACRO_PAGE = "pages/2_Macro.py"
 MACRO_LINK = "Yield curve and 2s10s on Macro"
@@ -74,6 +75,25 @@ RNG_KEY, STYLE_KEY = "db-rng", "db-style"
 KEEP_ID, KEEP_RNG, KEEP_STYLE = "db-keep-id", "db-keep-rng", "db-keep-style"
 #: plain session-state key: the watchlist groups the user folded (groups start open)
 KEEP_FOLDED = "db-keep-folded"
+#: plain session-state key: in "Unusual first", the groups the user opened (they start folded)
+KEEP_OPENED = "db-keep-opened"
+#: the watchlist switch (P-024): its widget key and the plain key that survives a page change
+MODE_KEY, KEEP_MODE = "db-wl-mode", "db-keep-mode"
+#: "/" focuses the search field (P-024 keyboard); typing in any field is left alone
+SLASH_JS = """<script>
+(() => {
+  const w = window.parent && window.parent.document ? window.parent : window;
+  if (w.__dbSlash) return;
+  w.__dbSlash = true;
+  w.document.addEventListener("keydown", (e) => {
+    if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target, tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || (t && t.isContentEditable)) return;
+    const box = w.document.querySelector('.st-key-q input');
+    if (box) { e.preventDefault(); box.focus(); box.select(); }
+  });
+})();
+</script>"""
 
 
 def _html(target: object, body: str) -> None:
@@ -146,23 +166,29 @@ def _strip(ov: data.Overview, sel: str) -> None:
             _pick("strip", iid, body, names.get(iid, iid))
 
 
-def _fold(title: str) -> None:
+def _fold(title: str, keep: str = KEEP_FOLDED) -> None:
     """A click on a group header: fold or unfold it (kept for the session)."""
-    folded = set(st.session_state.get(KEEP_FOLDED, ()))
-    folded ^= {title}
-    st.session_state[KEEP_FOLDED] = sorted(folded)
+    toggled = set(st.session_state.get(keep, ()))
+    toggled ^= {title}
+    st.session_state[keep] = sorted(toggled)
 
 
-def _groups(groups: list[panels.WatchGroup], names: dict[str, str], sel: str) -> None:
+def _groups(
+    groups: list[panels.WatchGroup], names: dict[str, str], sel: str, *, start_folded: bool = False
+) -> None:
     """Every group with a header that folds it. A folded group still shows the selected row,
-    so the selection never folds away; groups start open."""
-    folded = set(st.session_state.get(KEEP_FOLDED, ()))
+    so the selection never folds away. Groups start open ("By group") or folded (everything
+    else under "Unusual first", P-024)."""
+    keep = KEEP_OPENED if start_folded else KEEP_FOLDED
+    toggled = set(st.session_state.get(keep, ()))
     for g in groups:
-        is_folded = g.title in folded
+        is_folded = (g.title not in toggled) if start_folded else (g.title in toggled)
         with st.container(key=f"db-pick-grp-{g.key}"):
             _html(st, panels.group_title(g.title, folded=is_folded, count=len(g)))
             verb = "Unfold" if is_folded else "Fold"
-            st.button(f"{verb} {g.title}", key=f"fold-{g.key}", on_click=_fold, args=(g.title,))
+            st.button(
+                f"{verb} {g.title}", key=f"fold-{g.key}", on_click=_fold, args=(g.title, keep)
+            )
         rows = [(i, b) for i, b in g.rows if not is_folded or i == sel]
         for iid, body in rows:
             _pick("wl", iid, body, names.get(iid, iid))
@@ -178,13 +204,45 @@ def _groups(groups: list[panels.WatchGroup], names: dict[str, str], sel: str) ->
                     _pick("wl", iid, body, names.get(iid, iid))
 
 
-def _watchlist(ov: data.Overview, query: str, sel: str) -> None:
+def _mode() -> str:
+    """The watchlist switch (P-024): "Unusual first" by default, kept for the session."""
+    options = (panels.UNUSUAL, panels.BY_GROUP)
+    _restore(MODE_KEY, KEEP_MODE, options, panels.UNUSUAL)
+    with st.container(key="db-wl-switch"):
+        mode = st.segmented_control(
+            "Watchlist order", list(options), key=MODE_KEY, label_visibility="collapsed",
+            on_change=_keep, args=(MODE_KEY, KEEP_MODE),
+        ) or panels.UNUSUAL  # fmt: skip
+    st.session_state[KEEP_MODE] = mode
+    return str(mode)
+
+
+def _watchlist(ov: data.Overview, query: str, sel: str, window: int = 30) -> None:
     names = _names(ov)
-    n_all = sum(len(s.rows) for s in ov.sections)
-    _html(st, panels.label("Watchlist", f"{n_all} instruments"))
+    _html(st, panels.label("Watchlist", f"σ vs last {window} moves"))
+    mode = panels.BY_GROUP if query else _mode()
     _html(st, '<div class="db-wl-head" aria-hidden="true"><i></i><span>Last</span>'
               "<span>Chg</span></div>")  # fmt: skip
     sigs = panels.sigmas(ov)
+    if not query and mode == panels.UNUSUAL:
+        movers = panels.movers_group(ov, sel)
+        since = brief.when(ov.previous_brief)
+        aside = f"since {since} brief" if since else ""
+        _html(
+            st,
+            panels.group_title(f"{movers.title} · {len(movers)}")
+            + (f'<div class="db-note db-wl-since">{escape(aside)}</div>' if aside else ""),
+        )
+        if not movers.rows:
+            _html(st, '<div class="db-empty">Nothing moved more than usual.</div>')
+        for iid, body in movers.rows:
+            _pick("wl", iid, body, names.get(iid, iid))
+        rest = panels.without(ov.sections, movers.ids)
+        n_rest = sum(len(s.rows) for s in rest)
+        _html(st, panels.group_title(f"Everything else · {n_rest}"))
+        groups = panels.watchlist(rest, ov.as_of, sel, sigs=sigs)
+        _groups(groups, names, sel, start_folded=True)
+        return
     if not query:
         _groups(panels.watchlist(ov.sections, ov.as_of, sel, sigs=sigs), names, sel)
         return
@@ -407,7 +465,8 @@ def _notes(config: Config, ov: data.Overview, row: Row, hidden: frozenset[int]) 
 def main() -> None:
     st.set_page_config(page_title="Desk Brief", layout="wide", initial_sidebar_state="collapsed")
     theme.apply()
-    _html(st, panels.HOME_CSS)
+    _html(st, panels.HOME_CSS + brief.BRIEF_CSS)
+    st.html(SLASH_JS, unsafe_allow_javascript=True)
     path = os.environ.get("DESKBRIEF_CONFIG") or str(ROOT / "config.yaml")
     config = _config(path)
     mode = data.resolve_mode(os.environ.get(config.dashboard.mode_env))
@@ -443,16 +502,20 @@ def main() -> None:
     _strip(ov, sel)
 
     rows = _rows(ov)
+    # three aligned panes (P-024). Source order = phone order: the brief, the watchlist, the
+    # selected market; on a wide screen CSS places them watchlist, market, brief
     with st.container(key="db-main"):
-        hero_col, watch_col = st.columns([3, 1], gap="large")
+        brief_col, watch_col, hero_col = st.columns(3, gap="large")
+        with brief_col, st.container(key="db-brief"):
+            _html(st, brief.pane(ov.read, ov.caveats, ov.as_of, ov.previous_brief))
+        with watch_col, st.container(key="db-watch"):
+            _watchlist(ov, query, sel, config.checks.anomaly.window_days)
         with hero_col, st.container(key="db-hero"):
             if sel:
                 _hero(config, ov, rows[sel], hidden)
                 _notes(config, ov, rows[sel], hidden)
             else:
                 _html(st, '<div class="db-empty">No instruments to chart yet.</div>')
-        with watch_col, st.container(key="db-watch"):
-            _watchlist(ov, query, sel)
     if sel:
         with st.container(key="db-values"):
             _tabs(config, ov, rows[sel], hidden)
