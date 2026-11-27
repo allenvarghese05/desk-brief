@@ -79,6 +79,11 @@ _NUMBER_WORDS = re.compile(
     re.IGNORECASE,
 )
 _SIGNS = ("%", "‰", "σ", "Σ", "$", "€", "£", "¥")
+#: a slot with a letter, digit, sign, currency symbol or another slot right against it
+_GLUED = re.compile(
+    r"[\w+\-−–—$€£¥%‰σ}]\{[A-Za-z0-9_]+\.[A-Za-z0-9_]+\}"
+    r"|\{[A-Za-z0-9_]+\.[A-Za-z0-9_]+\}[\w+\-−–—$€£¥%‰σ{]"
+)
 #: direction words, by stem; "widen" and "steepen" mean up, "narrow", "tighten" and "flatten"
 #: mean down (spreads and curves). A change slot must agree with every one in its clause.
 _UP = re.compile(
@@ -91,7 +96,7 @@ _DOWN = re.compile(
     r"\b(?:fell|fall(?:s|en|ing)?|drop\w*|declin\w*|slip\w*|slid(?:e|es|ing)?|narrow\w*|"
     r"tighten\w*|flatten\w*|lower|down|downward\w*|decreas\w*|los(?:s|t|es|ing)|sank|sink\w*|"
     r"sunk|tumbl\w*|plung\w*|slump\w*|retreat\w*|eas(?:e|ed|es|ing)|weaken\w*|soften\w*|"
-    r"dip(?:s|ped|ping)?|shed\w*|sell-?off|slipped)\b",
+    r"dip(?:s|ped|ping)?|shed\w*|slipped)\b",
     re.IGNORECASE,
 )
 _CLAUSE = re.compile(
@@ -268,6 +273,9 @@ def _why_not(
     for m in _SLOT.finditer(sentence):
         if m.group(0) not in table:
             return f"unknown slot {m.group(0)}"
+    glued = _GLUED.search(sentence)
+    if glued:  # "{ES_F.level}k", "-{UST_2Y.level}", "${X}", "{X}{Y}": text that edits a figure
+        return "text touches a slot, so the figure would not be the brief's own"
     own = _own_words(sentence)
     if any(ch.isnumeric() for ch in own):
         return "it writes a number itself instead of a slot"
@@ -276,27 +284,20 @@ def _why_not(
     word = _NUMBER_WORDS.search(own)
     if word:
         return f"number or unit word {word.group(0)!r} outside a slot"
+    problem = _direction_problem(sentence, table, aliases)
+    if problem is not None:
+        return problem
     clauses = [c for c in _CLAUSE.split(sentence) if c.strip()]
     sentence_markets = {table[m.group(0)].instrument_id for m in _SLOT.finditer(sentence)
                         if table[m.group(0)].kind == "name"} | _names_in(own, aliases)  # fmt: skip
-    for i, clause in enumerate(clauses):
+    for clause in clauses:
         used = [table[m.group(0)] for m in _SLOT.finditer(clause)]
-        words = _own_words(clause)
-        up, down = bool(_UP.search(words)), bool(_DOWN.search(words))
-        if not (up or down) and i > 0:  # "rose sharply, {X.chg_1d}": the word comes first
-            before = _own_words(clauses[i - 1])
-            up, down = bool(_UP.search(before)), bool(_DOWN.search(before))
-        named = {s.instrument_id for s in used if s.kind == "name"} | _names_in(words, aliases)
+        named = {s.instrument_id for s in used if s.kind == "name"} | _names_in(
+            _own_words(clause), aliases
+        )
         for sl in used:
             if sl.kind == "name":
                 continue
-            if sl.kind == "chg_1d":
-                if sl.sign == "-" and up:
-                    return f"{sl.key} is a fall, but the clause says it rose"
-                if sl.sign == "+" and down:
-                    return f"{sl.key} is a rise, but the clause says it fell"
-                if sl.sign is None and (up or down):
-                    return f"{sl.key} did not move, but the clause gives it a direction"
             if named and sl.instrument_id not in named:
                 return f"{sl.key} belongs to another market than the one its clause names"
             if not named and sl.instrument_id not in sentence_markets:
@@ -304,8 +305,78 @@ def _why_not(
     return None
 
 
-def _fill(sentence: str, table: Mapping[str, Slot]) -> str:
-    return _SLOT.sub(lambda m: table[m.group(0)].shows, sentence)
+def _blank_slots(text: str) -> str:
+    """``text`` with each slot blanked out, keeping every other character's position."""
+    return _SLOT.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def _mentions(
+    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
+) -> list[tuple[int, str]]:
+    """Where each market is mentioned: its slots (any kind) and its plain names."""
+    out = [(m.start(), table[m.group(0)].instrument_id) for m in _SLOT.finditer(sentence)]
+    own = _blank_slots(sentence)
+    for iid, names in aliases.items():
+        for n in names:
+            pattern = rf"(?<![\w&]){re.escape(n)}(?![\w])"
+            out += [(m.start(), iid) for m in re.finditer(pattern, own, re.IGNORECASE)]
+    return sorted(out)
+
+
+def _claims(
+    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
+) -> list[tuple[str | None, str, str]]:
+    """Each direction word as ``(market it speaks of, "+" or "-", the word)``: the market
+    mentioned nearest before it in the sentence ("S&P futures rose sharply, ..."), else the
+    nearest after it ("Higher VIX ..."); None when the sentence names no market."""
+    own = _blank_slots(sentence)
+    words = [(m.start(), "+", m.group(0)) for m in _UP.finditer(own)]
+    words += [(m.start(), "-", m.group(0)) for m in _DOWN.finditer(own)]
+    mentions = _mentions(sentence, table, aliases)
+    out: list[tuple[str | None, str, str]] = []
+    for pos, sign, word in sorted(words):
+        before = [iid for p, iid in mentions if p < pos]
+        after = [iid for p, iid in mentions if p > pos]
+        out.append((before[-1] if before else (after[0] if after else None), sign, word))
+    return out
+
+
+def _direction_problem(
+    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
+) -> str | None:
+    """Why a direction word in ``sentence`` disagrees with the brief, or None. Every direction
+    claim must be about a market whose change the brief shows, with that change's sign (PR
+    #102 review round 3): "Brent rose" when Brent fell, or "S&P futures rose" in a clause with
+    no slot, is dropped like a wrong number."""
+    for iid, sign, word in _claims(sentence, table, aliases):
+        if iid is None:
+            return f"{word!r} speaks of no market the brief names"
+        change = table.get(f"{{{iid}.chg_1d}}")
+        if change is None:
+            return f"{word!r} gives {iid} a direction, but the brief shows no change for it"
+        if change.sign is None:
+            return f"{word!r} gives {iid} a direction, but it did not move"
+        if change.sign != sign:
+            said = "rose" if sign == "+" else "fell"
+            return f"{word!r} says {iid} {said}, but the brief shows {change.shows}"
+    return None
+
+
+def _fill(
+    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]] | None = None
+) -> str:
+    """The sentence with each slot replaced by the brief's display string. A change whose
+    direction the words already state (and the check has confirmed) loses its sign: "fell
+    1.6%", as in the approved mockup, not "fell" followed by a minus sign."""
+    directed = {iid for iid, _, _ in _claims(sentence, table, aliases or {}) if iid is not None}
+
+    def one(m: re.Match[str]) -> str:
+        sl = table[m.group(0)]
+        if sl.kind == "chg_1d" and sl.instrument_id in directed:
+            return sl.shows.lstrip("+" + _MINUS)
+        return sl.shows
+
+    return _SLOT.sub(one, sentence)
 
 
 def check(
@@ -333,7 +404,7 @@ def check(
         if len(kept) >= limit:
             dropped.append("over the sentence limit")
             continue
-        kept.append(_fill(s, table))
+        kept.append(_fill(s, table, aliases))
         total += sum(1 for m in _SLOT.finditer(s) if table[m.group(0)].kind != "name")
     return Checked(tuple(kept), total, tuple(dropped))
 
@@ -578,7 +649,13 @@ def stored_note(store: StorageBackend, report_date: date) -> Note | None:
             versions.append((int(m[1]), key))
     if not versions:
         return None
-    doc = json.loads(store.get_bytes(max(versions)[1]))
+    return note_of(json.loads(store.get_bytes(max(versions)[1])))
+
+
+def note_of(doc: object) -> Note | None:
+    """The note held by an archived brief's parsed ``model.json``; None when it holds none."""
+    if not isinstance(doc, Mapping):
+        return None
     raw = doc.get("note")
     if not isinstance(raw, Mapping):
         return None
@@ -601,6 +678,7 @@ __all__ = [
     "facts",
     "market_aliases",
     "month_spend",
+    "note_of",
     "record_spend",
     "slots",
     "stored_note",

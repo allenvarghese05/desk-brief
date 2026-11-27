@@ -59,12 +59,15 @@ def _note(note: Note | None) -> str:
     if not note.sentences:
         return f'<p class="db-nonote">No note today: {escape(note.reason or "")}.</p>'
     lines = "".join(f'<p class="db-note-s">{escape(s)}</p>' for s in note.sentences)
-    at = f"Note at {to_et(note.written_at):%H:%M} ET · " if note.written_at else ""
-    return (
-        f"{lines}"
-        f'<p class="db-checked">{at}<span class="db-ok" aria-hidden="true">✓</span> every number '
-        f"checked ({note.n_checked} of {note.n_numbers})</p>"
+    at = f"Note at {to_et(note.written_at):%H:%M} ET" if note.written_at else ""
+    checked = (
+        f'<span class="db-ok" aria-hidden="true">✓</span> every number checked '
+        f"({note.n_checked} of {note.n_numbers})"
+        if note.n_numbers  # a note without figures has nothing to vouch for
+        else ""
     )
+    line = " · ".join(p for p in (at, checked) if p)
+    return f"{lines}" + (f'<p class="db-checked">{line}</p>' if line else "")
 
 
 def _why(read: Read | None, since: str) -> str:

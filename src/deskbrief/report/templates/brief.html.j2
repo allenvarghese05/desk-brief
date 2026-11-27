@@ -24,7 +24,9 @@
 <h1 style="font-size:19px;line-height:1.35;margin:6px 0 0 0;font-weight:bold;"><span style="color:{{ read_color }};">{{ read_label }}</span>{% if read_rest %} {{ read_rest }}{% endif %}</h1>
 {% if note and note.sentences %}
 <p style="margin:10px 0 0 0;">{{ note.sentences|join(" ") }}</p>
+{% if note.n_numbers %}
 <p style="margin:8px 0 0 0;{{ META }}"><span style="color:#0e8a5f;">&#10003;</span> Every number checked ({{ note.n_checked }} of {{ note.n_numbers }}).</p>
+{% endif %}
 {% elif note %}
 <p style="margin:10px 0 0 0;{{ META }}">No note today: {{ note.reason }}.</p>
 {% endif %}

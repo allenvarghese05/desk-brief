@@ -384,10 +384,17 @@ def _golden_model(tmp_path: Path) -> BriefModel:
 
 
 def _golden_with_note(tmp_path: Path) -> BriefModel:
+    """The golden model with a note made by the real slot pipeline (a recorded reply in slots,
+    filled and checked by ``note.check``), not a hand-written sentence (review round 3)."""
+    from deskbrief.report.note import check, hidden_tiers, market_aliases, slots
+
     m = _golden_model(tmp_path)
-    es = next(x for x in m.movers if x.instrument_id == "ES_F")
-    fell = f"S&P futures fell {es.change_text.lstrip(chr(0x2212))}."
-    note = Note((fell,), 1, 1, model="synthetic", written_at=MON_0700)
+    config = fixture_config()
+    hidden = hidden_tiers(config)
+    reply = "{ES_F.name} fell {ES_F.chg_1d}, a {ES_F.sigma} move.\nThe euro barely moved."
+    out = check(reply, slots(m, hidden), config.brief.note.forbidden_words, 5,
+                market_aliases(m, hidden))  # fmt: skip
+    note = Note(out.kept, out.n_numbers, out.n_numbers, model="synthetic", written_at=MON_0700)
     events = (
         Event(MON, "08:30", "Durable goods orders", "FRED", "release", "Oct", "+1.4%"),
         Event(MON, "", "4-Week Bill auction", "Treasury", "auction"),
@@ -420,3 +427,14 @@ def test_excel_about_sheet_adds_the_read_line(model: BriefModel, tmp_path: Path)
     head = next(ref for ref, c in cells.items() if c.value == "read" and ref.startswith("A"))
     assert model.read is not None
     assert str(cells["B" + head[1:]].value).startswith(model.read.text)
+
+
+def test_a_future_quote_after_the_nyse_close_but_before_its_own_is_dated(tmp_path: Path) -> None:
+    """Round 3 N2: near-24-hour futures close at the 17:00 ET break, not at 16:00, so a WTI
+    quote from Friday 16:30 is older than its market's latest close on Monday."""
+    w = World(tmp_path)
+    w.observations([daily("WTI", THU, 72.0, **YH, unit="USD"),
+                    tick("WTI", et(FRI, "16:30"), 71.0, unit="USD")])  # fmt: skip
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
+    assert wti.meta == "delayed, Fri 16:30"

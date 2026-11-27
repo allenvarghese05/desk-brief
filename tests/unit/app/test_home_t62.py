@@ -299,7 +299,7 @@ def test_an_fx_pair_says_why_it_is_not_ranked_on_the_strip_and_watchlist(tmp_pat
     ov = data.overview(data.Snapshot(model, {}), "local", frozenset())
     _, items = panels.strip_items(ov)
     assert NO_DAILY_BASIS_NOTE in dict(items)["EURUSD"]
-    assert any("EURUSD" in k.text and k.kind == "fx_unranked" for k in ov.known_limits)
+    assert any("Euro / US dollar" in k.text and k.kind == "fx_unranked" for k in ov.known_limits)
 
 
 def test_a_proxy_kept_out_of_the_ranking_says_why_beside_its_sigma(tmp_path: Path) -> None:

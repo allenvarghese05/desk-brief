@@ -96,8 +96,8 @@ class Fake:
 
 
 def _es(model: BriefModel) -> str:
-    """The S&P future's change as the brief shows it (the slot fills in this string)."""
-    return next(m for m in model.movers if m.instrument_id == "ES_F").change_text
+    """The S&P future's change as a sentence that says "fell" prints it: without its sign."""
+    return next(m for m in model.movers if m.instrument_id == "ES_F").change_text.lstrip("−")
 
 
 def _write(model: BriefModel, world: World, fake: Fake, **kw: Any) -> Note:
@@ -119,7 +119,9 @@ def test_a_fully_matching_reply_keeps_every_sentence(model: BriefModel, world: W
     n = _write(model, world, fake)
     assert n.reason is None
     assert n.sentences[0] == (
-        f"E-mini S&P 500 futures fell {es.change_text} to {es.value_text}, a {es.sigma:.1f}σ move."
+        # the verb states the direction (checked), so the change is shown without its sign
+        f"E-mini S&P 500 futures fell {es.change_text.lstrip(chr(0x2212))} to {es.value_text}, "
+        f"a {es.sigma:.1f}σ move."
     )
     assert len(n.sentences) == 2
     assert (n.n_checked, n.n_numbers) == (4, 4)  # value slots filled
@@ -260,7 +262,9 @@ def kept(text: str) -> tuple[str, ...]:
 
 def test_slots_are_filled_with_the_briefs_own_strings() -> None:
     out = check("{ES_F.name} fell {ES_F.chg_1d}, a {ES_F.sigma} move.", TABLE, WORDS, 5, ALIASES)
-    assert out.kept == ("S&P futures fell −1.6%, a 3.5σ move.",)
+    assert out.kept == ("S&P futures fell 1.6%, a 3.5σ move.",)  # "fell" says the sign
+    plain = check("{ES_F.name} was at {ES_F.chg_1d}.", TABLE, WORDS, 5, ALIASES)
+    assert plain.kept == ("S&P futures was at −1.6%.",)  # no direction word: the sign stays
     assert out.n_numbers == 2  # value slots, not name slots
 
 
@@ -373,7 +377,7 @@ def test_market_names_come_from_the_brief_not_the_models_digits() -> None:
     chg = Slot("{UST_2Y.chg_1d}", "UST_2Y", "chg_1d", "−2bp", "-")
     table = {name.key: name, chg.key: chg}
     out = check("{UST_2Y.name} fell {UST_2Y.chg_1d}.", table, (), 5)
-    assert out.kept == ("US 2-year Treasury yield fell −2bp.",)  # the digits are the brief's
+    assert out.kept == ("US 2-year Treasury yield fell 2bp.",)  # the digits are the brief's
     assert check("Two-year yields fell {UST_2Y.chg_1d}.", table, (), 5).kept == ()
 
 
@@ -490,9 +494,9 @@ def test_the_morning_report_step_writes_the_note(monkeypatch: pytest.MonkeyPatch
 def test_slots_cover_the_facts_and_say_what_they_show(model: BriefModel) -> None:
     table = slots(model, {1})
     es = table["{ES_F.chg_1d}"]
-    assert (es.shows, es.sign, es.kind) == (_es(model), "-", "chg_1d")
+    assert (es.shows.lstrip("−"), es.sign, es.kind) == (_es(model), "-", "chg_1d")
     payload = facts(model, {1})
-    assert {"slot": "{ES_F.chg_1d}", "market": "ES_F", "shows": _es(model),
+    assert {"slot": "{ES_F.chg_1d}", "market": "ES_F", "shows": es.shows,
             "what": es.what} in payload["slots"]  # fmt: skip
 
 
@@ -525,3 +529,47 @@ def test_configuration_states_are_silent_to_the_reader() -> None:
     assert not Note(reason="the note is turned off in config").shown
     assert Note(reason="the API timed out").shown
     assert Note(("Kept.",), 0, 0).shown
+
+
+def test_a_direction_claim_about_a_market_must_match_its_change() -> None:
+    """Round 3: direction words are tied to the market they speak of, slot or no slot."""
+    assert kept("Brent rose overnight.") == ()  # no change for Brent in this table
+    assert kept("{WTI.name} fell {WTI.chg_1d} and S&P futures rose.") == ()  # S&P fell
+    assert kept("S&P futures rose overnight.") == ()
+    assert kept("S&P futures fell overnight.")
+    assert kept("{ES_F.name} fell {ES_F.chg_1d}, with high-yield spreads wider.")
+    assert kept("The market rose.") == ()  # a direction about no market the brief names
+    assert kept("A sell-off hit stocks.")  # a noun, not a direction claim
+
+
+def test_no_figures_means_no_checked_line(model: BriefModel) -> None:
+    from dataclasses import replace
+
+    from deskbrief.report.html import render_html, render_text
+
+    worded = replace(model, note=Note(("S&P futures fell overnight.",), 0, 0, model="m"))
+    assert "Every number checked" not in render_html(worded)
+    assert "Every number checked" not in render_text(worded)
+    assert "S&amp;P futures fell overnight." in render_html(worded)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "{ES_F.name} was at {ES_F.level}k.",  # a letter glued on: a thousandfold claim
+        "{ES_F.name} was at -{ES_F.level}.",  # a sign glued on
+        "{ES_F.name} was at ${ES_F.level}.",  # a currency symbol glued on
+        "{ES_F.name} fell {ES_F.chg_1d}{ES_F.chg_1d}.",  # two slots glued together
+        "{ES_F.name} fell x{ES_F.chg_1d}.",
+    ],
+)
+def test_text_glued_to_a_slot_drops_the_sentence(sentence: str) -> None:
+    assert kept(sentence) == ()
+
+
+def test_plain_forecasts_are_forbidden(world: World) -> None:
+    words = world.config.brief.note.forbidden_words
+    for sentence in ("S&P futures will fall.", "Yields are headed lower.",
+                     "Oil is on course for a gain.", "Gold is set for a rise.",
+                     "The euro is poised to rally."):  # fmt: skip
+        assert check(sentence, TABLE, words, 5, ALIASES).kept == (), sentence

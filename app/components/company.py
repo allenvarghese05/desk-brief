@@ -80,7 +80,12 @@ def section_html(co: CompanyFilings | None, insider_days: int, *, listed: bool =
             f'<section class="db-co">{head}<p class="db-empty">{UNREADABLE} from the store just '
             "now; the rest of the page is unaffected.</p></section>"
         )
-    if co.latest_filing is None and not co.insiders.trades and not co.holders:
+    if (
+        co.latest_filing is None
+        and not co.insiders.trades
+        and not co.holders
+        and not co.insiders.n_ambiguous  # the "check" flag is never hidden by the empty state
+    ):
         why = (
             "Filings come from SEC EDGAR when the source is turned on."
             if listed

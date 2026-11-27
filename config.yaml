@@ -616,4 +616,5 @@ brief:
     # advice and predictions, then hedged forecasts (PR #102 review); matched as word stems
     forbidden_words: [buy, sell, target, price target, will rise, will fall, should, recommend,
                       forecast, predict, expect, outperform, underperform, overweight, underweight,
-                      likely, could, may, might, poised, set to, on track, probabl, bound to]
+                      likely, could, may, might, poised, set to, on track, probabl, bound to,
+                      will, headed, on course, set for]

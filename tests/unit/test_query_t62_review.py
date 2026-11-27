@@ -113,11 +113,42 @@ def test_a_close_the_previous_brief_already_had_is_not_new_again(tmp_path: Path)
             daily("UST_10Y", FRI, 4.05, unit="pct", **YH),
             tick("UST_10Y", et(MON, "14:50"), 4.14, unit="pct"),
             daily("UST_10Y", MON, 4.15, unit="pct", ingested_at=et(TUE, "05:00"), **YH),
+            # review round 3: Yahoo's ten-day window stores Monday's close again on Tuesday's
+            # EOD run, so its latest copy is newer than Tuesday's brief; it is still not new
+            daily("UST_10Y", MON, 4.15, unit="pct", ingested_at=et(TUE, "18:00"), **YH),
         ]
     )
     assert change(w, "UST_10Y", TUE, "06:15").rankable
     ch = change(w, "UST_10Y", wed, "06:15")
     assert not ch.rankable
+    assert ch.unranked_reason is not None
+    assert "not new since the previous brief" in ch.unranked_reason
+
+
+def test_a_close_is_ranked_once_across_a_sifma_holiday(tmp_path: Path) -> None:
+    # review round 3, R3-1: Veterans Day (Wed 11 Nov 2026) is an NYSE session with SIFMA shut,
+    # so a quoted yield has no print that day. Tuesday's close (after Tuesday's pre-market print,
+    # first stored Wed 06:00, stored again Wed 18:00 and Thu 06:00) is new on Wednesday only
+    tue, wed, thu = date(2026, 11, 10), date(2026, 11, 11), date(2026, 11, 12)
+    w = World(tmp_path)
+    w.observations(
+        [
+            daily("UST_10Y", date(2026, 11, 9), 4.05, unit="pct", **YH),
+            tick("UST_10Y", et(tue, "06:10"), 4.06, unit="pct"),
+            tick("UST_10Y", et(tue, "14:50"), 4.14, unit="pct"),
+            *(
+                daily("UST_10Y", tue, 4.15, unit="pct", ingested_at=at, **YH)
+                for at in (et(wed, "06:00"), et(wed, "18:00"), et(thu, "06:00"))
+            ),
+        ]
+    )
+    first = change(w, "UST_10Y", wed, "06:15")
+    assert (first.last.interval, first.rankable) == ("1d", True)
+    again = change(w, "UST_10Y", thu, "06:15")
+    assert again.last.interval == "1d"
+    assert not again.rankable
+    assert again.unranked_reason is not None
+    assert "not new since the previous brief (11 Nov 06:15 ET)" in again.unranked_reason
 
 
 def test_a_quoted_yields_close_after_its_premarket_print_ranks_the_next_morning(

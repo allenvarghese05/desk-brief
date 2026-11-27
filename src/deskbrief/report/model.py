@@ -303,14 +303,15 @@ NOTE_SILENT_REASONS = frozenset({NOTE_NO_KEY, NOTE_OFF})
 class Note:
     """The morning note (P-024, card T66), stored with the brief so no reader calls the API.
 
-    ``sentences`` survived the check: every number in them matched a value in the model within
-    its display rounding, and none holds a forbidden word. With no sentence (no key, an API
-    error, a timeout, the spend cap, or nothing surviving) ``reason`` says why, in words a
-    reader sees after "No note today: "."""
+    ``sentences`` survived ``report.note.check``: the model wrote every figure as a slot, which
+    was filled with the brief's own display string, and no sentence holds a number of its own, a
+    forbidden word, or a direction or market that disagrees with the brief. With no sentence (no
+    key, an API error, a timeout, the spend cap, or nothing surviving) ``reason`` says why, in
+    words a reader sees after "No note today: "."""
 
     sentences: tuple[str, ...] = ()
-    n_checked: int = 0  # numbers checked in the kept sentences
-    n_numbers: int = 0  # numbers in the kept sentences (equal to n_checked when shown)
+    n_checked: int = 0  # value slots filled in the kept sentences
+    n_numbers: int = 0  # the same count (kept for the badge's "n of n"; 0 hides the badge)
     reason: str | None = None
     dropped: tuple[str, ...] = ()  # why each dropped sentence went (logged, never shown)
     model: str = ""
@@ -429,7 +430,15 @@ class BriefModel:
             for i in config.instruments
         }
         hidden = frozenset(exclude_tiers)
-        by_feed = series_by_feed(duck, config.checks.anomaly.window_days * 2, report_time)
+        # only the series a move is scored against: each change's own daily baseline series
+        needed = {
+            series_key(c.previous)
+            for c in changes.values()
+            if c.previous is not None and c.previous.interval == "1d"
+        }
+        by_feed = series_by_feed(
+            duck, config.checks.anomaly.window_days * 2, report_time, keys=needed
+        )
         scores = _scores(config, list(changes.values()), by_feed, hidden)
         for iid, sc in scores.items():
             rows[iid] = replace(rows[iid], sigma=sc.sigma, sigma_note=sc.note)
@@ -1237,13 +1246,19 @@ def _underlying(config: Config) -> dict[str, tuple[str, ...]]:
     return {k: tuple(dict.fromkeys(v)) for k, v in out.items()}
 
 
+#: near-24-hour futures (equity index, energy, metals) close their trading day at the daily
+#: 17:00 ET break, not at the NYSE's 16:00 (PR #102 review round 3)
+FUTURES_CLOSE_HHMM = "17:00"
+
+
 def _latest_close(row: Row, at: datetime) -> datetime | None:
     """The latest close of ``row``'s own market at or before ``at`` (aware UTC): a foreign
-    index's exchange close, an FX pair's New York 17:00, else the NYSE close (early closes
-    honoured). None when none is found within two weeks."""
+    index's exchange close, an FX pair's New York 17:00, a future's 17:00 ET daily break, else
+    the NYSE close (early closes honoured). None when none is found within two weeks."""
     at = ensure_utc(at)
     home = HOME_EXCHANGES.get(row.instrument_id)
     is_fx = row.change is not None and row.change.last.kind == "fx"
+    is_future = row.change is not None and row.change.last.kind == "future"
     d = to_et(at).date() if home is None else at.astimezone(ZoneInfo(home.tz)).date()
     for _ in range(14):
         close: datetime | None
@@ -1255,6 +1270,8 @@ def _latest_close(row: Row, at: datetime) -> datetime | None:
             )
         elif is_fx:
             close = et_to_utc(d, FX_CLOSE_HHMM) if d.weekday() < 5 else None
+        elif is_future:  # near-24-hour futures: the session ends at the daily 17:00 ET break
+            close = et_to_utc(d, FUTURES_CLOSE_HHMM) if d.weekday() < 5 else None
         else:
             bounds = session_bounds_utc(d)
             close = bounds[1] if bounds is not None else None
@@ -1387,7 +1404,8 @@ def _known_limits(
                 + ", ".join(weekly),
             )
         )
-    unranked = [r.instrument_id for r in rows.values() if r.sigma_note == NO_DAILY_BASIS_NOTE]
+    # display names, as the other limits use (PR #102 review round 3)
+    unranked = [r.name for r in rows.values() if r.sigma_note == NO_DAILY_BASIS_NOTE]
     if unranked:
         out.append(
             KnownLimit(

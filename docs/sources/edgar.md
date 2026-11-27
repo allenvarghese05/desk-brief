@@ -44,9 +44,13 @@ request's status and error and writes no rows. One exception: a 404 on a documen
 document does not hold back a company every day. Each accession is still written whole or not
 at all: a skipped Form 4 gets no rows, and a holder with a skipped filing in its latest or
 previous 13F period gets no rows that run. A Form 4/A whose possible original was skipped that
-run (a Form 4 filed on its `dateOfOriginalSubmission`) is skipped too, unless it still matches its
-original exactly (logged `edgar.amendment_skipped`): written now, it would name its original less
-surely than the stored row does, and the reader would count both. A 404 on the submissions JSON,
+run is skipped too (logged `edgar.amendment_skipped`). A possible original is any Form 4 filed no
+later than the amendment, on its `dateOfOriginalSubmission` or with the same `reportDate` (the
+Form 4's period): the same rule that matches an original, without the owner, who is named in the
+missing document. Written now, the amendment could match another candidate or none, the stored row
+naming the right one would be replaced, and the reader would count both. The reader also keeps
+only the latest of several unmatched amendments by one owner with the same candidates, and the
+Company section's "check" flag counts every one of them. A 404 on the submissions JSON,
 and any 5xx or 429,
 still fail the whole fetch. The body stored in `raw/` is a JSON bundle of
 every document read (`bundle: edgar-bundle/1`), parsed purely by `parse_table`. 13F information

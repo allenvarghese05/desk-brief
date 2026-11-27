@@ -522,16 +522,12 @@ class EdgarSource:
             if filing.form == "4/A":
                 amends, candidates = _form4_original(filing, form4, originals)
                 missing = _skipped_originals(filing, form4, filings, skipped or set())
-                strict = (
-                    amends is not None
-                    and form4.original_submission is not None
-                    and by_acc[amends].filed == form4.original_submission
-                )
-                if missing and not strict:
-                    # PR #102 review B3: a Form 4 that could be its original was not readable
-                    # this run (404). Writing the amendment now would match it more weakly
-                    # than the stored row, which names the original; skip it, so the stored
-                    # rows stay current and nothing is counted twice.
+                if missing:
+                    # PR #102 review B3-B5: a Form 4 that could be its original was not
+                    # readable this run (404). Written now, the amendment could match another
+                    # candidate or none, while the stored row names the right one; skip it, so
+                    # the stored rows stay current and nothing is counted twice. Costs at most
+                    # a run's delay in refreshing the amendment.
                     get_logger().warning(
                         "edgar.amendment_skipped",
                         accession=filing.accession,
@@ -970,8 +966,10 @@ def _skipped_originals(
     filing: Filing, form4: Form4, filings: list[Filing], skipped: set[str]
 ) -> list[str]:
     """Form 4s skipped this run (their document answered 404) that could be ``filing``'s
-    original: filed on its ``dateOfOriginalSubmission``, or, when it gives none, filed no later
-    than the amendment. The owner cannot be checked without the document, so this errs wide."""
+    original, by the candidate rule of :func:`_form4_original` without its owner test (the
+    owner is in the missing document): filed no later than the amendment, and on its
+    ``dateOfOriginalSubmission`` or with the same period (the submissions ``reportDate`` is the
+    Form 4's ``periodOfReport``); with no original date given, any filed no later than it."""
     on_date = form4.original_submission
     return sorted(
         f.accession
@@ -979,7 +977,12 @@ def _skipped_originals(
         if f.accession in skipped
         and f.form == "4"
         and f.accession != filing.accession
-        and (f.filed == on_date if on_date is not None else f.filed <= filing.filed)
+        and f.filed <= filing.filed
+        and (
+            on_date is None
+            or f.filed == on_date
+            or (form4.period is not None and f.period == form4.period)
+        )
     )
 
 

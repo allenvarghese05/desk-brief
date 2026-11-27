@@ -428,7 +428,10 @@ def test_an_fx_move_has_no_sigma_from_another_basis(tmp_path: Path) -> None:
     m = build(world(tmp_path / "again", rows))
     snap = next(x for g in m.snapshot for x in g.rows if x.instrument_id == "EURUSD")
     assert snap.meta.endswith(NO_DAILY_BASIS_NOTE)
-    assert any(k.kind == "fx_unranked" and "EURUSD" in k.text for k in m.known_limits)
+    assert any(
+        k.kind == "fx_unranked" and "Euro / US dollar" in k.text and "EURUSD" not in k.text
+        for k in m.known_limits
+    )
 
 
 def test_the_pair_fallback_uses_only_the_latest_session(tmp_path: Path) -> None:

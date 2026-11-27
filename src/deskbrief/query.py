@@ -551,6 +551,20 @@ def overnight_changes(
         seen = shown.get(iid)
         if seen is None or _session_day(seen) <= nyse_prev:
             shown[iid] = bar
+    # a close after a print that brief showed is new only if it was not yet stored by then: the
+    # earliest stored copy decides, since Yahoo stores its last ten days again on every run
+    # (review round 3); looked up only for the few closes that reach that test
+    first = _first_stored(
+        duck,
+        [
+            r
+            for r in last_rows
+            if (seen := shown.get(r.instrument_id)) is not None
+            and _session_day(r) == _session_day(seen)
+            and _close_after_shown_print(r, seen)
+        ],
+        report_time,
+    )
     out: list[ChangeRow] = []
     for last in last_rows:
         history = by_inst.get(last.instrument_id, [])
@@ -572,7 +586,7 @@ def overnight_changes(
             and _session_day(last) < report_date
         ):
             ch = _home_close_missing(ch, home, report_date)
-        out.append(_ranked(ch, shown.get(last.instrument_id), since))
+        out.append(_ranked(ch, shown.get(last.instrument_id), since, first))
     return tuple(out)
 
 
@@ -666,11 +680,13 @@ def _finished_home_bars(
     tier_sql, tier_params = _tier_filter(exclude_tiers)
     marks = ", ".join("?" for _ in ids)
     sql = (
-        f"{_SELECT} WHERE o.as_of <= ? AND o.interval = '1d' AND o.field = 'close' "
-        f"AND o.instrument_id IN ({marks}) AND {_ET_DATE} = ?{tier_sql} "
+        f"{_SELECT} WHERE o.as_of <= ? AND o.as_of > ? AND o.interval = '1d' "
+        f"AND o.field = 'close' AND o.instrument_id IN ({marks}) AND {_ET_DATE} = ?{tier_sql} "
         f"QUALIFY row_number() OVER (PARTITION BY o.instrument_id ORDER BY {_ORDER}) = 1"
     )
-    rows = _rows(duck, sql, [at, at, *ids, report_date, *tier_params])
+    # the as_of floor only narrows the scan: a bar dated report_date is stamped within a day of it
+    floor = et_to_utc(report_date, "00:00") - timedelta(days=1)
+    rows = _rows(duck, sql, [at, at, floor, *ids, report_date, *tier_params])
     return {r.instrument_id: r for r in rows}
 
 
@@ -693,7 +709,9 @@ def _session_day(row: ValueRow) -> date:
     return ensure_utc(row.as_of).astimezone(ZoneInfo(home.tz)).date()
 
 
-def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | None:
+def _not_new(
+    last: ValueRow, shown: ValueRow | None, since: datetime, first: FirstStored
+) -> str | None:
     """Why ``last`` is not new since the previous brief, which showed ``shown``; None if new.
 
     P-024 and the planner's ruling on T61. ``shown`` is that brief's own value, point-in-time on
@@ -718,7 +736,11 @@ def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | N
         and ensure_utc(last.as_of) > ensure_utc(shown.as_of)
     ):
         return None
-    if day == shown_day and _close_after_shown_print(last, shown, since):
+    if (
+        day == shown_day
+        and _close_after_shown_print(last, shown)
+        and ensure_utc(first.get(_version_key(last), last.ingested_at)) > ensure_utc(since)
+    ):
         return None
     dated = to_et(last.as_of)
     text = f"{dated.day} {dated:%b}"
@@ -727,22 +749,66 @@ def _not_new(last: ValueRow, shown: ValueRow | None, since: datetime) -> str | N
     return f"value dated {text}, not new since the previous brief ({when})"
 
 
-def _close_after_shown_print(last: ValueRow, shown: ValueRow, since: datetime) -> bool:
-    """True when ``last`` is its session's daily close, first stored after the previous brief,
-    and that brief showed only an earlier intraday print of the same session (PR #102 review
-    round 2: a Friday pre-market quote in Friday's brief never makes Friday's close old news on
-    Saturday, an XNYS holiday morning, or for a quoted yield the next morning). The close
-    comes after any print taken before it, so it is new and measured close to close."""
+def _close_after_shown_print(last: ValueRow, shown: ValueRow) -> bool:
+    """True when ``last`` is its session's daily close and the previous brief showed only an
+    earlier intraday print of the same session (PR #102 review round 2: a Friday pre-market
+    quote in Friday's brief never makes Friday's close old news on Saturday, an XNYS holiday
+    morning, or for a quoted yield the next morning). The close comes after any print taken
+    before it, so it is new and measured close to close, provided that brief could not see it:
+    :func:`_not_new` also asks that the close's earliest stored copy (:func:`_first_stored`)
+    came after the brief (review round 3)."""
     return (
         last.interval == "1d"
         and last.field == "close"
         and shown.interval not in OFFICIAL_INTERVALS
         and f"{to_et(shown.as_of):%H:%M}" < US_CLOSE_HHMM
-        and ensure_utc(last.ingested_at) > ensure_utc(since)
     )
 
 
-def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow:
+#: one stored value's natural key: (instrument_id, source, dataset, field, interval, as_of)
+VersionKey = tuple[str, str, str, str, str, datetime]
+#: the earliest ``ingested_at`` of each version key looked up
+FirstStored = dict[VersionKey, datetime]
+
+
+def _version_key(row: ValueRow) -> VersionKey:
+    return (row.instrument_id, row.source, row.dataset, row.field, row.interval,
+            ensure_utc(row.as_of))  # fmt: skip
+
+
+def _first_stored(
+    duck: duckdb.DuckDBPyConnection, rows: Sequence[ValueRow], at: datetime
+) -> FirstStored:
+    """When each of ``rows`` was first stored (its earliest ``ingested_at`` up to ``at``).
+
+    ``obs_pit`` gives the latest stored copy, and Yahoo's history jobs store their last ten days
+    again on every run, so only the earliest copy says what an earlier brief could see (PR #102
+    review round 3). One small query, and none when ``rows`` is empty."""
+    if not rows:
+        return {}
+    ids = sorted({r.instrument_id for r in rows})
+    stamps = sorted({ensure_utc(r.as_of) for r in rows})
+    id_marks = ", ".join("?" for _ in ids)
+    as_of_marks = ", ".join("?" for _ in stamps)
+    sql = (  # placeholders only; every value is a bound parameter
+        "SELECT instrument_id, source, dataset, field, interval, as_of, min(ingested_at) "  # noqa: S608
+        f"FROM obs_all WHERE ingested_at <= ? AND instrument_id IN ({id_marks}) "
+        f"AND as_of IN ({as_of_marks}) GROUP BY ALL"
+    )
+    wanted = {_version_key(r) for r in rows}
+    out: FirstStored = {}
+    for iid, src, ds, fld, itv, as_of, first in duck.execute(
+        sql, [ensure_utc(at), *ids, *stamps]
+    ).fetchall():
+        key = (iid, src, ds, fld, itv, ensure_utc(as_of))
+        if key in wanted:
+            out[key] = first
+    return out
+
+
+def _ranked(
+    ch: ChangeRow, shown: ValueRow | None, since: datetime, first: FirstStored
+) -> ChangeRow:
     if ch.status != "ok" or ch.previous is None or ch.unranked_reason is not None:
         return ch  # a builder already said why it may not rank (a move spanning two periods)
     if not like_for_like(ch.last, ch.previous):
@@ -752,7 +818,7 @@ def _ranked(ch: ChangeRow, shown: ValueRow | None, since: datetime) -> ChangeRow
             unranked_reason=f"baseline is another series ({prev.source} {prev.dataset} "
             f"{prev.field}), not {ch.last.source} {ch.last.dataset} {ch.last.field}",
         )
-    reason = _not_new(ch.last, shown, since) or _not_after_baseline(ch.last, ch.previous)
+    reason = _not_new(ch.last, shown, since, first) or _not_after_baseline(ch.last, ch.previous)
     if reason is not None:
         return replace(ch, unranked_reason=reason)
     return replace(ch, rankable=True)
@@ -1005,7 +1071,10 @@ def series_key(row: ValueRow) -> SeriesKey:
 
 
 def series_by_feed(
-    duck: duckdb.DuckDBPyConnection, days: int, at: datetime
+    duck: duckdb.DuckDBPyConnection,
+    days: int,
+    at: datetime,
+    keys: Collection[SeriesKey] | None = None,
 ) -> dict[SeriesKey, tuple[ValueRow, ...]]:
     """Daily (``1d``) values of the last ``days`` calendar days, oldest first, per
     (instrument, source, dataset, field): one value per series and ET date (the latest
@@ -1013,19 +1082,38 @@ def series_by_feed(
 
     Unlike :func:`series_all` it never mixes sources within a series, so a move can be scored
     in sigma against the history of its own baseline series (T61 review: a quoted yield's
-    discount basis is not the official par yield's).
+    discount basis is not the official par yield's). ``keys`` limits the read to those series
+    (the brief needs only each change's own baseline series: PR #102 review round 3 timing);
+    None reads every series.
     """
     at = ensure_utc(at)
+    params: list[Any] = [at, at, at - timedelta(days=days), et_date(at)]
+    only = ""
+    if keys is not None:
+        if not keys:
+            return {}
+        ids = sorted({k[0] for k in keys})
+        sources = sorted({k[1] for k in keys})
+        datasets = sorted({k[2] for k in keys})
+        only = (
+            f" AND o.instrument_id IN ({', '.join('?' for _ in ids)})"
+            f" AND o.source IN ({', '.join('?' for _ in sources)})"
+            f" AND o.dataset IN ({', '.join('?' for _ in datasets)})"
+        )
+        params += [*ids, *sources, *datasets]
     sql = (
         f"{_SELECT} WHERE o.as_of <= ? AND o.as_of > ? AND o.interval = '1d' "
-        f"AND o.field IN ({_DAILY_FIELDS_SQL}) AND {_current_day_filter()} "
+        f"AND o.field IN ({_DAILY_FIELDS_SQL}) AND {_current_day_filter()}{only} "
         f"QUALIFY row_number() OVER (PARTITION BY o.instrument_id, o.source, o.dataset, "
         f"o.field, {_ET_DATE} ORDER BY o.ingested_at DESC, o.fetch_id DESC) = 1 "
         "ORDER BY o.instrument_id, o.source, o.dataset, o.field, o.as_of"
     )
+    wanted = None if keys is None else set(keys)
     out: dict[SeriesKey, list[ValueRow]] = {}
-    for r in _rows(duck, sql, [at, at, at - timedelta(days=days), et_date(at)]):
-        out.setdefault(series_key(r), []).append(r)
+    for r in _rows(duck, sql, params):
+        key = series_key(r)
+        if wanted is None or key in wanted:
+            out.setdefault(key, []).append(r)
     return {k: tuple(v) for k, v in out.items()}
 
 
@@ -1575,7 +1663,8 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
     A Form 4/A that the writer could not match to exactly one original carries
     ``amendment_unmatched`` and ``amends_candidates`` in its seq 0 ``details_json``
     (``sources/edgar.py``): every candidate original is dropped, so the amendment is counted
-    alone and never next to its original (PR #102 review).
+    alone and never next to its original (PR #102 review). Of several such amendments by one
+    owner with the same candidates, only the latest is kept: they may restate one original.
     """
     if filings.empty:
         return filings
@@ -1588,10 +1677,21 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
         )
         drop.update((inst, acc) for _, acc, inst in ranked[1:])
     unmatched = filings[(filings["seq"] == 0) & filings["amends_accession"].isna()]
-    for inst, details in zip(unmatched["instrument_id"], unmatched["details_json"], strict=True):
+    # unmatched amendments of one owner with the same candidate set may restate the same
+    # original: keep only the latest (filed date, then accession), never two (review B6)
+    groups: dict[tuple[str, str, frozenset[str]], list[tuple[date, str]]] = {}
+    for inst, acc, filed, party, details in zip(
+        unmatched["instrument_id"], unmatched["accession"], unmatched["filed_date"],
+        unmatched["party_cik"], unmatched["details_json"], strict=True,
+    ):  # fmt: skip
         info = json.loads(details) if isinstance(details, str) and details else {}
         if isinstance(info, dict) and info.get("amendment_unmatched"):
-            drop.update((str(inst), str(acc)) for acc in info.get("amends_candidates") or ())
+            candidates = frozenset(str(c) for c in info.get("amends_candidates") or ())
+            drop.update((str(inst), c) for c in candidates)
+            owner = str(_opt(party) or "")
+            groups.setdefault((str(inst), owner, candidates), []).append((filed, str(acc)))
+    for (inst, _, _), same in groups.items():
+        drop.update((inst, acc) for _, acc in sorted(same, reverse=True)[1:])
     if not drop:
         return filings
     keep = [
@@ -1726,8 +1826,11 @@ def company_filings_from_frame(
     (:func:`holder_period_is_stale`), largest change first.
     """
     known = _known_at(filings, "ingested_at", now)
-    cur = latest_amendments_only(current_rows("filings", known))
+    live = current_rows("filings", known)
+    cur = latest_amendments_only(live)
     rows = cur[cur["instrument_id"] == instrument_id] if not cur.empty else cur
+    # every ambiguous amendment is counted for the flag, also those the rule above left out
+    mine = live[live["instrument_id"] == instrument_id] if not live.empty else live
     today = et_date(now)
     since = today - timedelta(days=insider_days)
     latest: FilingRef | None = None
@@ -1744,11 +1847,13 @@ def company_filings_from_frame(
                 period=_opt(top["period"]),
                 url=str(top["url"]),
             )
+    ambiguous = _ambiguous_amendments(mine, since, today) if not mine.empty else 0
     if rows.empty:
-        insiders = InsiderSummary(since, (), 0, 0, 0.0, 0.0, 0.0, 0, 0)
+        insiders = InsiderSummary(since, (), 0, 0, 0.0, 0.0, 0.0, 0, 0, ambiguous)
         return CompanyFilings(instrument_id, latest, insiders, None, ())
     period, holders = _holders(rows, today)
-    return CompanyFilings(instrument_id, latest, _insiders(rows, since, today), period, holders)
+    insiders = replace(_insiders(rows, since, today), n_ambiguous=ambiguous)
+    return CompanyFilings(instrument_id, latest, insiders, period, holders)
 
 
 def company_filings(

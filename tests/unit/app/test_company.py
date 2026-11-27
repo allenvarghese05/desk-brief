@@ -233,3 +233,38 @@ def test_an_ambiguous_amendment_flags_the_insider_line() -> None:
     assert 'class="db-mark db-mark-warn db-check">check' in html
     assert "1 amendment could not be matched to one original" in html
     assert "db-check" not in company.section_html(co, 90)
+
+
+def test_the_check_flag_survives_the_empty_state() -> None:
+    from dataclasses import replace
+
+    from app.components import company
+
+    empty = company_filings_from_frame(to_frame("filings", []), "EXMP", MON_0700, 90)
+    flagged = replace(empty, insiders=replace(empty.insiders, n_ambiguous=1))
+    html = company.section_html(flagged, 90)
+    assert "No filings stored yet" not in html
+    assert 'class="db-mark db-mark-warn db-check">check' in html
+
+
+def test_a_filings_read_failure_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import streamlit as st
+    from app.components import data
+
+    st.cache_data.clear()
+    calls: list[int] = []
+
+    def flaky(config: Any, env: Any, now: Any, iid: str) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("store unreachable")
+        return company_filings_from_frame(filings(), "EXMP", MON_0700, 90)
+
+    monkeypatch.setattr(data, "build_company", flaky)
+    config = World(tmp_path).config
+    assert data.load_company(config, "EXMP") is None  # the failure is said, not cached
+    second = data.load_company(config, "EXMP")  # the same hour: read again, and it works
+    assert second is not None
+    assert len(calls) == 2

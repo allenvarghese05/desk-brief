@@ -60,7 +60,7 @@ from deskbrief.report.model import (
     Section,
     today_events,
 )
-from deskbrief.report.note import stored_note
+from deskbrief.report.note import note_of, stored_note
 from deskbrief.store import duck
 from deskbrief.store.backend import REPORTS_PREFIX, StorageError
 from deskbrief.store.datasets import current_clean_version
@@ -383,11 +383,7 @@ def build_snapshot(
     check read): a run that starts later cannot colour the dot or the flags while the status line
     says "No checks yet".
     """
-    note = _stored_note(config, env, et_date(now))
-    if note.written_at is not None and et_date(note.written_at) == et_date(now):
-        archived: datetime | None = note.written_at  # today's model.json, already read
-    else:
-        archived = _archived_brief_time(config, env, now)
+    note, archived = _read_archive(config, env, now)
     brief_time = brief_time_of(archived, now)
     with shared_connection(config, env) as conn:
         latest = latest_check_run(conn, now)
@@ -436,28 +432,55 @@ ARCHIVE_LOOKBACK_DAYS = 5
 def _archived_brief_time(config: Config, env: Mapping[str, str], now: datetime) -> datetime | None:
     """The report time of the newest brief archived on or before ``now`` (its ``model.json``),
     searching today and up to ``ARCHIVE_LOOKBACK_DAYS`` days back. Never raises."""
+    return _read_archive(config, env, now)[1]
+
+
+def _read_archive(
+    config: Config, env: Mapping[str, str], now: datetime
+) -> tuple[Note, datetime | None]:
+    """Today's stored note and the report time of the newest brief archived on or before
+    ``now`` (today or up to ``ARCHIVE_LOOKBACK_DAYS`` days back), from one read of the archive
+    (PR #102 review round 3): one listing per month the window touches, and each day's newest
+    ``model.json`` read at most once, today's serving both. Never raises."""
+    today = et_date(now)
+    note = Note(reason="no brief has been written today yet")
     try:
         store = _store(config, env)
-        for back in range(ARCHIVE_LOOKBACK_DAYS + 1):
-            day = et_date(now) - timedelta(days=back)
-            prefix = f"{REPORTS_PREFIX}/date={day.isoformat()}/"
-            versions = [
-                (int(m[1]), key)
-                for key in store.list(prefix)
-                if (m := re.match(r"v(\d+)/model\.json$", key[len(prefix) :]))
-            ]
-            if not versions:
-                continue
-            doc = json.loads(store.get_bytes(max(versions)[1]))
-            written = doc.get("report_time") if isinstance(doc, dict) else None
-            if not isinstance(written, str):
-                continue
-            at = ensure_utc(datetime.fromisoformat(written))
-            if at <= ensure_utc(now):
-                return at
+        days = [today - timedelta(days=back) for back in range(ARCHIVE_LOOKBACK_DAYS + 1)]
+        newest: dict[date, tuple[int, str]] = {}
+        for month in dict.fromkeys(f"{d:%Y-%m}" for d in days):
+            prefix = f"{REPORTS_PREFIX}/date={month}"
+            for key in store.list(prefix):
+                m = re.match(r"-(\d\d)/v(\d+)/model\.json$", key[len(prefix) :])
+                if m is None:
+                    continue
+                day = date.fromisoformat(f"{month}-{m[1]}")
+                if day in days and (day not in newest or int(m[2]) > newest[day][0]):
+                    newest[day] = (int(m[2]), key)
     except Exception as exc:  # the type only: a message may hold a path or an endpoint
         _log.warning("dashboard archived brief unreadable: %s", type(exc).__name__)
-    return None
+        return Note(reason="the stored note could not be read"), None
+    archived: datetime | None = None
+    for day in days:
+        if day not in newest:
+            continue
+        try:
+            doc = json.loads(store.get_bytes(newest[day][1]))
+        except Exception as exc:  # the type only: a message may hold a path or an endpoint
+            _log.warning("dashboard archived brief unreadable: %s", type(exc).__name__)
+            if day == today:
+                note = Note(reason="the stored note could not be read")
+            continue
+        if day == today:
+            note = note_of(doc) or note
+        written = doc.get("report_time") if isinstance(doc, dict) else None
+        if not isinstance(written, str):
+            continue
+        at = ensure_utc(datetime.fromisoformat(written))
+        if at <= ensure_utc(now):
+            archived = at
+            break
+    return note, archived
 
 
 #: Today reads the events (and their fetch log) stored in the last this many days: every run
@@ -666,20 +689,22 @@ def build_company(
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
 def _cached_company(
     _config: Config, backend: str, where: str, instrument_id: str, hour: datetime
-) -> CompanyFilings | None:
-    # filings change once a morning: an hour's cache keeps a click from re-reading the store
-    try:
-        return build_company(_config, os.environ, current_time(), instrument_id)
-    except Exception as exc:  # the type only: a message may hold a path or an endpoint
-        _log.warning("dashboard filings unreadable: %s", type(exc).__name__)
-        return None
+) -> CompanyFilings:
+    # filings change once a morning: an hour's cache keeps a click from re-reading the store.
+    # A failure raises, and Streamlit does not cache an exception, so the next render retries.
+    return build_company(_config, os.environ, current_time(), instrument_id)
 
 
 def load_company(config: Config, instrument_id: str) -> CompanyFilings | None:
-    """The Company section's facts, cached for the hour; None when the store cannot be read."""
+    """The Company section's facts, cached for the hour; None when the store cannot be read
+    (that failure is never cached: the next render reads again, PR #102 review)."""
     hour = current_time().replace(minute=0, second=0, microsecond=0)
     s = config.storage
-    return _cached_company(config, s.backend, _where(config), instrument_id, hour)
+    try:
+        return _cached_company(config, s.backend, _where(config), instrument_id, hour)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard filings unreadable: %s", type(exc).__name__)
+        return None
 
 
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"

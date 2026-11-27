@@ -116,3 +116,10 @@ def test_data_health_names_the_notes_state(run_home: Any) -> None:
     assert not at.exception
     captions = [c.value for c in at.caption]
     assert "Morning note: none today (no brief has been written today yet)." in captions
+
+
+def test_a_note_without_figures_has_no_checked_line() -> None:
+    from app.components import brief
+
+    pane = brief.pane(None, (), MON_0700, None, Note(("S&P futures fell overnight.",), 0, 0))
+    assert "every number checked" not in pane
