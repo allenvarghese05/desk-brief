@@ -117,17 +117,14 @@ def section_html(co: CompanyFilings | None, insider_days: int, *, listed: bool =
     plans = f" · {ins.n_10b5_1} of {n_trades} under 10b5-1 plans" if n_trades else ""
     unpriced = f" · {ins.n_unpriced} without a price" if ins.n_unpriced else ""
     check, unsure = "", ""
-    if ins.n_ambiguous:
-        # PR #102 review: an amendment whose original could not be told apart
+    if ins.n_ambiguous or ins.n_held_back:
+        # PR #102 review rounds 3-4: an amendment left out or not refreshed; the trades shown
+        # may miss or repeat one, so the line says "check" and why
         check = (
-            ' <span class="db-mark db-mark-warn db-check">check<span class="db-sr"> (an '
-            "amendment could not be matched)</span></span>"
+            ' <span class="db-mark db-mark-warn db-check">check<span class="db-sr"> (some '
+            "amendments are not counted as filed)</span></span>"
         )
-        n = ins.n_ambiguous
-        unsure = (
-            f" · {n} amendment{'s' if n != 1 else ''} could not be matched to one original, "
-            "so the possible originals are left out"
-        )
+        unsure = "".join(_amendment_notes(ins.n_ambiguous, ins.n_held_back))
     rows.append(
         _row(
             f"Insiders, {insider_days} days",
@@ -192,3 +189,23 @@ def _css() -> str:
 
 #: the Company section's stylesheet (injected by ``app/views/markets.py``)
 COMPANY_CSS = _css()
+
+
+def _amendment_notes(n_ambiguous: int, n_held_back: int) -> list[str]:
+    """Why the insider line says "check": Form 4/As left out of, or not refreshed in, the
+    counts (PR #102 review rounds 3-4, N3)."""
+    out = []
+    if n_ambiguous:
+        s = "s" if n_ambiguous != 1 else ""
+        out.append(
+            f" · {n_ambiguous} amendment{s} could not be matched to one original or "
+            "restate one a later amendment covers, so the possible originals or the earlier "
+            "amendment are left out"
+        )
+    if n_held_back:
+        s = "s" if n_held_back != 1 else ""
+        out.append(
+            f" · {n_held_back} amendment{s} held back because a possible original could not "
+            "be read, so the trade shown may be the one before the amendment, or missing"
+        )
+    return out

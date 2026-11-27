@@ -1541,6 +1541,9 @@ class InsiderSummary:
     #: Form 4/As that could not be matched to one original (two or more candidates): their
     #: candidates are left out, so a Form 4 nobody amended may be missing; the section says so
     n_ambiguous: int = 0
+    #: Form 4/As held back by the latest fetch because a possible original could not be read
+    #: (a 404): the stored rows stay as they were, which may be the pre-amendment trade
+    n_held_back: int = 0
 
 
 @dataclass(frozen=True)
@@ -1664,7 +1667,8 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
     ``amendment_unmatched`` and ``amends_candidates`` in its seq 0 ``details_json``
     (``sources/edgar.py``): every candidate original is dropped, so the amendment is counted
     alone and never next to its original (PR #102 review). Of several such amendments by one
-    owner with the same candidates, only the latest is kept: they may restate one original.
+    owner naming the same original (:func:`_unmatched_amendments`), only the latest is kept:
+    they restate one original.
     """
     if filings.empty:
         return filings
@@ -1676,22 +1680,8 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
             reverse=True,
         )
         drop.update((inst, acc) for _, acc, inst in ranked[1:])
-    unmatched = filings[(filings["seq"] == 0) & filings["amends_accession"].isna()]
-    # unmatched amendments of one owner with the same candidate set may restate the same
-    # original: keep only the latest (filed date, then accession), never two (review B6)
-    groups: dict[tuple[str, str, frozenset[str]], list[tuple[date, str]]] = {}
-    for inst, acc, filed, party, details in zip(
-        unmatched["instrument_id"], unmatched["accession"], unmatched["filed_date"],
-        unmatched["party_cik"], unmatched["details_json"], strict=True,
-    ):  # fmt: skip
-        info = json.loads(details) if isinstance(details, str) and details else {}
-        if isinstance(info, dict) and info.get("amendment_unmatched"):
-            candidates = frozenset(str(c) for c in info.get("amends_candidates") or ())
-            drop.update((str(inst), c) for c in candidates)
-            owner = str(_opt(party) or "")
-            groups.setdefault((str(inst), owner, candidates), []).append((filed, str(acc)))
-    for (inst, _, _), same in groups.items():
-        drop.update((inst, acc) for _, acc in sorted(same, reverse=True)[1:])
+    candidates, grouped_out = _unmatched_amendments(filings)
+    drop |= candidates | grouped_out
     if not drop:
         return filings
     keep = [
@@ -1701,20 +1691,89 @@ def latest_amendments_only(filings: pd.DataFrame) -> pd.DataFrame:
     return filings[keep].reset_index(drop=True)
 
 
+def _details(raw: object) -> dict[str, Any]:
+    info = json.loads(raw) if isinstance(raw, str) and raw else {}
+    return info if isinstance(info, dict) else {}
+
+
+def _unmatched_amendments(
+    filings: pd.DataFrame,
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """The rows :func:`latest_amendments_only` drops for Form 4/As matched to no single original:
+    ``(instrument_id, accession)`` of every candidate original, and of every such amendment that
+    a later one of the same owner, naming the same original, supersedes.
+
+    Two unmatched amendments restate one original when they share the owner, the original date
+    they name (``date_of_original_submission``) and the period (PR #102 review rounds 3-4: B6,
+    B7, N2). An amendment with no candidates (its original is older than the fetch window) is
+    grouped the same way, never by its empty candidate set, so amendments of two different old
+    originals are both counted.
+    """
+    candidates: set[tuple[str, str]] = set()
+    groups: dict[tuple[str, str, str, str], list[tuple[date, str]]] = {}
+    heads = filings[(filings["seq"] == 0) & filings["amends_accession"].isna()]
+    for inst, acc, filed, party, period, details in zip(
+        heads["instrument_id"], heads["accession"], heads["filed_date"], heads["party_cik"],
+        heads["period"], heads["details_json"], strict=True,
+    ):  # fmt: skip
+        info = _details(details)
+        if not info.get("amendment_unmatched"):
+            continue
+        candidates.update((str(inst), str(c)) for c in info.get("amends_candidates") or ())
+        named = str(info.get("date_of_original_submission") or "")
+        key = (str(inst), str(_opt(party) or ""), named, str(_opt(period) or ""))
+        groups.setdefault(key, []).append((filed, str(acc)))
+    grouped_out = {
+        (key[0], acc) for key, same in groups.items() for _, acc in sorted(same, reverse=True)[1:]
+    }
+    return candidates, grouped_out
+
+
 def _ambiguous_amendments(rows: pd.DataFrame, since: date, until: date) -> int:
-    """Form 4/A filing rows in the window whose original could not be told from two or more
-    candidates (``amends_candidates`` in their ``details_json``)."""
+    """Form 4/A filing rows in the window that are not counted as written: those whose original
+    could not be told from two or more candidates (``amends_candidates`` in their
+    ``details_json``), and those a later amendment of the same original supersedes
+    (:func:`_unmatched_amendments`). Each leaves something out, so the section says "check"."""
     heads = rows[(rows["seq"] == 0) & rows["amends_accession"].isna() & (rows["form"] == "4/A")]
+    _, grouped_out = _unmatched_amendments(rows)
     n = 0
-    for filed, details in zip(heads["filed_date"], heads["details_json"], strict=True):
-        info = json.loads(details) if isinstance(details, str) and details else {}
-        if (
-            since <= filed <= until
-            and isinstance(info, dict)
-            and len(info.get("amends_candidates") or ()) >= 2
-        ):
+    for inst, acc, filed, details in zip(
+        heads["instrument_id"], heads["accession"], heads["filed_date"], heads["details_json"],
+        strict=True,
+    ):  # fmt: skip
+        if not since <= filed <= until:
+            continue
+        several = len(_details(details).get("amends_candidates") or ()) >= 2
+        if several or (str(inst), str(acc)) in grouped_out:
             n += 1
     return n
+
+
+#: ``details_json`` key the EDGAR writer sets on a company fetch's filing rows when it held a
+#: Form 4/A back because a possible original was unreadable (``sources/edgar.py``)
+HELD_BACK_KEY = "held_back_amendments"
+
+
+def _held_back_amendments(rows: pd.DataFrame, since: date, until: date) -> int:
+    """Form 4/As filed in the window that the newest company fetch held back (PR #102 review
+    round 4, N1). The marker is read only from that fetch's rows, so a later run that held
+    nothing back clears it."""
+    heads = rows[(rows["seq"] == 0) & (rows["dataset"] == "company")]
+    if heads.empty:
+        return 0
+    newest = heads["ingested_at"].max()
+    held: set[str] = set()
+    for details in heads.loc[heads["ingested_at"] == newest, "details_json"]:
+        for item in _details(details).get(HELD_BACK_KEY) or ():
+            if not isinstance(item, dict):
+                continue
+            try:
+                filed = date.fromisoformat(str(item.get("filed")))
+            except ValueError:
+                continue
+            if since <= filed <= until:
+                held.add(str(item.get("accession")))
+    return len(held)
 
 
 def _insiders(rows: pd.DataFrame, since: date, until: date) -> InsiderSummary:
@@ -1848,11 +1907,12 @@ def company_filings_from_frame(
                 url=str(top["url"]),
             )
     ambiguous = _ambiguous_amendments(mine, since, today) if not mine.empty else 0
+    held = _held_back_amendments(mine, since, today) if not mine.empty else 0
     if rows.empty:
-        insiders = InsiderSummary(since, (), 0, 0, 0.0, 0.0, 0.0, 0, 0, ambiguous)
+        insiders = InsiderSummary(since, (), 0, 0, 0.0, 0.0, 0.0, 0, 0, ambiguous, held)
         return CompanyFilings(instrument_id, latest, insiders, None, ())
     period, holders = _holders(rows, today)
-    insiders = replace(_insiders(rows, since, today), n_ambiguous=ambiguous)
+    insiders = replace(_insiders(rows, since, today), n_ambiguous=ambiguous, n_held_back=held)
     return CompanyFilings(instrument_id, latest, insiders, period, holders)
 
 

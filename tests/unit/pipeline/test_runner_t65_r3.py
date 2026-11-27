@@ -168,3 +168,104 @@ def test_two_ambiguous_amendments_of_one_owner_are_never_both_counted(tmp_path: 
     assert not {B, B2} <= set(trades)
     assert B2 in trades  # the later amendment
     assert n_ambiguous == 2
+
+
+# -- round 4 (B7, N2, N1) ----------------------------------------------------------------------
+
+# two 4/As by John restating two different originals filed long before the fetch window: both
+# carry no candidates, and both must be counted (review round 4, B7)
+O1, O2 = "0009999999-26-000021", "0009999999-26-000022"
+OLD_TWO = {
+    "extra": [(O1, "2026-11-20", "2026-06-01", "4/A", "form4a_old1.xml"),
+              (O2, "2026-11-20", "2026-06-12", "4/A", "form4a_old2.xml")],
+    "docs": {"form4a_old1.xml": f4(shares=11, period="2026-06-01", original="2026-06-02",
+                                   amendment=True),
+             "form4a_old2.xml": f4(shares=22, period="2026-06-12", original="2026-06-15",
+                                   amendment=True)},
+}  # fmt: skip
+
+
+def _merge(*parts: dict[str, Any]) -> dict[str, Any]:
+    return {"extra": [e for p in parts for e in p.get("extra", [])],
+            "docs": {k: v for p in parts for k, v in p.get("docs", {}).items()}}  # fmt: skip
+
+
+def test_amendments_of_two_different_old_originals_are_both_counted(tmp_path: Path) -> None:
+    ((trades, _, _, n_ambiguous),) = runs(tmp_path, [answer(**OLD_TWO)])
+    assert {O1, O2} <= set(trades)
+    assert n_ambiguous == 0  # nothing left out
+
+
+def test_two_amendments_of_one_old_original_count_once_and_say_check(tmp_path: Path) -> None:
+    """Same owner, same named original date and period, no candidates: they restate one
+    original, so the later counts and the earlier is in the flag."""
+    same = {
+        "extra": [(O1, "2026-11-19", "2026-06-01", "4/A", "form4a_old1.xml"),
+                  (O2, "2026-11-20", "2026-06-01", "4/A", "form4a_old2.xml")],
+        "docs": {"form4a_old1.xml": f4(shares=11, period="2026-06-01", original="2026-06-02",
+                                       amendment=True),
+                 "form4a_old2.xml": f4(shares=12, period="2026-06-01", original="2026-06-02",
+                                       amendment=True)},
+    }  # fmt: skip
+    ((trades, _, _, n_ambiguous),) = runs(tmp_path, [answer(**same)])
+    assert O2 in trades
+    assert O1 not in trades
+    assert n_ambiguous == 1
+
+
+def test_amendments_with_overlapping_candidates_are_never_both_counted(tmp_path: Path) -> None:
+    """Review round 4, N2: a third Form 4 of John's (E) filed between his two 4/As gives them
+    different candidate sets ({A, C6} and {A, C6, E}); both name the same original date and
+    period, so only the later counts and both are in the flag."""
+    e = "0009999999-26-000019"
+    between = {"extra": [(e, "2026-11-12", "2026-11-09", "4", "form4_buy3.xml")],
+               "docs": {"form4_buy3.xml": f4(shares=400)}}  # fmt: skip
+    both = _merge(AMBIG, SECOND, between)
+    subs = json.loads(subs_with(both["extra"]))
+    recent = subs["filings"]["recent"]
+    recent["filingDate"][recent["accessionNumber"].index(B)] = "2026-11-11"
+    body = json.dumps(subs).encode()
+    base = answer(**both)
+
+    def a(req: FetchRequest, url: str) -> tuple[int, bytes]:
+        return (200, body) if "submissions/CIK0009999999" in url else base(req, url)
+
+    ((trades, _, _, n_ambiguous),) = runs(tmp_path, [a])
+    assert not {B, B2} <= set(trades)
+    assert B2 in trades
+    assert n_ambiguous == 2
+
+
+ANN_SAME_DAY = {
+    "extra": [("0009999999-26-000017", "2026-11-10", "2026-11-09", "4", "form4_ann10.xml")],
+    "docs": {"form4_ann10.xml": f4(shares=70, owner_cik="0008888890", owner="Sample Ann")},
+}
+
+
+def test_a_held_back_amendment_says_check_and_leaves_a_run_note(tmp_path: Path) -> None:
+    """Review round 4, N1: a same-day Form 4 that 404s on every run holds John's readable 4/A
+    back. The Company line says "check" and the run's notes name the amendment; once the
+    document reads again, both clear."""
+    cfg = T._config(filings=True)
+    gone = answer(**ANN_SAME_DAY, not_found={"form4_ann10.xml"})
+    env = T._env(tmp_path, cfg, [EdgarSource(cfg)], gone, T.THU)
+    held_notes = []
+    for day, a in enumerate([gone, gone, answer(**ANN_SAME_DAY)]):
+        _, manifest = T._run(env, a, T.THU + timedelta(days=day))
+        held_notes.append([n for n in manifest.notes if "held back" in n])
+        f = Datasets(env.store).read("filings")
+        cf = company_filings_from_frame(f, "AAPL", T.THU + timedelta(days=day, hours=1), 90)
+        assert cf.insiders.n_held_back == (1 if day < 2 else 0), day
+    assert held_notes[0] == [
+        f"edgar: AAPL: 1 Form 4/A held back (a possible original was not readable): {B}"
+    ]
+    assert held_notes[2] == []
+
+
+def test_the_company_line_names_held_back_and_grouped_out_amendments() -> None:
+    from app.components.company import _amendment_notes
+
+    text = "".join(_amendment_notes(1, 2))
+    assert "1 amendment could not be matched to one original or restate one" in text
+    assert "2 amendments held back because a possible original could not be read" in text
+    assert _amendment_notes(0, 0) == []

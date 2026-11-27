@@ -517,6 +517,7 @@ class EdgarSource:
                 raise ParseError(f"Form 4 {doc.get('accession')!r} is not in the submissions")
             parsed.append((filing, parse_form4(doc["text"], filing)))
         originals = [(f, p) for f, p in parsed if f.form == "4"]
+        held: list[dict[str, Any]] = []
         for filing, form4 in parsed:
             amends, candidates = None, None
             if filing.form == "4/A":
@@ -525,17 +526,22 @@ class EdgarSource:
                 if missing:
                     # PR #102 review B3-B5: a Form 4 that could be its original was not
                     # readable this run (404). Written now, the amendment could match another
-                    # candidate or none, while the stored row names the right one; skip it, so
-                    # the stored rows stay current and nothing is counted twice. Costs at most
-                    # a run's delay in refreshing the amendment.
+                    # candidate or none, while the stored row names the right one; hold it back,
+                    # so the stored rows stay as they are and nothing is counted twice. While
+                    # the 404 lasts, the stored rows may be the pre-amendment trade or none, so
+                    # the hold-back is recorded for the Company section's "check" flag and the
+                    # run's notes (round 4, N1), not only logged.
                     get_logger().warning(
                         "edgar.amendment_skipped",
                         accession=filing.accession,
                         missing_originals=missing,
                     )
+                    held.append({"accession": filing.accession,
+                                 "filed": filing.filed.isoformat(),
+                                 "missing_originals": missing})  # fmt: skip
                     continue
             rows.extend(form4.rows(self._base(req, instrument, cik, filing), amends, candidates))
-        return rows
+        return _mark_held_back(rows, held)
 
     def _holder_rows(
         self,
@@ -960,6 +966,24 @@ def parse_form4(text: str, filing: Filing) -> Form4:
         other_owners=others,
         skipped=skipped,
     )
+
+
+#: the ``details_json`` key that carries the Form 4/As a company fetch held back; mirrors
+#: ``query.HELD_BACK_KEY`` (sources never import the query layer)
+HELD_BACK_KEY = "held_back_amendments"
+
+
+def _mark_held_back(rows: list[dict[str, Any]], held: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stamp the held-back Form 4/As on every filing row (seq 0) this fetch writes, so the
+    reader finds them on the newest run's rows whatever filing scopes it rewrote."""
+    if not held:
+        return rows
+    for row in rows:
+        if row.get("seq") == 0 and row.get("row_kind") == FilingRowKind.FILING.value:
+            info = json.loads(row.get("details_json") or "{}")
+            info[HELD_BACK_KEY] = held
+            row["details_json"] = _json(info)
+    return rows
 
 
 def _skipped_originals(

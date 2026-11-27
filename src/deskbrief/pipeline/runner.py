@@ -388,6 +388,9 @@ def _process_request(
         if tcleaned.ok:
             buf.add_table_rows(table, tcleaned.rows)
             rows = len(tcleaned.rows)
+            for note in _held_back_notes(source.name, tcleaned.rows):
+                if note not in manifest.notes:
+                    manifest.notes.append(note)
             logged = FetchStatus.OK if rows else FetchStatus.EMPTY  # empty: nothing scheduled
         else:
             failure = f"{tcleaned.reason}: {redact(tcleaned.detail)[:300]}"
@@ -453,6 +456,29 @@ def _process_request(
             ctx, raw, raw_key, rows, quarantined, as_of_min, as_of_max, logged, logged_error
         ),
     )
+
+
+def _held_back_notes(source_name: str, rows: pd.DataFrame) -> list[str]:
+    """A run note per instrument whose filings fetch held a Form 4/A back (PR #102 review round
+    4, N1): a possible original was unreadable, so the stored rows stay as they were. The run is
+    still ``ok``; the note says what was not refreshed (the Company section also says "check")."""
+    if rows.empty or "details_json" not in rows.columns:
+        return []
+    held: dict[str, set[str]] = {}
+    for inst, details in zip(rows["instrument_id"], rows["details_json"], strict=True):
+        try:
+            info = json.loads(details) if isinstance(details, str) and details else {}
+        except ValueError:
+            continue
+        items = info.get("held_back_amendments") if isinstance(info, dict) else None
+        for item in items or ():
+            if isinstance(item, dict) and item.get("accession"):
+                held.setdefault(str(inst), set()).add(str(item["accession"]))
+    return [
+        f"{source_name}: {inst}: {len(accs)} Form 4/A held back (a possible original was not "
+        f"readable): {', '.join(sorted(accs))}"
+        for inst, accs in sorted(held.items())
+    ]
 
 
 def _taint(buf: RunBuffer, table: TableName, req: FetchRequest) -> None:
