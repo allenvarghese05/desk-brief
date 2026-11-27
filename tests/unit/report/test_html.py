@@ -400,7 +400,7 @@ def _golden_with_note(tmp_path: Path) -> BriefModel:
         "contrasts": [],
     }
     out = render(reply, markets(m, hidden), allowed_contrasts(m, config), 5)
-    note = Note(out.sentences, out.n_numbers, out.n_numbers, model="synthetic",
+    note = Note(out.sentences, out.n_checked, out.n_numbers, model="synthetic",
                 written_at=MON_0700)  # fmt: skip
     events = (
         Event(MON, "08:30", "Durable goods orders", "FRED", "release", "Oct", "+1.4%"),
@@ -445,3 +445,14 @@ def test_a_future_quote_after_the_nyse_close_but_before_its_own_is_dated(tmp_pat
     m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
     wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
     assert wti.meta == "delayed, Fri 16:30"
+
+
+def test_a_future_quote_stamped_at_its_own_break_is_dated(tmp_path: Path) -> None:
+    """Round 4 email N2: a print stamped exactly at the 17:00 ET break is no newer than that
+    close, so on Monday it carries its day and time."""
+    w = World(tmp_path)
+    w.observations([daily("WTI", THU, 72.0, **YH, unit="USD"),
+                    tick("WTI", et(FRI, "17:00"), 71.0, unit="USD")])  # fmt: skip
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
+    assert wti.meta == "delayed, Fri 17:00"

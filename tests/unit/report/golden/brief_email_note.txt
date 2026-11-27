@@ -1,8 +1,8 @@
 Desk Brief · Mon 16 Nov · 07:00 ET
 No clear read. 1 market moved more than usual.
 
-E-mini S&P 500 futures fell 1.6%, a 3.5σ day. Euro / US dollar rose 0.4%.
-Every number matches the stored data (3 of 3).
+S&P futures (check) fell 1.6%, a 3.5σ day. EUR/USD rose 0.4%.
+Every number matches the stored data (3 of 3); 2 are from a market marked check.
 
 No regime rule met.
 

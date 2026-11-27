@@ -177,9 +177,8 @@ def render_text(model: BriefModel, *, dashboard: str | None = None) -> str:
     note = model.note if model.note is not None and model.note.shown else None
     if note is not None and note.sentences:
         out.append(" ".join(note.sentences))
-        if note.n_numbers:  # a note without figures has nothing to vouch for
-            n = f"({note.n_checked} of {note.n_numbers})"
-            out.append(f"Every number matches the stored data {n}.")
+        if note.badge:  # a note without figures has nothing to vouch for
+            out.append(f"{note.badge}.")
         out.append("")
     elif note is not None:
         out += [f"No note today: {note.reason}.", ""]

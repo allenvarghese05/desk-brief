@@ -17,7 +17,9 @@ JSON schema: an ordered list of up to ``MAX_ITEMS`` picks ``{market_id, show}`` 
 
 No text of the reply reaches the output: a reply string is only ever looked up as an id, and an
 id is shown as the brief's display name. "Every number matches the stored data (n of n)" counts
-the figures rendered and is hidden when there are none. The note's first line stays the read
+the figures rendered, says how many belong to a market marked "check" (named in Check before
+using; such a market's name carries "(check)", as in the movers and the snapshot), and is hidden
+when there are none. The note's first line stays the read
 (the regime rules in code).
 
 No note, and the brief says "No note today" with the reason, when: the note is turned off, no
@@ -77,6 +79,7 @@ class Market:
     change: str  # the brief's signed change ("−1.6%", "+27bp"); "" when there is none
     level: str  # the brief's value ("6,012.25", "4.15%")
     sigma: str | None  # "3.6σ" for a mover (ranked, at or above the warn level); else None
+    check: bool = False  # named in Check before using (the movers' and snapshot's "check")
 
     @property
     def sign(self) -> int:
@@ -86,14 +89,59 @@ class Market:
         return -1 if self.change.startswith((_MINUS, "-")) else 1
 
     @property
+    def label(self) -> str:
+        """The name as the note prints it, marked like the movers and the snapshot."""
+        return f"{self.name} (check)" if self.check else self.name
+
+    @property
     def magnitude(self) -> str:
         """The change without its sign ("1.6%"), as shown after a verb."""
         return self.change.lstrip("+-" + _MINUS)
 
 
+#: the desk's short names for the note's prose (PR #102 round 4, email N3), as the mockup reads
+#: ("S&P futures", "high-yield spread", "10-year"); a sentence starts with a capital. Anything
+#: not listed uses the brief's full name without its parenthetical.
+NOTE_NAMES = {
+    "ES_F": "S&P futures",
+    "WTI": "WTI crude",
+    "BRENT": "Brent crude",
+    "GOLD_F": "gold futures",
+    "UST_3M": "3-month",
+    "UST_2Y": "2-year",
+    "UST_10Y": "10-year",
+    "UST_20Y": "20-year",
+    "UST_30Y": "30-year",
+    "UST_10Y_REAL": "10-year real yield",
+    "BEI_10Y": "10-year breakeven",
+    "UST_2S10S": "2s10s curve",
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
+    "USD_BROAD": "broad dollar",
+    "VIX": "VIX",
+    "N225": "Nikkei",
+    "FTSE": "FTSE 100",
+    "DAX": "DAX",
+    "HY_OAS": "high-yield spread",
+    "DFF": "fed funds rate",
+    "UNRATE": "unemployment rate",
+    "CPI": "CPI",
+}
+
+
 def _display_name(row_name: str) -> str:
     """A market's name for prose: the brief's full name without a parenthetical."""
     return re.sub(r"\s*\([^)]*\)", "", row_name).strip()
+
+
+def note_name(instrument_id: str, row_name: str) -> str:
+    """The desk's short name of a market (:data:`NOTE_NAMES`), else its display name."""
+    return NOTE_NAMES.get(instrument_id) or _display_name(row_name)
+
+
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
 
 
 def market_kind(instrument_id: str, name: str) -> str:
@@ -112,16 +160,18 @@ def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
     every surface reads). Nothing of a tier the hosted dashboard hides."""
     rows = {r.instrument_id: r for r in model.rows()}
     visible = {i for i, r in rows.items() if r.tier is not None and r.tier not in hidden}
+    flagged = {i for c in model.caveats for i in c.instrument_ids}
     out: dict[str, Market] = {}
     for m in model.movers:
         if m.instrument_id in visible and m.instrument_id not in out:
             out[m.instrument_id] = Market(
                 m.instrument_id,
-                _display_name(m.name),
+                note_name(m.instrument_id, m.name),
                 market_kind(m.instrument_id, m.name),
                 m.change_text,
                 m.value_text,
                 f"{m.sigma:.1f}σ",
+                m.instrument_id in flagged,
             )
     for g in model.snapshot:
         for r in g.rows:
@@ -130,11 +180,12 @@ def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
             row = rows[r.instrument_id]
             out[r.instrument_id] = Market(
                 r.instrument_id,
-                _display_name(row.name),
+                note_name(r.instrument_id, row.name),
                 market_kind(r.instrument_id, row.name),
                 r.change_text,
                 r.value_text,
                 None,  # sigma only for a ranked mover: a quiet move's sigma says nothing
+                r.instrument_id in flagged,
             )
     return out
 
@@ -237,15 +288,20 @@ def _sentence(k: Market, show: str) -> tuple[str, int]:
     n = 0 if k.sign == 0 else 1
     if show == "move_and_level":
         at = "at" if k.sign == 0 else "to"
-        return f"{k.name} {_moved(k)} {at} {k.level}.", n + 1
+        return _cap(f"{k.label} {_moved(k)} {at} {k.level}."), n + 1
     if show == "move_and_sigma":
-        return f"{k.name} {_moved(k)}, a {k.sigma} day.", n + 1
-    return f"{k.name} {_moved(k)}.", n
+        return _cap(f"{k.label} {_moved(k)}, a {k.sigma} day."), n + 1
+    return _cap(f"{k.label} {_moved(k)}."), n
 
 
 def _contrast(a: Market, b: Market) -> tuple[str, int]:
     n = (a.sign != 0) + (b.sign != 0)
-    return f"{a.name} {_moved(a)} while {b.name} {_moved(b)}.", n
+    return _cap(f"{a.label} {_moved(a)} while {b.label} {_moved(b)}."), n
+
+
+def _figures(k: Market, n: int) -> tuple[int, int]:
+    """(figures, figures of a market not marked "check")."""
+    return n, 0 if k.check else n
 
 
 def _pick(table: Mapping[str, Market], obj: object, field: str) -> Market | None:
@@ -258,6 +314,7 @@ def _pick(table: Mapping[str, Market], obj: object, field: str) -> Market | None
 class Rendered:
     sentences: tuple[str, ...]
     n_numbers: int  # figures rendered
+    n_checked: int  # of those, figures of markets not marked "check"
     dropped: tuple[str, ...]  # why each pick went (never a reply string)
 
 
@@ -271,7 +328,7 @@ def render(
     is only ever used as a key into ``table`` or ``SHOWS``; nothing of it is copied out."""
     dropped: list[str] = []
     if not isinstance(reply, Mapping):
-        return Rendered((), 0, ("the reply was not an object",))
+        return Rendered((), 0, 0, ("the reply was not an object",))
     raw_items = reply.get("items")
     raw_pairs = reply.get("contrasts")
     items = list(raw_items) if isinstance(raw_items, list) else []
@@ -303,7 +360,7 @@ def render(
             kept_pairs.append((a, b))
     in_pairs = {k.instrument_id for pair in kept_pairs for k in pair}
 
-    out: list[tuple[str, int]] = []  # each sentence and the figures it shows
+    out: list[tuple[str, int, int]] = []  # sentence, figures, figures not marked check
     seen: set[str] = set()
     for item in items[:MAX_ITEMS]:
         k = _pick(table, item, "market_id")
@@ -324,12 +381,21 @@ def render(
             dropped.append(f"{k.instrument_id}: sigma asked of a move that is not ranked")
         else:
             seen.add(k.instrument_id)
-            out.append(_sentence(k, show))
-    out += [_contrast(a, b) for a, b in kept_pairs]
+            text, n = _sentence(k, show)
+            out.append((text, *_figures(k, n)))
+    for a, b in kept_pairs:
+        text, _ = _contrast(a, b)
+        na, nb = (a.sign != 0), (b.sign != 0)
+        out.append((text, na + nb, (0 if a.check else na) + (0 if b.check else nb)))
     if len(out) > max_sentences:
         dropped.append(f"{len(out) - max_sentences} sentences over the limit of {max_sentences}")
         out = out[:max_sentences]
-    return Rendered(tuple(t for t, _ in out), sum(n for _, n in out), tuple(dropped))
+    return Rendered(
+        tuple(t for t, _, _ in out),
+        sum(n for _, n, _ in out),
+        sum(c for _, _, c in out),
+        tuple(dropped),
+    )
 
 
 def hidden_tiers(config: Config) -> frozenset[int]:
@@ -521,7 +587,7 @@ def _read_reply(
                     model=s.model, cost_usd=cost)  # fmt: skip
     return Note(
         sentences=result.sentences,
-        n_checked=result.n_numbers,
+        n_checked=result.n_checked,
         n_numbers=result.n_numbers,
         dropped=result.dropped,
         model=s.model,
@@ -597,6 +663,7 @@ def note_of(doc: object) -> Note | None:
 __all__ = [
     "MAX_CONTRASTS",
     "MAX_ITEMS",
+    "NOTE_NAMES",
     "Market",
     "Rendered",
     "allowed_contrasts",
@@ -604,6 +671,7 @@ __all__ = [
     "market_kind",
     "markets",
     "month_spend",
+    "note_name",
     "note_of",
     "record_spend",
     "render",

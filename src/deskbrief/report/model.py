@@ -310,13 +310,26 @@ class Note:
     today: "."""
 
     sentences: tuple[str, ...] = ()
-    n_checked: int = 0  # figures rendered, each the brief's own display string
-    n_numbers: int = 0  # the same count (the badge's "n of n"; 0 hides the badge)
+    n_checked: int = 0  # figures of markets not marked "check" (Check before using names none)
+    n_numbers: int = 0  # every figure rendered, each the brief's own display string (0: no badge)
     reason: str | None = None
     dropped: tuple[str, ...] = ()  # why each dropped pick went (logged, never shown)
     model: str = ""
     cost_usd: float = 0.0
     written_at: datetime | None = None  # the brief it was written for (the dashboard says so)
+
+    @property
+    def badge(self) -> str:
+        """ "Every number matches the stored data (n of n)", saying how many of them belong to a
+        market marked "check" (PR #102 round 4, email N1); "" when the note shows no figure."""
+        if not self.n_numbers:
+            return ""
+        text = f"Every number matches the stored data ({self.n_numbers} of {self.n_numbers})"
+        flagged = self.n_numbers - min(self.n_checked, self.n_numbers)
+        if flagged:
+            verb = "is" if flagged == 1 else "are"
+            text += f"; {flagged} {verb} from a market marked check"
+        return text
 
     @property
     def shown(self) -> bool:
@@ -1301,7 +1314,7 @@ def _snap_meta(row: Row, report_time: datetime | None = None) -> str:
     close = _latest_close(row, report_time) if report_time is not None else None
     if last.interval == "1d":
         parts.append(f"{row.tier_name}, {to_et(last.as_of):%a}")
-    elif close is not None and ensure_utc(last.as_of) < close:
+    elif close is not None and ensure_utc(last.as_of) <= close:  # a print at the break is old
         et = to_et(last.as_of)
         parts.append(f"{row.tier_name}, {et:%a} {et:%H:%M}")
     else:

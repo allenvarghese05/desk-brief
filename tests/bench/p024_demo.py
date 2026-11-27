@@ -276,7 +276,7 @@ def _note(config: Any, store: LocalBackend) -> None:
     }
     s = config.brief.note
     out = render(reply, markets(model, hidden), allowed_contrasts(model, config), s.max_sentences)
-    note = Note(out.sentences, out.n_numbers, out.n_numbers, model=f"{s.model} (synthetic)")
+    note = Note(out.sentences, out.n_checked, out.n_numbers, model=f"{s.model} (synthetic)")
     body = replace(model, note=note).to_json().encode()
     store.put_bytes(report_key(FRI, 1, "model.json"), body)
 

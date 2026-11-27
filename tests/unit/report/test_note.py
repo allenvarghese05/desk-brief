@@ -157,9 +157,9 @@ def test_a_valid_reply_is_rendered_from_the_briefs_own_strings(
     assert n.reason is None
     assert n.sentences == (
         # the verb says the direction, so the change is shown without its sign
-        f"E-mini S&P 500 futures fell {es.change_text.lstrip('−')}, a {es.sigma:.1f}σ day.",
-        "US 10-year Treasury yield fell 3bp to 4.37%.",
-        "Euro / US dollar rose 0.4%.",
+        f"S&P futures fell {es.change_text.lstrip('−')}, a {es.sigma:.1f}σ day.",
+        "10-year fell 3bp to 4.37%.",
+        "EUR/USD rose 0.4%.",
     )
     assert (n.n_checked, n.n_numbers) == (5, 5)  # figures rendered
     assert n.model == "claude-sonnet-5-5"
@@ -331,8 +331,8 @@ def test_no_reply_string_reaches_the_output_except_as_a_mapped_id(
     }
     n = _write(model, world, Fake(reply))
     assert n.sentences == (
-        f"E-mini S&P 500 futures fell {_es(model).change_text.lstrip('−')}.",
-        "US 10-year Treasury yield fell 3bp to 4.37%.",
+        f"S&P futures fell {_es(model).change_text.lstrip('−')}.",
+        "10-year fell 3bp to 4.37%.",
     )
     from dataclasses import replace
 
@@ -508,7 +508,7 @@ def test_stored_note_reads_the_newest_version(tmp_path: Path) -> None:
 def test_with_note_stores_the_note_in_the_model(model: BriefModel, world: World) -> None:
     out = with_note(model, world.config, KEY, world.store, client_factory=Fake(ES_MOVE).factory)
     assert out.note is not None
-    assert out.note.sentences == (f"E-mini S&P 500 futures fell {_es(model).change_text[1:]}.",)
+    assert out.note.sentences == (f"S&P futures fell {_es(model).change_text[1:]}.",)
     back = BriefModel.from_json(out.to_json())
     assert back.note == out.note
 
@@ -521,7 +521,7 @@ def test_the_morning_report_step_writes_the_note(monkeypatch: pytest.MonkeyPatch
 def test_the_facts_hold_each_markets_display_strings(model: BriefModel, world: World) -> None:
     payload = facts(model, world.config, {1})
     es = _es(model)
-    assert {"market_id": "ES_F", "name": "E-mini S&P 500 futures", "change": es.change_text,
+    assert {"market_id": "ES_F", "name": "S&P futures", "change": es.change_text,
             "level": es.value_text, "sigma": f"{es.sigma:.1f}σ"} in payload["markets"]  # fmt: skip
     assert ["BRENT", "WTI"] not in payload["allowed_contrasts"]  # Brent is not in today's brief
 
@@ -566,5 +566,49 @@ def test_no_figures_means_no_badge(model: BriefModel) -> None:
     assert "Every number matches" not in render_html(plain)
     assert "Every number matches" not in render_text(plain)
     assert "Euro / US dollar was unchanged." in render_html(plain)
-    counted = replace(model, note=Note(("Euro / US dollar rose 0.4%.",), 1, 1, model="m"))
+    counted = replace(model, note=Note(("EUR/USD rose 0.4%.",), 1, 1, model="m"))
     assert "Every number matches the stored data (1 of 1)." in render_text(counted)
+
+
+def test_a_market_marked_check_says_so_in_the_note_and_the_badge(
+    model: BriefModel, world: World
+) -> None:
+    """Round 4 email N1: a market Check before using names carries "(check)" in the note, as in
+    the movers and the snapshot, and the badge says how many figures are from it."""
+    from dataclasses import replace
+
+    from deskbrief.report.html import render_html, render_text
+    from deskbrief.report.model import Caveat
+
+    flagged = replace(model, caveats=(Caveat("dq", "WTI", "A data check failed.", ("WTI",)),))
+    reply = {
+        "items": [
+            {"market_id": "WTI", "show": "move_and_level"},
+            {"market_id": "EURUSD", "show": "move"},
+        ]
+    }
+    n = _write(flagged, world, Fake(reply))
+    assert n.sentences == ("WTI crude (check) fell 0.4% to $69.50.", "EUR/USD rose 0.4%.")
+    assert (n.n_checked, n.n_numbers) == (1, 3)
+    assert (
+        n.badge == "Every number matches the stored data (3 of 3); 2 are from a market marked check"
+    )
+    out = replace(flagged, note=n)
+    assert f"{n.badge}." in render_text(out)
+    assert f"{n.badge}." in render_html(out)
+    assert Note(("X rose 1%.",), 1, 1).badge == "Every number matches the stored data (1 of 1)"
+
+
+def test_the_note_uses_the_desks_short_names(model: BriefModel, world: World) -> None:
+    table = markets(model, hidden_tiers(world.config))
+    assert table["ES_F"].name == "S&P futures"
+    assert table["UST_10Y"].name == "10-year"
+    assert table["UST_2S10S"].name == "2s10s curve"
+    assert note_mod.note_name("HY_OAS", "ICE BofA US high-yield option-adjusted spread") == (
+        "high-yield spread"
+    )
+    k = Market("HY_OAS", "high-yield spread", "spread", "+27bp", "4.12%", "3.6σ")
+    assert (
+        note_mod._sentence(k, "move_and_sigma")[0] == "High-yield spread widened 27bp, a 3.6σ day."
+    )
+    assert note_mod.note_name("AAPL", "Apple Inc. (common stock)") == "Apple Inc."

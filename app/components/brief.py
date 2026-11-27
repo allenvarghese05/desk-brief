@@ -60,10 +60,10 @@ def _note(note: Note | None) -> str:
         return f'<p class="db-nonote">No note today: {escape(note.reason or "")}.</p>'
     lines = "".join(f'<p class="db-note-s">{escape(s)}</p>' for s in note.sentences)
     at = f"Note at {to_et(note.written_at):%H:%M} ET" if note.written_at else ""
+    badge = note.badge  # "" when the note shows no figure: nothing to vouch for
     checked = (
-        f'<span class="db-ok" aria-hidden="true">✓</span> every number matches the stored data '
-        f"({note.n_checked} of {note.n_numbers})"
-        if note.n_numbers  # a note without figures has nothing to vouch for
+        f'<span class="db-ok" aria-hidden="true">✓</span> {escape(badge[:1].lower() + badge[1:])}'
+        if badge
         else ""
     )
     line = " · ".join(p for p in (at, checked) if p)
