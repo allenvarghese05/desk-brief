@@ -47,6 +47,8 @@ SECRET_ENV_VARS: tuple[str, ...] = (
     "SMTP_APP_PASSWORD",
     "HEALTHCHECK_URL_MORNING",
     "HEALTHCHECK_URL_EOD",
+    "DESKBRIEF_SEC_USER_AGENT",  # P-024 (T65): names a contact, never logged
+    "ANTHROPIC_API_KEY",  # P-024 (T66)
 )
 
 # Structured-field keys whose (string) values are always masked.

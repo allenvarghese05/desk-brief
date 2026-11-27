@@ -1287,7 +1287,7 @@ Owner decisions the cards wait for (P-024 open questions): an earnings-date sour
   - Freshness checks cover the two new datasets.
 - Changelog: card created from P-024. It absorbs stretch card T51 (13F changes).
 
-#### T66 — The morning note, every number checked (was T50)
+#### T66 — The morning note, templated (was T50)
 - **Depends:** T62 and T63 merged, and the owner's API key and spend cap (P-024) · **Owns:**
   - `src/deskbrief/report/note.py` (new);
   - `src/deskbrief/report/model.py` (a `note` section only);
@@ -1295,20 +1295,22 @@ Owner decisions the cards wait for (P-024 open questions): an earnings-date sour
   - `.github/workflows/morning.yml` (the `ANTHROPIC_API_KEY` secret, in the step that writes the brief only);
   - the note's place in the email template and the dashboard's brief pane;
   - `tests/unit/report/test_note.py`.
-- Deliverables:
-  - Claude receives only the brief's model (the read, the movers, Check before using, the snapshot) and writes four or five sentences. The prompt forbids advice, signals, targets and predictions.
-  - **The check.** Every number in the returned text is parsed, with its unit, and matched against a value in the model within its display rounding. A sentence with any unmatched number, or any number without a unit the model uses, is dropped and logged with the reason. Sentences with forbidden words ("buy", "sell", "target", "will rise" and similar, listed in config) are dropped too.
-  - The note shows "every number checked (n of n)". With no key, an API error, a timeout, the spend cap reached, or no surviving sentence, the note is left out and the brief says "No note today" with the reason.
-  - The note is stored with the brief, so the dashboard shows the stored note and never calls the API.
+- Deliverables (templated since PR #102 round 4, the owner's choice):
+  - **The model writes no prose.** Claude receives only the brief's facts (the read, the rules met, Check before using, each visible market's display strings, the contrasts allowed) and returns structured output held to a JSON schema: up to 5 picks `{market_id, show}` (`move`, `move_and_level`, `move_and_sigma`) and up to 2 contrasts `{a, b}`.
+  - **Code validates every pick** and drops (logs, never echoes) an unknown or hidden-tier market, a market whose data check failed, a market with no change, sigma asked of a move that is not a mover, repeats, and a pair that is not related (`brief.related_pairs` or a pair Check before using names).
+  - **Code renders every sentence** from fixed templates and the brief's display strings: the desk's short name, marked "(check)" when Check before using names it; the verb from the sign and the kind (rose/fell, widened/narrowed, steepened/flattened, "was unchanged"); the magnitude without its sign; the level and the sigma; and a dated move's period ("as of Thu", "on the week to 10 Nov", "in Oct 2026"). A contrast ("A fell … while B rose …") only for opposite moves over one window, or a pair whose own caveat fired; any other related pair is two plain sentences.
+  - The badge "✓ Every number matches the stored data (n of n)" counts the figures of unmarked markets and is hidden at 0. The read stays the note's first line (the regime rules, in code). With no key or the note turned off there is no call and no line (the reason is on Data health); with an API error, a timeout, the spend cap, a refused, cut, empty or malformed reply, or no valid pick, the brief says "No note today" with the reason. Each call's cost is recorded from its usage first, in a spend ledger.
+  - The note is stored with the brief, so the dashboard shows the stored note and never calls the API. `brief.note.forbidden_words` stays in config but no longer affects the output.
 - Acceptance:
   - Tests with recorded model replies (no live calls in CI):
-    - a reply with a wrong number loses that sentence;
-    - a reply with a forbidden word loses that sentence;
-    - an empty reply gives "No note today";
-    - a timeout gives "No note today";
-    - a fully matching reply keeps every sentence.
+    - a hostile structured reply (unknown ids, wrong sigma requests, injected text in any field, extra fields) gives only template sentences, or no note;
+    - no string of the reply reaches the output except as a validated id shown as a display name;
+    - the verb is right for each kind and sign, including zero;
+    - a market whose data check failed is never stated; a market marked "check" says so and its figures are not counted;
+    - a golden note built from the real pipeline;
+    - an empty reply, a timeout, a refusal, a cut or malformed reply give "No note today".
   - A test shows hosted mode never reads tier-1 values into the prompt.
-- Changelog: card created from P-024 (stretch card T50 promoted).
+- Changelog: card created from P-024 (stretch card T50 promoted). PR #102 round 4: the free-text check replaced by the templated design.
 
 #### T67 — The Company section for single stocks
 - **Depends:** T62 and T65 merged · **Owns:**

@@ -14,6 +14,16 @@
   the raw response or a log line. **Missing key**: no HTTP call is made and an error
   ``RawResponse`` is returned (``http_status=None``, ``error`` naming ``FRED_API_KEY``), so the
   failure lands in ``source_log`` like any other fetch error and the run continues degraded.
+* **Release dates** (card T65, P-024 "Today"): in the ``morning`` job only, one request per
+  ``config.events.fred_releases`` entry to ``fred/release/dates`` (dataset ``release_dates``)
+  for the ET dates ``[target_date, target_date + events.horizon_days]``
+  (``realtime_start``/``realtime_end``, ``include_release_dates_with_no_data=true`` so future
+  dates are listed). These fetches feed the ``events`` table, not observations: FRED is a table
+  source for that dataset (``sources/tables.py``), ``parse`` returns no rows for it and
+  :meth:`FredSource.parse_table` returns one ``release`` event per date, ``scheduled_at`` =
+  the date at the entry's ``time_et`` (FRED gives dates only). All the fetches share one
+  ``events`` scope ``(fred, release_dates)``, so one failed release fetch withholds the scope
+  for that run. The same ``FRED_API_KEY`` and missing-key behaviour apply.
 * ``parse`` is a pure function of the body. A value of ``"."`` means "missing" and the row is
   skipped (never NaN). Malformed payloads raise :class:`ParseError`; zero usable rows is a
   legitimate ``empty_frame``.
@@ -30,17 +40,25 @@ from __future__ import annotations
 import json
 import math
 import os
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, NamedTuple
 
 import pandas as pd
 
-from deskbrief.config import Config, Feed, Instrument
+from deskbrief.config import Config, Feed, FredRelease, Instrument
 from deskbrief.logging import get_logger
-from deskbrief.models import FetchRequest, FetchStatus, JobKind, RawResponse, RunContext
+from deskbrief.models import (
+    EventKind,
+    FetchRequest,
+    FetchStatus,
+    JobKind,
+    RawResponse,
+    RunContext,
+)
 from deskbrief.schemas import empty_frame, to_frame
 from deskbrief.sources import registry
 from deskbrief.sources.base import HttpClient, ParseError
+from deskbrief.sources.tables import FRED_RELEASE_DATES, TableName, table_frame
 from deskbrief.timeutil import et_to_utc, utc_now
 
 ENDPOINT = "https://api.stlouisfed.org/fred/series/observations"
@@ -53,6 +71,10 @@ MISSING = "."
 DAILY_DATASET = "series"
 WEEKLY_DATASET = "series_weekly"
 DATASETS = (DAILY_DATASET, WEEKLY_DATASET)
+#: Release calendar (card T65): feeds the ``events`` table.
+RELEASE_DATES_ENDPOINT = "https://api.stlouisfed.org/fred/release/dates"
+RELEASE_DATASET = FRED_RELEASE_DATES.dataset
+RELEASE_PAGE = "https://fred.stlouisfed.org/release?rid={rid}"
 
 
 class SeriesSpec(NamedTuple):
@@ -114,6 +136,13 @@ class FredSource:
             for symbol, entry in config.feed_index("fred", ds).items()
         }
         self._specs: dict[str, SeriesSpec] = dict(SERIES_SPECS)
+        self._releases: dict[int, FredRelease] = {
+            r.release_id: r for r in config.events.fred_releases
+        }
+
+    def table_for(self, req: FetchRequest) -> TableName | None:
+        """``events`` for a release-dates fetch; observation fetches return ``None``."""
+        return "events" if req.dataset == RELEASE_DATASET else None
 
     # -- plan -----------------------------------------------------------------------------
 
@@ -127,7 +156,31 @@ class FredSource:
             return []
         extra = {"observation_end": ctx.target_date.isoformat()} if job is JobKind.BACKFILL else {}
         params = {"sort_order": "desc", "limit": str(OBSERVATION_LIMIT), **extra}
-        return self._requests(params, ctx.target_date)
+        requests = self._requests(params, ctx.target_date)
+        if job is JobKind.MORNING:
+            requests.extend(self._release_requests(ctx.target_date))
+        return requests
+
+    def _release_requests(self, start: date) -> list[FetchRequest]:
+        """One release-dates request per configured release, for the events horizon."""
+        end = start + timedelta(days=self.config.events.horizon_days)
+        return [
+            FetchRequest(
+                source=self.name,
+                dataset=RELEASE_DATASET,
+                params={
+                    "release_id": str(rel.release_id),
+                    "file_type": "json",
+                    "realtime_start": start.isoformat(),
+                    "realtime_end": end.isoformat(),
+                    "include_release_dates_with_no_data": "true",
+                    "sort_order": "asc",
+                },
+                symbols=(f"release:{rel.release_id}",),
+                target_date=start,
+            )
+            for rel in self.config.events.fred_releases
+        ]
 
     def plan_range(self, start: date, end: date, ctx: RunContext) -> list[FetchRequest]:
         """One request per configured series for the ET dates ``[start, end]`` (P-020)."""
@@ -188,11 +241,14 @@ class FredSource:
                 error=f"{API_KEY_ENV} is not set; no request made",
                 status=FetchStatus.ERROR,
             )
-        return http.get(req, ENDPOINT, params=req.params, secret_params={"api_key": key})
+        url = RELEASE_DATES_ENDPOINT if req.dataset == RELEASE_DATASET else ENDPOINT
+        return http.get(req, url, params=req.params, secret_params={"api_key": key})
 
     # -- parse ----------------------------------------------------------------------------
 
     def parse(self, raw: RawResponse) -> pd.DataFrame:
+        if raw.request.dataset == RELEASE_DATASET:
+            return empty_frame("parsed_observations")  # events, see parse_table
         if not raw.ok:
             raise ParseError(f"FRED fetch failed: {raw.error or raw.http_status}")
         series_id = raw.request.symbols[0] if raw.request.symbols else None
@@ -230,6 +286,78 @@ class FredSource:
                 }
             )
         return to_frame("parsed_observations", out)
+
+    def parse_table(self, raw: RawResponse) -> pd.DataFrame:
+        """``events`` rows (kind ``release``) from a ``release/dates`` response (card T65)."""
+        if not raw.ok:
+            raise ParseError(f"FRED fetch failed: {raw.error or raw.http_status}")
+        if raw.request.dataset != RELEASE_DATASET:
+            raise ParseError(f"FRED dataset {raw.request.dataset!r} has no table rows")
+        params = dict(raw.request.params)
+        try:
+            rid = int(params["release_id"])
+            lo = date.fromisoformat(params["realtime_start"])
+            hi = date.fromisoformat(params["realtime_end"])
+        except (KeyError, ValueError) as exc:
+            raise ParseError(f"FRED release request lacks its window: {exc}") from exc
+        items = _release_dates(raw.body)
+        rel = self._releases.get(rid)
+        rows: dict[date, dict[str, Any]] = {}
+        for item in items:
+            day, name, item_rid = _release_item(item)
+            if item_rid != rid:
+                raise ParseError(f"FRED release dates for {item_rid} in a request for {rid}")
+            if not lo <= day <= hi:
+                continue
+            title = rel.title if rel is not None else name
+            details = {"release_id": rid, "release_name": name}
+            rows[day] = {
+                "event_id": f"release:{rid}:{day.isoformat()}",
+                "source": self.name,
+                "dataset": RELEASE_DATASET,
+                "kind": EventKind.RELEASE.value,
+                "title": title,
+                "event_date": day,
+                "scheduled_at": et_to_utc(day, rel.time_et) if rel is not None else None,
+                "period": None,
+                "url": RELEASE_PAGE.format(rid=rid),
+                "details_json": json.dumps(details, sort_keys=True, separators=(",", ":")),
+            }
+        return table_frame("events", [rows[d] for d in sorted(rows)])
+
+
+def _release_dates(body: bytes) -> list[Any]:
+    try:
+        doc = json.loads(body)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ParseError(f"FRED body is not valid JSON: {type(exc).__name__}") from exc
+    if not isinstance(doc, dict):
+        raise ParseError("FRED payload is not a JSON object")
+    items = doc.get("release_dates")
+    if not isinstance(items, list):
+        detail = doc.get("error_message")
+        raise ParseError(
+            "FRED payload has no 'release_dates' list"
+            + (f" (error_message: {detail})" if isinstance(detail, str) else "")
+        )
+    count, limit = doc.get("count"), doc.get("limit")
+    if isinstance(count, int) and isinstance(limit, int) and count > limit:
+        raise ParseError(f"FRED answered {count} release dates over a limit of {limit}")
+    return items
+
+
+def _release_item(item: Any) -> tuple[date, str, int]:
+    """``(date, release_name, release_id)`` of one ``release_dates`` entry."""
+    if not isinstance(item, dict):
+        raise ParseError(f"FRED release date is not an object: {item!r}")
+    raw_day, name, rid = item.get("date"), item.get("release_name"), item.get("release_id")
+    if not isinstance(raw_day, str) or not isinstance(rid, int) or isinstance(rid, bool):
+        raise ParseError(f"FRED release date needs a string date and integer id: {item!r}")
+    try:
+        day = date.fromisoformat(raw_day)
+    except ValueError as exc:
+        raise ParseError(f"FRED release date has a bad date: {raw_day!r}") from exc
+    return day, name if isinstance(name, str) and name.strip() else f"FRED release {rid}", rid
 
 
 def _new_fetch_id() -> str:

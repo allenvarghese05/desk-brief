@@ -59,6 +59,8 @@ jobs:
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          # T65: SEC EDGAR contact User-Agent (sources.edgar.user_agent_env); never logged.
+          DESKBRIEF_SEC_USER_AGENT: ${{ secrets.DESKBRIEF_SEC_USER_AGENT }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -67,6 +69,10 @@ jobs:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+          # P-024 (T66): the morning note; inert until the owner adds the secret
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # P-024 (T63): the email's dashboard link (a repository variable, not a secret)
+          DESKBRIEF_DASHBOARD_URL: ${{ vars.DESKBRIEF_DASHBOARD_URL }}
         run: |
           set +e -o pipefail
           mkdir -p logs

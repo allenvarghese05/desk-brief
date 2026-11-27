@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC FIXTURE: invented 13F cover page; no real filer. -->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/thirteenffiler">
+  <headerData><submissionType>13F-HR/A</submissionType></headerData>
+  <formData>
+    <coverPage>
+      <reportCalendarOrQuarter>09-30-2026</reportCalendarOrQuarter>
+      <isAmendment>true</isAmendment>
+      <amendmentNo>1</amendmentNo>
+      <amendmentInfo><amendmentType>RESTATEMENT</amendmentType></amendmentInfo>
+      <filingManager><name>Invented Asset Management</name></filingManager>
+    </coverPage>
+  </formData>
+</edgarSubmission>

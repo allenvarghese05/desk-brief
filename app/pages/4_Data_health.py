@@ -17,6 +17,7 @@ On a weekend, a holiday or a morning before the run it is the last run, named by
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -191,6 +192,18 @@ def _attention(bad: pd.DataFrame) -> str:
 
 
 # --- block 2: what needs attention in the latest run, each check type one tab away ---
+# T66 (PR #102 review): the morning note's state, including the configuration reasons the
+# email and Home leave unsaid (no API key, turned off)
+_note = data._stored_note(ctx.config, os.environ, ctx.today)
+if _note.sentences:
+    _note_line = (
+        f"Morning note: written, {len(_note.sentences)} sentences, "
+        "every number matches the stored data."
+    )
+else:
+    _note_line = f"Morning note: none today ({_note.reason or 'no reason recorded'})."
+st.caption(_note_line)
+
 with _kit.card("dh-attention", "Needs attention", attention_note):
     if today.empty:
         st.markdown("No DQ results recorded yet.")

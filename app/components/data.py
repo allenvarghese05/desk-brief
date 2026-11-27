@@ -20,13 +20,15 @@ way out as a second guard.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
 import duckdb
@@ -35,14 +37,36 @@ import streamlit as st
 from app.components.values import TIER_NAME
 
 from deskbrief.config import Config
-from deskbrief.query import Lineage, latest_check_run, series_all
-from deskbrief.report.model import BriefModel, HealthBlock, KnownLimit, Notable, Row, Section
+from deskbrief.query import (
+    BRIEF_CLOCK_ET,
+    CompanyFilings,
+    Lineage,
+    company_filings_from_frame,
+    current_events,
+    latest_check_run,
+    series_all,
+)
+from deskbrief.report.model import (
+    BriefModel,
+    Caveat,
+    Event,
+    HealthBlock,
+    KnownLimit,
+    Mover,
+    Notable,
+    Note,
+    Read,
+    Row,
+    Section,
+    today_events,
+)
+from deskbrief.report.note import note_of, stored_note
 from deskbrief.store import duck
-from deskbrief.store.backend import StorageError
+from deskbrief.store.backend import REPORTS_PREFIX, StorageError
 from deskbrief.store.datasets import current_clean_version
 from deskbrief.store.local import LocalBackend
 from deskbrief.store.r2 import R2Backend
-from deskbrief.timeutil import et_date, utc_now
+from deskbrief.timeutil import ensure_utc, et_date, et_to_utc, to_et, utc_now
 
 _log = logging.getLogger(__name__)
 
@@ -330,6 +354,13 @@ class Snapshot:
     #: the latest run with checks (T60 bug 5): its target date and start time; None when no
     #: run has recorded a check, the only case the status line says "No checks yet"
     last_run: tuple[date, datetime | None] | None = None
+    #: the note stored with today's archived brief (T66): the dashboard never calls the API
+    note: Note | None = None
+    #: the brief the page is anchored to (:func:`brief_time_of`)
+    brief_time: datetime | None = None
+    #: the latest brief actually archived (its report time), today's or up to
+    #: ``ARCHIVE_LOOKBACK_DAYS`` back; None when none is found. The pane heading names it.
+    archived: datetime | None = None
 
 
 def build_snapshot(
@@ -352,6 +383,8 @@ def build_snapshot(
     check read): a run that starts later cannot colour the dot or the flags while the status line
     says "No checks yet".
     """
+    note, archived = _read_archive(config, env, now)
+    brief_time = brief_time_of(archived, now)
     with shared_connection(config, env) as conn:
         latest = latest_check_run(conn, now)
         model = BriefModel.from_store(
@@ -361,8 +394,10 @@ def build_snapshot(
             now,
             exclude_tiers=exclude_tiers,
             health_date=latest.target_date if latest is not None else et_date(now),
+            brief_time=brief_time,
         )
         history = series_all(conn, SPARK_DAYS, now)
+    model = replace(model, today=_today(config, env, now, model))
     return Snapshot(
         model,
         {
@@ -370,7 +405,112 @@ def build_snapshot(
             for k, v in history.items()
         },
         (latest.target_date, latest.started_at) if latest is not None else None,
+        note,
+        brief_time,
+        archived,
     )
+
+
+def brief_time_of(archived: datetime | None, now: datetime) -> datetime:
+    """The brief the page is anchored to (PR #102 review): today's archived brief time; before
+    today's brief has run, or on a day with none, today at the clock time of the latest
+    archived brief (so "new since" is since that brief's time); with no archive, today's
+    scheduled fire time (``query.BRIEF_CLOCK_ET``). "New since the previous brief" and the
+    ranking then match a brief at any hour, never the reader's clock."""
+    if archived is None:
+        return et_to_utc(et_date(now), BRIEF_CLOCK_ET)
+    if et_date(archived) == et_date(now):
+        return archived
+    return et_to_utc(et_date(now), f"{to_et(archived):%H:%M}")
+
+
+#: how many days back the dashboard looks for the latest archived brief (a long weekend plus a
+#: holiday); the pane heading names that brief, never a scheduled time that did not run
+ARCHIVE_LOOKBACK_DAYS = 5
+
+
+def _archived_brief_time(config: Config, env: Mapping[str, str], now: datetime) -> datetime | None:
+    """The report time of the newest brief archived on or before ``now`` (its ``model.json``),
+    searching today and up to ``ARCHIVE_LOOKBACK_DAYS`` days back. Never raises."""
+    return _read_archive(config, env, now)[1]
+
+
+def _read_archive(
+    config: Config, env: Mapping[str, str], now: datetime
+) -> tuple[Note, datetime | None]:
+    """Today's stored note and the report time of the newest brief archived on or before
+    ``now`` (today or up to ``ARCHIVE_LOOKBACK_DAYS`` days back), from one read of the archive
+    (PR #102 review round 3): one listing per month the window touches, and each day's newest
+    ``model.json`` read at most once, today's serving both. Never raises."""
+    today = et_date(now)
+    note = Note(reason="no brief has been written today yet")
+    try:
+        store = _store(config, env)
+        days = [today - timedelta(days=back) for back in range(ARCHIVE_LOOKBACK_DAYS + 1)]
+        newest: dict[date, tuple[int, str]] = {}
+        for month in dict.fromkeys(f"{d:%Y-%m}" for d in days):
+            prefix = f"{REPORTS_PREFIX}/date={month}"
+            for key in store.list(prefix):
+                m = re.match(r"-(\d\d)/v(\d+)/model\.json$", key[len(prefix) :])
+                if m is None:
+                    continue
+                day = date.fromisoformat(f"{month}-{m[1]}")
+                if day in days and (day not in newest or int(m[2]) > newest[day][0]):
+                    newest[day] = (int(m[2]), key)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard archived brief unreadable: %s", type(exc).__name__)
+        return Note(reason="the stored note could not be read"), None
+    archived: datetime | None = None
+    for day in days:
+        if day not in newest:
+            continue
+        try:
+            doc = json.loads(store.get_bytes(newest[day][1]))
+        except Exception as exc:  # the type only: a message may hold a path or an endpoint
+            _log.warning("dashboard archived brief unreadable: %s", type(exc).__name__)
+            if day == today:
+                note = Note(reason="the stored note could not be read")
+            continue
+        if day == today:
+            note = note_of(doc) or note
+        written = doc.get("report_time") if isinstance(doc, dict) else None
+        if not isinstance(written, str):
+            continue
+        at = ensure_utc(datetime.fromisoformat(written))
+        if at <= ensure_utc(now):
+            archived = at
+            break
+    return note, archived
+
+
+#: Today reads the events (and their fetch log) stored in the last this many days: every run
+#: that fetches a calendar replaces its scope, so older partitions hold only replaced rows
+EVENTS_READ_DAYS = 7
+
+
+def _today(
+    config: Config, env: Mapping[str, str], now: datetime, model: BriefModel
+) -> tuple[Event, ...]:
+    """Today's stored releases and auctions (T65). Never raises: the page goes on without."""
+    try:
+        store = _store(config, env)
+        events = _recent_table(store, "events", EVENTS_READ_DAYS, now)
+        log = _recent_table(store, "source_log", EVENTS_READ_DAYS, now)
+        items = current_events(events, log, now, config.events.horizon_days)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard events unreadable: %s", type(exc).__name__)
+        return ()
+    return today_events(items, model.report_date)
+
+
+def _stored_note(config: Config, env: Mapping[str, str], day: date) -> Note:
+    """Today's stored note, or why there is none. Never raises: the page goes on without it."""
+    try:
+        note = stored_note(_store(config, env), day)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard stored note unreadable: %s", type(exc).__name__)
+        return Note(reason="the stored note could not be read")
+    return note if note is not None else Note(reason="no brief has been written today yet")
 
 
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
@@ -508,6 +648,65 @@ def load_series(
     )  # fmt: skip
 
 
+#: the Company section reads the filings fetched in the last this many days: every morning run
+#: re-fetches each current filing, so older fetches only hold rows newer ones replaced (T67)
+FILINGS_READ_DAYS = 14
+
+
+def _recent_table(
+    store: LocalBackend | R2Backend, table: str, days: int, now: datetime
+) -> pd.DataFrame:
+    """Rows of a ``derived/`` table from partitions dated in the last ``days`` days (ET)."""
+    import io
+
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
+    from deskbrief.schemas import empty_frame
+    from deskbrief.store.backend import table_prefix
+
+    first = et_date(now) - timedelta(days=days)
+    keys = []
+    for k in store.list(table_prefix(table, current_clean_version(store))):
+        m = re.search(r"/date=(\d{4}-\d{2}-\d{2})/", k)
+        if k.endswith(".parquet") and m and date.fromisoformat(m[1]) >= first:
+            keys.append(k)
+    template = empty_frame(table)
+    if not keys:
+        return template
+    frames = [pq.read_table(io.BytesIO(store.get_bytes(k))).to_pandas() for k in keys]
+    merged = pd.concat(frames, ignore_index=True)
+    return merged[list(template.columns)].astype(dict(template.dtypes))
+
+
+def build_company(
+    config: Config, env: Mapping[str, str], now: datetime, instrument_id: str
+) -> CompanyFilings:
+    """The Company section's facts for one stock (``query.company_filings_from_frame``)."""
+    frame = _recent_table(_store(config, env), "filings", FILINGS_READ_DAYS, now)
+    return company_filings_from_frame(frame, instrument_id, now, config.filings.insider_days)
+
+
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS, show_spinner=False)
+def _cached_company(
+    _config: Config, backend: str, where: str, instrument_id: str, hour: datetime
+) -> CompanyFilings:
+    # filings change once a morning: an hour's cache keeps a click from re-reading the store.
+    # A failure raises, and Streamlit does not cache an exception, so the next render retries.
+    return build_company(_config, os.environ, current_time(), instrument_id)
+
+
+def load_company(config: Config, instrument_id: str) -> CompanyFilings | None:
+    """The Company section's facts, cached for the hour; None when the store cannot be read
+    (that failure is never cached: the next render reads again, PR #102 review)."""
+    hour = current_time().replace(minute=0, second=0, microsecond=0)
+    s = config.storage
+    try:
+        return _cached_company(config, s.backend, _where(config), instrument_id, hour)
+    except Exception as exc:  # the type only: a message may hold a path or an endpoint
+        _log.warning("dashboard filings unreadable: %s", type(exc).__name__)
+        return None
+
+
 #: what this dashboard does not do (spec 10.3 asks for more); shown under "Known limits"
 DASHBOARD_LIMITS = (
     "Dashboard: no stale greying; the as-of text and health badge carry data age.",
@@ -535,6 +734,15 @@ class Overview:
     moves: tuple[Notable, ...] = ()  # unusual moves, largest first (the report's own scoring)
     #: UST tenors: (ET date, yield, source) of official values, oldest first
     curve: dict[str, tuple[tuple[date, float, str], ...]] = field(default_factory=dict)
+    #: P-024 (T62): the one ranking, the read and Check before using, from the model
+    movers: tuple[Mover, ...] = ()
+    read: Read | None = None
+    caveats: tuple[Caveat, ...] = ()
+    previous_brief: datetime | None = None
+    note: Note | None = None  # T66: the stored note (or why there is none)
+    brief_time: datetime | None = None  # the brief "new since" and the ranking follow
+    archived: datetime | None = None  # the latest brief actually archived (pane heading)
+    today: tuple[Event, ...] = ()  # T65: today's scheduled releases and auctions
 
 
 def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
@@ -580,4 +788,13 @@ def overview(snap: Snapshot, mode: str, hidden: frozenset[int]) -> Overview:
         known_limits=model.known_limits
         + tuple(KnownLimit("dashboard", t) for t in DASHBOARD_LIMITS),
         withheld=len(model.rows()) - len(keep),
+        # a second guard: a mover or caveat about a withheld instrument never reaches the page
+        movers=tuple(m for m in model.movers if m.instrument_id in by_id and m.tier not in hidden),
+        read=model.read,
+        caveats=tuple(c for c in model.caveats if all(i in by_id for i in c.instrument_ids)),
+        previous_brief=model.previous_brief,
+        note=snap.note,
+        brief_time=snap.brief_time,
+        archived=snap.archived,
+        today=model.today,
     )

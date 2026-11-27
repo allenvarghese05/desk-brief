@@ -7,6 +7,21 @@ Failure isolation (spec §2.4)
 * A parse or validation failure quarantines that fetch (``clean/quarantine``) and writes a DQ
   ``fail``; a failed fetch (error, 429, budget exhausted) writes a DQ ``fail`` too. The run
   continues and ends ``degraded``.
+* Table sources (``sources/tables.py``, card T65) feed ``events``/``filings`` instead of
+  observations. Their rows are validated per fetch (a failure quarantines the fetch exactly as
+  above), buffered, and written per replace scope, all or nothing: a scope that any failed or
+  quarantined fetch of this run feeds is withheld whole, so the previous run's rows stay current
+  (``schemas.current_rows``). Only a parsed, well-formed response with zero rows is logged
+  ``empty`` (the provider answered and nothing is scheduled, which is what lets
+  ``current_rows`` empty the scope): a 200 with an empty body goes through ``parse_table`` like
+  any other, and a table fetch that quarantines is logged ``error`` (PR #102 review B1).
+* A run cut short (an exception escaping the loop, or ``KeyboardInterrupt`` when the job is
+  cancelled or times out) withholds every ``events`` scope that still had unprocessed requests
+  and logs each of them ``error`` ("not fetched: run aborted"), so the partial run is neither
+  half written nor read as "nothing scheduled" (review B2).
+* ``events``/``filings`` describe the calendar as of today: a run whose target date is not
+  today (ET), such as a manual ``morning`` run for a past date, does not fetch them, so it
+  cannot replace the current calendar with an old window.
 * The buffer is flushed once per (table, ET date) in a ``finally`` (P-008), so even an
   unexpected exception that escapes the loop still flushes what the other sources produced,
   and the ``runs`` row is written last, also on that path (status ``failed``).
@@ -26,6 +41,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -46,8 +62,10 @@ from deskbrief.models import (
 )
 from deskbrief.pipeline.catchup import CATCHUP_TIME_BUDGET, missed_dates, split_catchup
 from deskbrief.pipeline.clean import (
+    SCOPED_TABLES,
     RunBuffer,
     clean_response,
+    clean_table_response,
     dq_row,
     next_clean_version,
     quarantine_row,
@@ -67,6 +85,7 @@ from deskbrief.pipeline.jobs import (
 from deskbrief.pipeline.manifest import RunManifest, SourceStats, write_step_summary
 from deskbrief.schemas import to_frame
 from deskbrief.sources.base import HttpClient, Source
+from deskbrief.sources.tables import TableName, is_table_source, table_of
 from deskbrief.store.backend import StorageBackend
 from deskbrief.store.datasets import Datasets
 from deskbrief.store.raw import RawWriter
@@ -75,12 +94,17 @@ from deskbrief.timeutil import Clock, et_date, utc_now
 #: A failed flush of one of these loses data (raw may still hold it): the run is ``failed`` so
 #: catch-up treats the date as missed (spec §2.4 item 5). A lost dq_results partition degrades.
 _DATA_TABLES = frozenset({"observations", "source_log", "quarantine"})
+#: flushed with the data tables; a lost ``events``/``filings`` partition degrades the run (raw
+#: still holds the response and the next run fetches the scope again), it does not fail it
+_FIRST_FLUSH = _DATA_TABLES | frozenset(SCOPED_TABLES)
 #: flushed right after the checks hook (before serving/report/notify), so the runner's own DQ
 #: rows and the hook's rows share one file and later hooks can read them
 _CHECK_FLUSH = frozenset({"dq_results", "revisions", "crosscheck_results"})
 _FAILED_FETCH = frozenset(
     {FetchStatus.ERROR, FetchStatus.RATE_LIMITED, FetchStatus.BUDGET_EXHAUSTED}
 )
+#: statuses of a fetch the provider answered: a table fetch parses both (review B1)
+_ANSWERED = frozenset({FetchStatus.OK, FetchStatus.EMPTY})
 
 
 @dataclass
@@ -152,7 +176,7 @@ def execute_run(env: RunEnv, ctx: RunContext) -> RunManifest:
             try:
                 _fetch_all(env, ctx, buf, manifest)
             finally:
-                _flush(buf, datasets, ctx, manifest, _DATA_TABLES)
+                _flush(buf, datasets, ctx, manifest, _FIRST_FLUSH)
             degraded += _run_steps(env, ctx, manifest, buf, datasets, check_flush)
         finally:  # the one dq_results/revisions/crosscheck_results append of the run (P-008)
             if not check_flush.done:  # not yet written: _run_steps raised before its flush
@@ -197,8 +221,100 @@ def _fetch_all(env: RunEnv, ctx: RunContext, buf: RunBuffer, manifest: RunManife
                 ),
             )
             continue
-        for req in requests:
-            _process_request(env, ctx, source, req, buf, manifest, stats, writer)
+        pending = [(req, _table_or_none(source, req, log)) for req in requests]
+        pending = _drop_stale_table_requests(ctx, source, pending, manifest)
+        done = 0
+        try:
+            for req, _table in pending:
+                _process_request(env, ctx, source, req, buf, manifest, stats, writer)
+                done += 1
+        except BaseException as exc:  # incl. KeyboardInterrupt: never half a scope (review B2)
+            _abort_pending(env, ctx, buf, stats, pending[done:], exc)
+            raise
+
+
+def _table_or_none(source: Source, req: FetchRequest, log: Any) -> TableName | None:
+    """The scoped table ``req`` feeds; a ``table_for`` that raises is logged and means none."""
+    try:
+        return table_of(source, req)
+    except Exception as exc:  # a broken table_for is a source bug: treat it as no table
+        log.error("source.table_for_raised", dataset=req.dataset, error=redact(str(exc)))
+        return None
+
+
+def _drop_stale_table_requests(
+    ctx: RunContext,
+    source: Source,
+    pending: list[tuple[FetchRequest, TableName | None]],
+    manifest: RunManifest,
+) -> list[tuple[FetchRequest, TableName | None]]:
+    """Leave out ``events``/``filings`` requests when the target date is not today (ET).
+
+    Those tables hold the calendar and filings as of today and each run replaces their scopes,
+    so a manual run for a past date would replace today's rows with an old window. Nothing is
+    fetched or logged for them, so the stored rows stay current.
+    """
+    today = et_date(ctx.now_utc)
+    if ctx.target_date == today:
+        return pending
+    kept: list[tuple[FetchRequest, TableName | None]] = [
+        (req, table) for req, table in pending if table is None
+    ]
+    if len(kept) < len(pending):
+        note = (
+            f"{source.name}: events/filings not fetched, target date "
+            f"{ctx.target_date.isoformat()} is not today (ET {today.isoformat()})"
+        )
+        manifest.notes.append(note)
+        get_logger(run_id=ctx.run_id).info(
+            "source.table_requests_skipped",
+            source=source.name,
+            n=len(pending) - len(kept),
+            target_date=ctx.target_date.isoformat(),
+        )
+    return kept
+
+
+def _abort_pending(
+    env: RunEnv,
+    ctx: RunContext,
+    buf: RunBuffer,
+    stats: SourceStats,
+    pending: Sequence[tuple[FetchRequest, TableName | None]],
+    exc: BaseException,
+) -> None:
+    """The loop stopped before ``pending`` were processed (the first may be half done).
+
+    Every ``events`` scope they feed is withheld (rows of the requests that did finish
+    included), and each table request gets an ``error`` source_log row, so ``current_rows``
+    and ``freshness_tables`` do not read the partial run as complete or as "nothing
+    scheduled". ``filings`` needs no hold: its scope is an accession, and one fetch's rows are
+    buffered whole or not at all. Observation requests are left as before (no row: nothing
+    reads their absence as an answer). Never raises (the original exception must propagate).
+    """
+    tables = [(req, table) for req, table in pending if table is not None]
+    for req, table in tables:
+        _taint(buf, table, req)
+    why = f"not fetched: run aborted ({type(exc).__name__})"
+    try:
+        at = env.clock()
+        for req, _table in tables:
+            stand_in = RawResponse(
+                request=req,
+                fetch_id=new_id(),
+                requested_at=at,
+                responded_at=at,
+                http_status=None,
+                content_type="",
+                body=b"",
+                error=why,
+                status=FetchStatus.ERROR,
+            )
+            buf.add("source_log", _source_log_row(ctx, stand_in, None, 0, 0, None, None))
+            stats.failed += 1
+            stats.errors.append(f"{req.dataset}: {why}")
+    except Exception as inner:  # recording the abort must not mask why the run stopped
+        get_logger(run_id=ctx.run_id).error("run.abort_record_failed", error=redact(str(inner)))
 
 
 def _unexpected_empty_day(ctx: RunContext, req: FetchRequest) -> str | None:
@@ -242,6 +358,7 @@ def _process_request(
 ) -> None:
     log = get_logger(run_id=ctx.run_id, source=source.name)
     stats.fetches += 1
+    table = _table_or_none(source, req, log)
     try:
         raw = source.fetch(req, env.http)
     except Exception as exc:  # a source bug is a failed fetch, not a failed run
@@ -262,7 +379,35 @@ def _process_request(
     rows = quarantined = 0
     as_of_min = as_of_max = None
     failure: str | None = None
-    if status is FetchStatus.OK:
+    logged = status
+    logged_error: str | None = None
+    if status in _ANSWERED and table is not None and is_table_source(source):
+        # EMPTY too: for a table only a parsed, well-formed answer may say "nothing scheduled";
+        # a 200 with an empty body is not JSON, so parse_table quarantines it (review B1)
+        tcleaned = clean_table_response(source, raw, ctx.run_id, table)
+        if tcleaned.ok:
+            buf.add_table_rows(table, tcleaned.rows)
+            rows = len(tcleaned.rows)
+            held = _held_back_notes(source.name, tcleaned.rows) if table == "filings" else []
+            for note in held:
+                if note not in manifest.notes:
+                    manifest.notes.append(note)
+            logged = FetchStatus.OK if rows else FetchStatus.EMPTY  # empty: nothing scheduled
+        else:
+            failure = f"{tcleaned.reason}: {redact(tcleaned.detail)[:300]}"
+            quarantined = tcleaned.rows_quarantined
+            # logged "error" (with the reason), never "ok"/"empty" with 0 quarantined rows,
+            # which current_rows and freshness_tables would read as a complete fetch
+            logged, logged_error = FetchStatus.ERROR, failure
+            _taint(buf, table, req)
+            buf.add(
+                "quarantine",
+                quarantine_row(
+                    ctx, raw, tcleaned.reason or "unknown", tcleaned.detail, raw_key, env.clock()
+                ),
+            )
+            _dq_fail(env, ctx, buf, "runner.parse", CheckType.VALIDITY, raw, reason=tcleaned.reason)
+    elif status is FetchStatus.OK:
         cleaned = clean_response(source, raw, ctx.run_id)
         if cleaned.ok:
             buf.add_observations(cleaned.observations)
@@ -282,6 +427,8 @@ def _process_request(
             _dq_fail(env, ctx, buf, "runner.parse", CheckType.VALIDITY, raw, reason=cleaned.reason)
     elif status in _FAILED_FETCH:
         failure = f"fetch {status.value}: {raw.error or raw.http_status}"
+        if table is not None:
+            _taint(buf, table, req)
         _dq_fail(env, ctx, buf, "runner.fetch", CheckType.COMPLETENESS, raw, status=status.value)
     elif status is FetchStatus.EMPTY and (day := _unexpected_empty_day(ctx, req)):
         why = "empty response on an expected publication day"
@@ -305,8 +452,47 @@ def _process_request(
     stats.rows += rows
     stats.quarantined += quarantined
     buf.add(
-        "source_log", _source_log_row(ctx, raw, raw_key, rows, quarantined, as_of_min, as_of_max)
+        "source_log",
+        _source_log_row(
+            ctx, raw, raw_key, rows, quarantined, as_of_min, as_of_max, logged, logged_error
+        ),
     )
+
+
+def _held_back_notes(source_name: str, rows: pd.DataFrame) -> list[str]:
+    """A run note per instrument whose filings fetch held a Form 4/A back (PR #102 review round
+    4, N1): a possible original was unreadable, so the stored rows stay as they were. The run is
+    still ``ok``; the note says what was not refreshed (the Company section also says "check")."""
+    if rows.empty or not {"instrument_id", "details_json"} <= set(rows.columns):
+        return []
+    held: dict[str, set[str]] = {}
+    for inst, details in zip(rows["instrument_id"], rows["details_json"], strict=True):
+        try:
+            info = json.loads(details) if isinstance(details, str) and details else {}
+        except ValueError:
+            continue
+        items = info.get("held_back_amendments") if isinstance(info, dict) else None
+        for item in items or ():
+            if isinstance(item, dict) and item.get("accession"):
+                held.setdefault(str(inst), set()).add(str(item["accession"]))
+    return [
+        f"{source_name}: {inst}: {len(accs)} Form 4/A held back (a possible original was not "
+        f"readable): {', '.join(sorted(accs))}"
+        for inst, accs in sorted(held.items())
+    ]
+
+
+def _taint(buf: RunBuffer, table: TableName, req: FetchRequest) -> None:
+    """A fetch feeding ``table`` failed or was quarantined: hold back the scopes it feeds.
+
+    ``events`` scopes are ``(source, dataset)``, known from the request even when nothing came
+    back, so every other fetch of that scope in this run is withheld too (FRED makes one fetch
+    per release under one dataset). A ``filings`` scope is ``(instrument_id, accession)``: the
+    accessions of a failed fetch are unknown, and one EDGAR fetch is the only feed of each
+    accession it yields, so a failed fetch already contributes no rows and nothing else is held.
+    """
+    if table == "events":
+        buf.taint_scope("events", (req.source, req.dataset))
 
 
 def _dq_fail(
@@ -365,6 +551,8 @@ def _source_log_row(
     quarantined: int,
     as_of_min: datetime | None,
     as_of_max: datetime | None,
+    status: FetchStatus | None = None,
+    error: str | None = None,
 ) -> dict[str, object]:
     req = raw.request
     request = {
@@ -384,8 +572,8 @@ def _source_log_row(
         "responded_at": raw.responded_at,
         "latency_ms": raw.latency_ms,
         "http_status": raw.http_status,
-        "status": raw.fetch_status.value,
-        "error": raw.error,
+        "status": (status or raw.fetch_status).value,
+        "error": redact(error) if error is not None else raw.error,
         "bytes": len(raw.body),
         "sha256": hashlib.sha256(raw.body).hexdigest() if raw.body else None,
         "raw_key": raw_key,
@@ -415,6 +603,9 @@ def _flush(
         manifest.n_dq_fail, manifest.n_dq_warn = dq.get("fail", 0), dq.get("warn", 0)
         manifest.check_issues = buf.check_issues()
     manifest.notes.extend(f"flush failed: {e}" for e in report.errors)
+    for note in buf.withheld:  # scoped tables: complete scopes only (card T65)
+        if note not in manifest.notes:
+            manifest.notes.append(note)
 
 
 @dataclass

@@ -38,8 +38,17 @@ from deskbrief.models import (
     RunContext,
 )
 from deskbrief.pipeline.manifest import CheckIssue
-from deskbrief.schemas import empty_frame, to_frame, validate
+from deskbrief.schemas import (
+    EVENTS_NATURAL_KEY,
+    FILINGS_NATURAL_KEY,
+    REPLACE_SCOPE,
+    columns,
+    empty_frame,
+    to_frame,
+    validate,
+)
 from deskbrief.sources.base import ParseError, Source
+from deskbrief.sources.tables import TABLE_LINEAGE_COLUMNS, TableName, TableSource
 from deskbrief.store.backend import (
     CLEAN_CURRENT_KEY,
     CLEAN_PREFIX,
@@ -176,6 +185,82 @@ def clean_response(source: Source, raw: RawResponse, run_id: str) -> CleanResult
     return CleanResult(obs)
 
 
+@dataclass(frozen=True)
+class TableCleanResult:
+    """Rows of ``events`` or ``filings`` from one fetch (card T65), lineage filled in."""
+
+    rows: pd.DataFrame
+    reason: str | None = None  # quarantine reason; None means the parse was clean
+    detail: str = ""
+    rows_quarantined: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.reason is None
+
+
+#: natural key of each scoped table, unique within one run (``schemas`` writer rules)
+NATURAL_KEYS: dict[str, tuple[str, ...]] = {
+    "events": EVENTS_NATURAL_KEY,
+    "filings": FILINGS_NATURAL_KEY,
+}
+
+
+def clean_table_response(
+    source: TableSource, raw: RawResponse, run_id: str, table: TableName
+) -> TableCleanResult:
+    """``parse_table`` -> lineage -> validate, for a fetch that feeds ``events``/``filings``.
+
+    Never raises. Like :func:`clean_response`, any failure quarantines the whole fetch and keeps
+    none of its rows: ``ParseError`` -> ``parse_error``; a frame with the wrong columns, rows
+    whose ``source``/``dataset`` are not the fetch's (the writer rule that lets an empty fetch
+    be matched to its scope), a natural key twice, or a schema violation -> ``schema_invalid``;
+    any other parser exception -> ``parser_exception``.
+    """
+    empty = empty_frame(table)
+    n_rows = 0
+    try:
+        parsed = source.parse_table(raw)
+        if not isinstance(parsed, pd.DataFrame):
+            raise ParseError(f"parse_table() returned {type(parsed).__name__}, expected DataFrame")
+        n_rows = len(parsed)
+        expected = [c for c in columns(table) if c not in TABLE_LINEAGE_COLUMNS]
+        if sorted(parsed.columns) != sorted(expected):
+            missing = sorted(set(expected) - set(parsed.columns))
+            extra = sorted(set(parsed.columns) - set(expected))
+            return TableCleanResult(
+                empty, "schema_invalid", f"columns: missing {missing}, extra {extra}", n_rows
+            )
+        if parsed.empty:
+            return TableCleanResult(empty)
+        req = raw.request
+        wrong = (parsed["source"] != req.source) | (parsed["dataset"] != req.dataset)
+        if bool(wrong.any()):
+            detail = f"rows must carry source {req.source!r} and dataset {req.dataset!r}"
+            return TableCleanResult(empty, "schema_invalid", detail, n_rows)
+        key = list(NATURAL_KEYS[table])
+        if bool(parsed.duplicated(subset=key).any()):
+            detail = f"natural key {tuple(key)} appears more than once in one fetch"
+            return TableCleanResult(empty, "schema_invalid", detail, n_rows)
+        rows = parsed.copy()
+        rows["fetch_id"] = raw.fetch_id
+        rows["run_id"] = run_id
+        rows["ingested_at"] = pd.Series(
+            [pd.Timestamp(raw.responded_at)] * len(rows), index=rows.index
+        ).astype(empty["ingested_at"].dtype)
+        rows = rows[list(columns(table))]
+        validate(table, rows)
+    except ParseError as exc:
+        return TableCleanResult(empty, "parse_error", str(exc))
+    except SchemaErrors as exc:
+        return TableCleanResult(
+            empty, "schema_invalid", str(exc.failure_cases)[:_DETAIL_MAX], n_rows
+        )
+    except Exception as exc:  # a buggy parser must not take the run down
+        return TableCleanResult(empty, "parser_exception", f"{type(exc).__name__}: {exc}")
+    return TableCleanResult(rows.reset_index(drop=True))
+
+
 # ---------------------------------------------------------------------------------------------
 # buffer + single flush
 # ---------------------------------------------------------------------------------------------
@@ -184,6 +269,8 @@ def clean_response(source: Source, raw: RawResponse, run_id: str) -> CleanResult
 _ROW_TABLES = ("quarantine", "source_log", "dq_results")
 #: tables a check hook hands over as frames (dq_results also takes the runner's own rows)
 _FRAME_TABLES = ("dq_results", "revisions", "crosscheck_results")
+#: tables written whole per replace scope, all or nothing per run (card T65)
+SCOPED_TABLES: tuple[TableName, ...] = ("events", "filings")
 
 
 @dataclass
@@ -203,6 +290,10 @@ class RunBuffer:
         self._frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
         #: collapse key -> (buffered dq row, its details); see ``runner._dq_fail``
         self.dq_index: dict[tuple[str, str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
+        self._table_rows: dict[str, list[pd.DataFrame]] = defaultdict(list)
+        self._tainted: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
+        #: scopes held back at flush time, as "table (scope values): why" (card T65)
+        self.withheld: list[str] = []
 
     def add_observations(self, df: pd.DataFrame) -> None:
         if not df.empty:
@@ -219,6 +310,44 @@ class RunBuffer:
             raise ValueError(f"buffer takes no frames for table {table!r}")
         if not df.empty:
             self._frames[table].append(df)
+
+    def add_table_rows(self, table: TableName, df: pd.DataFrame) -> None:
+        """Buffer the validated rows of one clean ``events``/``filings`` fetch (card T65)."""
+        if table not in SCOPED_TABLES:
+            raise ValueError(f"{table!r} is not a scoped table")
+        if not df.empty:
+            self._table_rows[table].append(df)
+
+    def taint_scope(self, table: TableName, scope: tuple[Any, ...]) -> None:
+        """Mark a replace scope (``schemas.REPLACE_SCOPE`` values) as incomplete in this run: a
+        fetch that feeds it failed or was quarantined, so none of its rows are written."""
+        if table not in SCOPED_TABLES:
+            raise ValueError(f"{table!r} is not a scoped table")
+        self._tainted[table].add(tuple(scope))
+
+    def table_rows(self, table: TableName) -> pd.DataFrame:
+        """The rows of ``table`` this run will write: complete scopes only, keys unique.
+
+        Writer rules (``schemas`` module docstring): a scope that a failed or quarantined fetch
+        feeds is withheld whole; so is a scope in which a natural key appears twice (two fetches
+        disagreeing about one key is a writer bug, and half a scope must never be written).
+        """
+        pieces = [f for f in self._table_rows[table] if not f.empty]
+        if not pieces:
+            return empty_frame(table)
+        frame = pd.concat(pieces, ignore_index=True) if len(pieces) > 1 else pieces[0]
+        scope_cols = list(REPLACE_SCOPE[table])
+        scopes = list(zip(*(frame[c] for c in scope_cols), strict=True))
+        dup = frame.duplicated(subset=list(NATURAL_KEYS[table]), keep=False)
+        bad = {s for s, d in zip(scopes, dup, strict=True) if d}
+        tainted = self._tainted[table]
+        keep = pd.Series([s not in tainted and s not in bad for s in scopes], index=frame.index)
+        for scope in sorted({s for s, k in zip(scopes, keep, strict=True) if not k}, key=str):
+            why = "duplicate natural key" if scope in bad else "a fetch that feeds it failed"
+            note = f"{table} {scope}: withheld, {why}"
+            if note not in self.withheld:
+                self.withheld.append(note)
+        return frame[keep].reset_index(drop=True)
 
     @property
     def n_obs(self) -> int:
@@ -295,6 +424,18 @@ class RunBuffer:
             if only is not None and table not in only:
                 continue
             parts.extend(self._table_partitions(table))
+        for scoped in SCOPED_TABLES:
+            if only is not None and scoped not in only:
+                continue
+            rows = self.table_rows(scoped)
+            if rows.empty:
+                continue
+            column, to_date = PARTITION_RULES[scoped]
+            days = pd.Series([to_date(v) for v in rows[column]], index=rows.index)
+            parts.extend(
+                (scoped, day, grp.reset_index(drop=True))
+                for day, grp in rows.groupby(days, sort=True)
+            )
         return parts
 
     def _table_partitions(self, table: str) -> list[tuple[str, date, pd.DataFrame]]:

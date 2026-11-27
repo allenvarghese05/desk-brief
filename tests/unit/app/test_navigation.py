@@ -117,16 +117,21 @@ def test_clicking_an_instrument_sets_the_id_in_the_same_session(run_home: Run) -
     assert at.text_input(key="q").value == "yield"
 
 
+def by_group(at: AppTest) -> AppTest:
+    """Flip the watchlist switch to "By group" (P-024: "Unusual first" folds every group)."""
+    return at.segmented_control(key="db-wl-mode").set_value("By group").run()
+
+
 @pytest.mark.parametrize("where", ["strip", "wl"])  # T60: the strip replaced the tiles
 def test_every_selectable_item_selects_in_session(run_home: Run, where: str) -> None:
-    at = run_home("hosted")
+    at = by_group(run_home("hosted"))  # P-024: "Unusual first" folds the groups
     at.button(key=pick(where, "UST_10Y")).click().run()
     assert qp(at, "id") == "UST_10Y"
     assert chart_name(at) == "10Y"
 
 
 def test_a_folded_proxy_selects_and_opens_its_fold(run_home: Run) -> None:
-    at = run_home("hosted")
+    at = by_group(run_home("hosted"))
     at.button(key=pick("wl", "SPY")).click().run()
     assert qp(at, "id") == "SPY"
     folds = [e for e in at.expander if e.label.startswith("Show ")]
@@ -136,7 +141,7 @@ def test_a_folded_proxy_selects_and_opens_its_fold(run_home: Run) -> None:
 
 
 def test_every_pick_has_a_readable_button_label(run_home: Run) -> None:
-    at = run_home("hosted")
+    at = by_group(run_home("hosted"))
     picks = [b for b in at.button if (b.key or "").startswith("pick-wl-")]
     assert len(picks) >= 8
     ten = next(b for b in picks if b.key == pick("wl", "UST_10Y"))
@@ -214,7 +219,8 @@ def test_no_full_reload_links_anywhere_on_markets(run_home: Run) -> None:
 
 
 def test_hosted_and_local_markets_agree_on_tier1(run_home: Run) -> None:
-    hosted, local = page(run_home("hosted")), page(run_home("local"))
+    # P-024: "Unusual first" folds the groups; "By group" shows every row
+    hosted, local = page(by_group(run_home("hosted"))), page(by_group(run_home("local")))
     assert 'data-tier="1"' not in hosted
     assert 'data-tier="1"' in local
     legend = 'class="db-glyphs"'

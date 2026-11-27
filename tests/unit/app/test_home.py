@@ -42,6 +42,11 @@ def nav_titles(at: AppTest) -> list[str]:
     return [p["page_name"] for p in at._registered_pages.values()]
 
 
+def by_group(at: AppTest) -> AppTest:
+    """Flip the watchlist switch to "By group" (P-024: "Unusual first" folds every group)."""
+    return at.segmented_control(key="db-wl-mode").set_value("By group").run()
+
+
 def select(at: AppTest, iid: str) -> AppTest:
     """What a click on a watchlist row does: put ``?id=`` in the URL and run again."""
     at.query_params["id"] = iid
@@ -60,8 +65,14 @@ def test_smoke_top_bar_and_overview(run_home: Run) -> None:
     assert "2/2 checks pass" in text
     assert "hosted" in text
     assert "delayed+official" in text
+    assert at.segmented_control(key="db-wl-mode").value == "Unusual first"  # P-024 default
+    assert "Moved more than usual · " in text
+    assert "Everything else · " in text
     for title in ("Rates", "FX", "Commodities", "Equities"):
-        assert f'class="db-grp-chev">▾</span>{title}<' in text  # T60: groups start open
+        assert f'class="db-grp-chev">▸</span>{title}<' in text  # P-024: everything else folds
+    text = page(by_group(at))
+    for title in ("Rates", "FX", "Commodities", "Equities"):
+        assert f'class="db-grp-chev">▾</span>{title}<' in text  # T60: "By group" starts open
     assert "Cross checks" in nav_titles(at)  # T57: the page list is st.navigation's top bar
     assert at.button(key="-".join(("pick", "health"))).label == (
         "Open Data health: 2/2 checks pass"  # T57: counts readable without hovering
@@ -93,7 +104,7 @@ def test_footer_names_withheld_instruments() -> None:
 
 def test_hosted_falls_back_to_tier3_when_latest_is_tier1(run_home: Run) -> None:
     """SPY's latest value is a tier-1 tick; hosted shows its tier-3 Friday close instead."""
-    at = run_home("hosted")
+    at = by_group(run_home("hosted"))
     text = page(at, limits=False)
     assert "598.50" in text
     assert "600.00" not in text
@@ -102,7 +113,7 @@ def test_hosted_falls_back_to_tier3_when_latest_is_tier1(run_home: Run) -> None:
 
 def test_hosted_shows_gap_for_instrument_with_only_tier1_data(run_home: Run) -> None:
     only_t1 = [r for r in monday_rows() if not (r["instrument_id"] == "SPY" and r["tier"] != 1)]
-    at = run_home("hosted", rows=only_t1)
+    at = by_group(run_home("hosted", rows=only_t1))
     assert "600.00" not in page(at, limits=False)
     assert "data unavailable" in page(at, limits=False)  # shown as a gap, never as the tick
 
@@ -115,7 +126,7 @@ def test_unset_or_unknown_mode_fails_closed_to_hosted(run_home: Run) -> None:
 
 
 def test_local_mode_shows_tier1_with_glyph(run_home: Run) -> None:
-    at = run_home("local")
+    at = by_group(run_home("local"))
     text = page(at)
     assert "600.00" in text
     assert "alpaca" in text
@@ -138,7 +149,7 @@ def test_every_number_comes_from_the_provenance_component(run_home: Run) -> None
 
 
 def test_p009_labels_next_to_tier_and_asof(run_home: Run) -> None:
-    text = page(run_home("hosted"))
+    text = page(by_group(run_home("hosted")))
     rows = re.findall(ROW, text, flags=re.S)
     ten = next(c for c in rows if "4.37%" in c)  # 10Y tick (tier 2): labelled a yield, not a close
     assert 'db-field">yield<' in ten
@@ -229,7 +240,7 @@ def test_details_list_lineage_of_the_selection(run_home: Run) -> None:
 
 def test_overview_numbers_use_the_compact_tag(run_home: Run) -> None:
     """Glyph and as-of are on screen; field and source stay in the markup (hover, readers)."""
-    text = page(run_home("hosted"))
+    text = page(by_group(run_home("hosted")))
     rows = re.findall(ROW, text, flags=re.S)
     ten = next(c for c in rows if "4.37%" in c)
     assert 'class="db-prov"' in ten  # T57: the compact glyph with its CSS tooltip
@@ -251,7 +262,7 @@ def test_strip_items_select_the_instrument(run_home: Run) -> None:
 
 
 def test_proxies_fold_behind_one_line(run_home: Run) -> None:
-    at = run_home("hosted")  # T57: the fold is an st.expander, so its rows can be buttons
+    at = by_group(run_home("hosted"))  # T57: the fold is an st.expander, rows can be buttons
     fold = [e for e in at.expander if re.fullmatch(r"Show \d+ ETF prox(y|ies)", e.label)]
     assert fold
     folded = ["\n".join(m.value for m in e.markdown) for e in fold]
@@ -525,7 +536,7 @@ def test_layout_watchlist_has_full_names_and_no_raw_ids(run_home: Run) -> None:
 
     from deskbrief.report.model import Row as _Row
 
-    text = page(run_home("hosted"))
+    text = page(by_group(run_home("hosted")))
     rows = re.findall(ROW, text, flags=re.S)
     ten = next(r for r in rows if 'data-db-id="UST_10Y"' in r)
     assert "<b>10Y" in ten  # T60: the short id first, never truncated
@@ -733,7 +744,7 @@ def test_caches_are_keyed_on_the_data_version(
 def test_selection_and_range_survive_a_visit_to_macro(run_home: Run) -> None:
     """Markets, then Macro, then Markets: the instrument and range come back, although
     Streamlit drops the widget's state and the browser's page change drops ``?id=``/``?r=``."""
-    at = run_home("hosted")
+    at = by_group(run_home("hosted"))
     at.button(key="-".join(("pick", "wl", "UST_10Y"))).click().run()
     at.segmented_control(key="db-rng").set_value("1Y").run()
     assert qp(at, "r") == "1Y"
@@ -901,7 +912,7 @@ def test_home_shows_a_sigma_tag_on_the_watchlist_row(
     run_home: Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_move(monkeypatch, "UST_10Y", "UST_10Y fell 3bp; the move is 3.4σ of its usual moves")
-    text = page(run_home("hosted"))
+    text = page(by_group(run_home("hosted")))
     row = next(r for r in re.findall(ROW, text, flags=re.S) if 'data-db-id="UST_10Y"' in r)
     assert '<span class="db-sig">3.4σ' in row
     sr = row.split('class="db-sig"', 1)[1]
@@ -955,12 +966,13 @@ def test_known_limits_describe_the_v2_layout() -> None:
 
 def _sheets() -> dict[str, str]:
     from app import theme
-    from app.components import kit, panels
+    from app.components import brief, kit, panels
 
     return {
         "theme.CSS": theme.CSS,
         "kit.PAGE_CSS": kit.PAGE_CSS,
         "panels.HOME_CSS": panels.HOME_CSS,
+        "brief.BRIEF_CSS": brief.BRIEF_CSS,
     }
 
 
@@ -971,7 +983,9 @@ def _rule(css: str, selector: str) -> str:
     return m.group(1)
 
 
-@pytest.mark.parametrize("name", ["theme.CSS", "kit.PAGE_CSS", "panels.HOME_CSS"])
+@pytest.mark.parametrize(
+    "name", ["theme.CSS", "kit.PAGE_CSS", "panels.HOME_CSS", "brief.BRIEF_CSS"]
+)
 def test_shared_stylesheets_are_flat(name: str, flat_css: Callable[[str], list[str]]) -> None:
     assert flat_css(_sheets()[name]) == []
 
@@ -1123,20 +1137,22 @@ def test_four_type_sizes() -> None:
         assert sizes <= allowed, (name, sizes - allowed)
 
 
-def test_home_blocks_sit_in_their_p023_places(run_home: Run) -> None:
-    """Top bar, strip, then the main row (hero, then the watchlist), then the tabs, footer."""
+def test_home_blocks_sit_in_their_p024_places(run_home: Run) -> None:
+    """Top bar, strip, then the three panes in the source (phone) order brief, watchlist,
+    market (hero, horizons, sources, risk), then the tabs and the footer (P-024)."""
     text = page(run_home("local"))
     order = [
         '<span class="db-brand">',
         '<div class="db-status">',
         '<a class="db-sx',
+        '<div class="db-brief">',
+        '<div class="db-label">Watchlist',
         '<div class="db-label db-ch">',
         'class="db-pill',
         '<div class="db-ch-foot">',
         'aria-label="performance over horizons"',
         '<div class="db-label">Do the sources agree?</div>',
         '<div class="db-label">Risk and range</div>',
-        '<div class="db-label">Watchlist',
         "Every value we hold",
         '<div class="db-foot">',
     ]
@@ -1192,7 +1208,7 @@ def test_attribution_only_when_the_tradingview_chart_drew(
 
 
 def test_a_folded_group_keeps_the_selected_row(run_home: Run) -> None:
-    at = select(run_home("hosted"), "UST_10Y")
+    at = by_group(select(run_home("hosted"), "UST_10Y"))
     at.button(key="fold-rates").click().run()
     assert not at.exception
     keys = {b.key for b in at.button}
@@ -1255,9 +1271,9 @@ def test_bug3_names_never_break_one_letter_per_line() -> None:
     for decl in ("white-space: nowrap", "overflow: hidden", "text-overflow: ellipsis"):
         assert decl in small
     assert "min-width: 0" in _rule(css, ".db-wl-name")
-    # the watchlist keeps about 352 px beside the hero and goes full width below 960 px
+    # P-024: the watchlist keeps 280 px beside the market and goes full width below 960 px
     watch = '[data-testid="stColumn"]:has(.st-key-db-watch)'
-    assert "flex: 0 0 352px" in _rule(css, watch)
+    assert "flex: 0 0 280px" in _rule(css, watch)
 
 
 def test_all_values_source_folds_into_the_date_cell_on_a_phone(run_home: Run) -> None:

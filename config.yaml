@@ -23,8 +23,11 @@ sources:
   # T49: CFTC public reporting (Socrata, keyless); one request per run. docs/sources/cftc.md
   cftc:       {rate_per_min: 10, timeout_s: 30, retries: 3,
                user_agent: "desk-brief/0.1 (+https://github.com/allenvarghese05/desk-brief)"}
-  # P-024 / T64: contract entries only; T65 adds the adapters, probes and enables them.
+  # P-024 / T65: Treasury upcoming auctions -> events (keyless). Off until the owner's live probe
+  # (python scripts/probes/probe_t65_fiscaldata.py; docs/sources/fiscaldata.md).
   fiscaldata: {rate_per_min: 30, timeout_s: 20, retries: 3, enabled: false}
+  # T65: SEC EDGAR -> filings, for filings.companies / filings.holders (docs/sources/edgar.md). Off
+  # until the owner sets the secret and runs scripts/probes/probe_t65_edgar.py.
   # SEC fair access: at most 10 requests per second (600/min; config rejects more). The contact
   # User-Agent is read from the secret named here and is never committed or logged.
   edgar:      {rate_per_min: 300, timeout_s: 20, retries: 2, enabled: false,
@@ -610,5 +613,9 @@ brief:
     monthly_cap_usd: 5.0              # pending the owner's confirmation (P-024 open question)
     price_input_usd_per_mtok: 2.0     # claude-sonnet-5-5 list price, for the spend estimate
     price_output_usd_per_mtok: 10.0
+    # not used by the templated note (PR #102 round 4: the model writes no words); kept so a
+    # free-text note could reuse it. Advice and predictions, then hedged forecasts, as stems
     forbidden_words: [buy, sell, target, price target, will rise, will fall, should, recommend,
-                      forecast, predict, expect, outperform, underperform, overweight, underweight]
+                      forecast, predict, expect, outperform, underperform, overweight, underweight,
+                      likely, could, may, might, poised, set to, on track, probabl, bound to,
+                      will, headed, on course, set for]

@@ -305,11 +305,12 @@ def test_stale_tick_shows_its_date(tmp_path: Path, world: World) -> None:
     w.observations(
         [
             daily("WTI", FRI, 72.0, source="yahoo", dataset="history", tier=2),
-            tick("WTI", et(FRI, "15:30"), 71.0),
+            # after Friday's close: a quote before it would give way to the close (PR #102)
+            tick("WTI", et(FRI, "18:30"), 71.0),
         ]
     )
     wti = row(build(w), "WTI")
-    assert wti.as_of_text == "13 Nov 15:30"
+    assert wti.as_of_text == "13 Nov 18:30"
 
 
 def test_baseline_date_is_part_of_the_description(world: World) -> None:
