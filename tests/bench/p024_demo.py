@@ -41,7 +41,13 @@ from deskbrief.config import load_config
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.query import overnight_changes, series_by_feed, series_key
 from deskbrief.report.model import BriefModel, Note
-from deskbrief.report.note import allowed_contrasts, hidden_tiers, markets, render
+from deskbrief.report.note import (
+    allowed_contrasts,
+    hidden_tiers,
+    markets,
+    related_pairs,
+    render,
+)
 from deskbrief.schemas import to_frame
 from deskbrief.store import duck
 from deskbrief.store.backend import report_key
@@ -275,8 +281,15 @@ def _note(config: Any, store: LocalBackend) -> None:
         "contrasts": [{"a": "BRENT", "b": "WTI"}],
     }
     s = config.brief.note
-    out = render(reply, markets(model, hidden), allowed_contrasts(model, config), s.max_sentences)
-    note = Note(out.sentences, out.n_checked, out.n_numbers, model=f"{s.model} (synthetic)")
+    table = markets(model, hidden)
+    out = render(
+        reply,
+        table,
+        allowed_contrasts(model, config, table),
+        s.max_sentences,
+        related_pairs(model, config, table),
+    )
+    note = Note(out.sentences, out.n_numbers, out.n_numbers, model=f"{s.model} (synthetic)")
     body = replace(model, note=note).to_json().encode()
     store.put_bytes(report_key(FRI, 1, "model.json"), body)
 

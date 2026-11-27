@@ -1,8 +1,8 @@
 Desk Brief · Mon 16 Nov · 07:00 ET
 No clear read. 1 market moved more than usual.
 
-S&P futures (check) fell 1.6%, a 3.5σ day. EUR/USD rose 0.4%.
-Every number matches the stored data (3 of 3); 2 are from a market marked check.
+S&P futures (check) fell 1.6%, a 3.5σ day. EUR/USD rose 0.4% as of Fri.
+Every number matches the stored data (1 of 1).
 
 No regime rule met.
 

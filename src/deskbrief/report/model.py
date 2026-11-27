@@ -310,8 +310,8 @@ class Note:
     today: "."""
 
     sentences: tuple[str, ...] = ()
-    n_checked: int = 0  # figures of markets not marked "check" (Check before using names none)
-    n_numbers: int = 0  # every figure rendered, each the brief's own display string (0: no badge)
+    n_checked: int = 0  # figures rendered of markets not marked "check", the brief's own strings
+    n_numbers: int = 0  # the same count (the badge's "n of n"; 0 hides the badge)
     reason: str | None = None
     dropped: tuple[str, ...] = ()  # why each dropped pick went (logged, never shown)
     model: str = ""
@@ -320,16 +320,12 @@ class Note:
 
     @property
     def badge(self) -> str:
-        """ "Every number matches the stored data (n of n)", saying how many of them belong to a
-        market marked "check" (PR #102 round 4, email N1); "" when the note shows no figure."""
+        """ "Every number matches the stored data (n of n)"; "" when the note vouches for no
+        figure. A market marked "check" carries "(check)" in the note and its figures are not
+        counted (PR #102 round 4, B1)."""
         if not self.n_numbers:
             return ""
-        text = f"Every number matches the stored data ({self.n_numbers} of {self.n_numbers})"
-        flagged = self.n_numbers - min(self.n_checked, self.n_numbers)
-        if flagged:
-            verb = "is" if flagged == 1 else "are"
-            text += f"; {flagged} {verb} from a market marked check"
-        return text
+        return f"Every number matches the stored data ({self.n_checked} of {self.n_numbers})"
 
     @property
     def shown(self) -> bool:

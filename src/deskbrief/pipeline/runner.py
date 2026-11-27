@@ -388,7 +388,8 @@ def _process_request(
         if tcleaned.ok:
             buf.add_table_rows(table, tcleaned.rows)
             rows = len(tcleaned.rows)
-            for note in _held_back_notes(source.name, tcleaned.rows):
+            held = _held_back_notes(source.name, tcleaned.rows) if table == "filings" else []
+            for note in held:
                 if note not in manifest.notes:
                     manifest.notes.append(note)
             logged = FetchStatus.OK if rows else FetchStatus.EMPTY  # empty: nothing scheduled
@@ -462,7 +463,7 @@ def _held_back_notes(source_name: str, rows: pd.DataFrame) -> list[str]:
     """A run note per instrument whose filings fetch held a Form 4/A back (PR #102 review round
     4, N1): a possible original was unreadable, so the stored rows stay as they were. The run is
     still ``ok``; the note says what was not refreshed (the Company section also says "check")."""
-    if rows.empty or "details_json" not in rows.columns:
+    if rows.empty or not {"instrument_id", "details_json"} <= set(rows.columns):
         return []
     held: dict[str, set[str]] = {}
     for inst, details in zip(rows["instrument_id"], rows["details_json"], strict=True):

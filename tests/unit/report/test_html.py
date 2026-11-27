@@ -399,8 +399,9 @@ def _golden_with_note(tmp_path: Path) -> BriefModel:
         ],
         "contrasts": [],
     }
-    out = render(reply, markets(m, hidden), allowed_contrasts(m, config), 5)
-    note = Note(out.sentences, out.n_checked, out.n_numbers, model="synthetic",
+    table = markets(m, hidden)
+    out = render(reply, table, allowed_contrasts(m, config, table), 5)
+    note = Note(out.sentences, out.n_numbers, out.n_numbers, model="synthetic",
                 written_at=MON_0700)  # fmt: skip
     events = (
         Event(MON, "08:30", "Durable goods orders", "FRED", "release", "Oct", "+1.4%"),
@@ -456,3 +457,21 @@ def test_a_future_quote_stamped_at_its_own_break_is_dated(tmp_path: Path) -> Non
     m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
     wti = next(r for g in m.snapshot for r in g.rows if r.instrument_id == "WTI")
     assert wti.meta == "delayed, Fri 17:00"
+
+
+def test_a_market_whose_data_check_failed_is_never_in_the_note(tmp_path: Path) -> None:
+    """PR #102 round 4, B1 (the reviewer's probe_dqfail): WTI failed a data check in the golden
+    world; a reply picking it renders nothing, and its figure is never stated under the badge."""
+    from deskbrief.report.note import allowed_contrasts, hidden_tiers, markets, render
+
+    m = _golden_model(tmp_path)
+    config = fixture_config()
+    rows = {r.instrument_id: r for r in m.rows()}
+    assert rows["WTI"].dq_flag == "fail"
+    table = markets(m, hidden_tiers(config))
+    assert "WTI" not in table
+    reply = {"items": [{"market_id": "WTI", "show": "move_and_level"}], "contrasts": []}
+    out = render(reply, table, allowed_contrasts(m, config, table), 5)
+    assert out.sentences == ()
+    assert out.n_numbers == 0
+    assert out.dropped == ("an item named a market not in today's brief",)

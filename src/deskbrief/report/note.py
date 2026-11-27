@@ -50,7 +50,15 @@ from typing import Any, Protocol, cast
 from deskbrief.config import Config, NoteSettings
 from deskbrief.ids import new_id
 from deskbrief.logging import get_logger
-from deskbrief.report.model import NOTE_NO_KEY, NOTE_OFF, SPREAD_ID, BriefModel, Note
+from deskbrief.report.model import (
+    NOTE_NO_KEY,
+    NOTE_OFF,
+    SPREAD_ID,
+    BriefModel,
+    Note,
+    Row,
+    _windows_match,
+)
 from deskbrief.store.backend import REPORTS_PREFIX, StorageBackend
 from deskbrief.timeutil import ensure_utc, to_et, utc_now
 
@@ -80,6 +88,7 @@ class Market:
     level: str  # the brief's value ("6,012.25", "4.15%")
     sigma: str | None  # "3.6σ" for a mover (ranked, at or above the warn level); else None
     check: bool = False  # named in Check before using (the movers' and snapshot's "check")
+    when: str = ""  # a dated move's period ("as of Thu", "on the week to 10 Nov"); "" if live
 
     @property
     def sign(self) -> int:
@@ -154,12 +163,33 @@ def market_kind(instrument_id: str, name: str) -> str:
     return "price"
 
 
+def _when(row: Row) -> str:
+    """The period a dated move covers, from the brief's own as-of (PR #102 round 4, N3): an
+    official daily value "as of Thu", a weekly one "on the week to 10 Nov", a monthly one "in
+    Oct 2026". An intraday move (since the previous close) says nothing more."""
+    ch = row.change
+    if ch is None or ch.last.interval not in ("1d", "1w", "1mo"):
+        return ""
+    at = to_et(ch.last.as_of)
+    if ch.last.interval == "1w":
+        return f"on the week to {at.day} {at:%b}"
+    if ch.last.interval == "1mo":
+        return f"in {at:%b %Y}"
+    return f"as of {at:%a}"
+
+
 def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
     """Every market the note may pick: each visible mover, then each visible snapshot row, with
     the display strings the email shows for it. Only a mover carries its sigma (the ranking
-    every surface reads). Nothing of a tier the hosted dashboard hides."""
+    every surface reads). Nothing of a tier the hosted dashboard hides, and never a market whose
+    data check failed (PR #102 round 4, B1): its figure is not stated as a market fact. A market
+    named in Check before using (the movers' and the snapshot's "check") is marked."""
     rows = {r.instrument_id: r for r in model.rows()}
-    visible = {i for i, r in rows.items() if r.tier is not None and r.tier not in hidden}
+    visible = {
+        i
+        for i, r in rows.items()
+        if r.tier is not None and r.tier not in hidden and r.dq_flag != "fail"
+    }
     flagged = {i for c in model.caveats for i in c.instrument_ids}
     out: dict[str, Market] = {}
     for m in model.movers:
@@ -172,6 +202,7 @@ def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
                 m.value_text,
                 f"{m.sigma:.1f}σ",
                 m.instrument_id in flagged,
+                _when(rows[m.instrument_id]),
             )
     for g in model.snapshot:
         for r in g.rows:
@@ -186,16 +217,52 @@ def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
                 r.value_text,
                 None,  # sigma only for a ranked mover: a quiet move's sigma says nothing
                 r.instrument_id in flagged,
+                _when(row),
             )
     return out
 
 
-def allowed_contrasts(model: BriefModel, config: Config) -> frozenset[frozenset[str]]:
-    """The pairs a contrast may name: ``brief.related_pairs`` and the pairs Check before using
-    names."""
+def related_pairs(
+    model: BriefModel, config: Config, table: Mapping[str, Market] | None = None
+) -> frozenset[frozenset[str]]:
+    """The pairs a contrast may name at all: ``brief.related_pairs`` and the pairs Check before
+    using names, both of whose markets are in ``table``. A proxy beside its underlying (GOLD_F
+    and GLD) never is: the proxy is shown only when its underlying has no value, so that pair is
+    never offered (PR #102 round 4, N7). ``table`` defaults to :func:`markets` at the hosted
+    tiers."""
+    if table is None:
+        table = markets(model, hidden_tiers(config))
     pairs = {frozenset(p.pair) for p in config.brief.related_pairs}
     pairs |= {frozenset(c.instrument_ids) for c in model.caveats if len(c.instrument_ids) == 2}
-    return frozenset(p for p in pairs if len(p) == 2)
+    return frozenset(p for p in pairs if len(p) == 2 and p <= table.keys())
+
+
+def allowed_contrasts(
+    model: BriefModel, config: Config, table: Mapping[str, Market] | None = None
+) -> frozenset[frozenset[str]]:
+    """The related pairs that may be said as one contrast ("A fell … while B rose …"): their
+    moves go opposite ways over the same window (``model._windows_match``), or the pair's own
+    Check before using caveat fired, which measured the gap over one window (PR #102 round 4,
+    N1). Any other related pair is said as two plain sentences."""
+    if table is None:
+        table = markets(model, hidden_tiers(config))
+    fired = {frozenset(c.instrument_ids) for c in model.caveats if c.kind == "pair"}
+    rows = {r.instrument_id: r for r in model.rows()}
+    out = set()
+    for pair in related_pairs(model, config, table):
+        a, b = sorted(pair)
+        ca, cb = rows[a].change, rows[b].change
+        opposite = table[a].sign * table[b].sign < 0
+        same_window = (
+            ca is not None
+            and cb is not None
+            and ca.previous is not None
+            and cb.previous is not None
+            and _windows_match(ca, cb)
+        )
+        if pair in fired or (opposite and same_window):
+            out.add(pair)
+    return frozenset(out)
 
 
 def facts(model: BriefModel, config: Config, hidden: Collection[int]) -> dict[str, Any]:
@@ -225,9 +292,7 @@ def facts(model: BriefModel, config: Config, hidden: Collection[int]) -> dict[st
             }
             for k in table.values()
         ],
-        "allowed_contrasts": sorted(
-            sorted(p) for p in allowed_contrasts(model, config) if p <= table.keys()
-        ),
+        "allowed_contrasts": sorted(sorted(p) for p in allowed_contrasts(model, config, table)),
     }
 
 
@@ -283,25 +348,29 @@ def _moved(k: Market) -> str:
     return f"{up if k.sign > 0 else down} {k.magnitude}"
 
 
+def _said(k: Market) -> str:
+    """ "fell 1.6%", "fell 2bp as of Thu", "was unchanged as of Thu"."""
+    return f"{_moved(k)} {k.when}" if k.when else _moved(k)
+
+
 def _sentence(k: Market, show: str) -> tuple[str, int]:
-    """One market's sentence and the figures it shows."""
+    """One market's sentence and the figures the badge vouches for (none for a market marked
+    "check": PR #102 round 4, B1)."""
     n = 0 if k.sign == 0 else 1
     if show == "move_and_level":
         at = "at" if k.sign == 0 else "to"
-        return _cap(f"{k.label} {_moved(k)} {at} {k.level}."), n + 1
-    if show == "move_and_sigma":
-        return _cap(f"{k.label} {_moved(k)}, a {k.sigma} day."), n + 1
-    return _cap(f"{k.label} {_moved(k)}."), n
+        text, n = f"{k.label} {_moved(k)} {at} {k.level}", n + 1
+        text += f" {k.when}." if k.when else "."
+    elif show == "move_and_sigma":
+        text, n = f"{k.label} {_said(k)}, a {k.sigma} day.", n + 1
+    else:
+        text = f"{k.label} {_said(k)}."
+    return _cap(text), 0 if k.check else n
 
 
 def _contrast(a: Market, b: Market) -> tuple[str, int]:
-    n = (a.sign != 0) + (b.sign != 0)
-    return _cap(f"{a.label} {_moved(a)} while {b.label} {_moved(b)}."), n
-
-
-def _figures(k: Market, n: int) -> tuple[int, int]:
-    """(figures, figures of a market not marked "check")."""
-    return n, 0 if k.check else n
+    n = sum(0 if k.check else int(k.sign != 0) for k in (a, b))
+    return _cap(f"{a.label} {_said(a)} while {b.label} {_said(b)}."), n
 
 
 def _pick(table: Mapping[str, Market], obj: object, field: str) -> Market | None:
@@ -313,8 +382,7 @@ def _pick(table: Mapping[str, Market], obj: object, field: str) -> Market | None
 @dataclass(frozen=True)
 class Rendered:
     sentences: tuple[str, ...]
-    n_numbers: int  # figures rendered
-    n_checked: int  # of those, figures of markets not marked "check"
+    n_numbers: int  # figures rendered of markets not marked "check" (the badge's n)
     dropped: tuple[str, ...]  # why each pick went (never a reply string)
 
 
@@ -323,12 +391,18 @@ def render(
     table: Mapping[str, Market],
     contrasts: Collection[frozenset[str]],
     max_sentences: int,
+    related: Collection[frozenset[str]] = (),
 ) -> Rendered:
     """Validate a parsed reply against today's markets and render the kept picks. A reply value
-    is only ever used as a key into ``table`` or ``SHOWS``; nothing of it is copied out."""
+    is only ever used as a key into ``table`` or ``SHOWS``; nothing of it is copied out.
+
+    A pair in ``contrasts`` is said as one sentence; a pair only in ``related`` is said as two
+    plain sentences (PR #102 round 4, N1). A contrast takes the place of the first of its
+    markets the items list (else it follows the items), so a market the model listed is never
+    lost to a contrast cut by ``max_sentences`` (N6)."""
     dropped: list[str] = []
     if not isinstance(reply, Mapping):
-        return Rendered((), 0, 0, ("the reply was not an object",))
+        return Rendered((), 0, ("the reply was not an object",))
     raw_items = reply.get("items")
     raw_pairs = reply.get("contrasts")
     items = list(raw_items) if isinstance(raw_items, list) else []
@@ -342,26 +416,7 @@ def render(
     if len(pairs) > MAX_CONTRASTS:
         dropped.append(f"{len(pairs) - MAX_CONTRASTS} contrasts over the limit of {MAX_CONTRASTS}")
 
-    kept_pairs: list[tuple[Market, Market]] = []
-    for p in pairs[:MAX_CONTRASTS]:
-        a, b = _pick(table, p, "a"), _pick(table, p, "b")
-        if a is None or b is None:
-            dropped.append("a contrast named a market not in today's brief")
-            continue
-        ids = frozenset((a.instrument_id, b.instrument_id))
-        name = f"contrast {a.instrument_id}/{b.instrument_id}"
-        if len(ids) < 2 or ids not in contrasts:
-            dropped.append(f"{name} is not an allowed pair")
-        elif not a.change or not b.change:
-            dropped.append(f"{name} has no change to show")
-        elif any(frozenset((x.instrument_id, y.instrument_id)) == ids for x, y in kept_pairs):
-            dropped.append(f"{name} repeated")
-        else:
-            kept_pairs.append((a, b))
-    in_pairs = {k.instrument_id for pair in kept_pairs for k in pair}
-
-    out: list[tuple[str, int, int]] = []  # sentence, figures, figures not marked check
-    seen: set[str] = set()
+    picks: list[tuple[Market, str]] = []  # the valid items, in order
     for item in items[:MAX_ITEMS]:
         k = _pick(table, item, "market_id")
         show = item.get("show") if isinstance(item, Mapping) else None
@@ -369,10 +424,8 @@ def render(
             dropped.append("an item named a market not in today's brief")
         elif not isinstance(show, str) or show not in SHOWS:
             dropped.append(f"{k.instrument_id}: unknown show")
-        elif k.instrument_id in seen:
+        elif any(k is x for x, _ in picks):
             dropped.append(f"{k.instrument_id}: repeated")
-        elif k.instrument_id in in_pairs:
-            dropped.append(f"{k.instrument_id}: already in a contrast")
         elif not k.change:
             dropped.append(f"{k.instrument_id}: no change to show")
         elif show == "move_and_level" and not k.level:
@@ -380,22 +433,54 @@ def render(
         elif show == "move_and_sigma" and (k.sigma is None or k.sign == 0):
             dropped.append(f"{k.instrument_id}: sigma asked of a move that is not ranked")
         else:
-            seen.add(k.instrument_id)
-            text, n = _sentence(k, show)
-            out.append((text, *_figures(k, n)))
-    for a, b in kept_pairs:
-        text, _ = _contrast(a, b)
-        na, nb = (a.sign != 0), (b.sign != 0)
-        out.append((text, na + nb, (0 if a.check else na) + (0 if b.check else nb)))
+            picks.append((k, show))
+
+    joint: list[tuple[Market, Market]] = []  # contrasts said as one sentence
+    apart: list[Market] = []  # related pairs that are no contrast: said as plain sentences
+    for p in pairs[:MAX_CONTRASTS]:
+        a, b = _pick(table, p, "a"), _pick(table, p, "b")
+        if a is None or b is None:
+            dropped.append("a contrast named a market not in today's brief")
+            continue
+        ids = frozenset((a.instrument_id, b.instrument_id))
+        name = f"contrast {a.instrument_id}/{b.instrument_id}"
+        if len(ids) < 2 or (ids not in contrasts and ids not in related):
+            dropped.append(f"{name} is not an allowed pair")
+        elif not a.change or not b.change:
+            dropped.append(f"{name} has no change to show")
+        elif any(frozenset((x.instrument_id, y.instrument_id)) == ids for x, y in joint):
+            dropped.append(f"{name} repeated")
+        elif ids not in contrasts:
+            dropped.append(f"{name} is no contrast (same way or another window): said apart")
+            apart += [k for k in (a, b) if k not in apart]
+        else:
+            joint.append((a, b))
+
+    out: list[tuple[str, int]] = []
+    said: set[str] = set()
+    for k, show in picks:
+        if k.instrument_id in said:
+            dropped.append(f"{k.instrument_id}: already in a contrast")
+            continue
+        pair = next(((a, b) for a, b in joint if k in (a, b)), None)
+        if pair is None:
+            out.append(_sentence(k, show))
+            said.add(k.instrument_id)
+        else:
+            out.append(_contrast(*pair))
+            said |= {pair[0].instrument_id, pair[1].instrument_id}
+    for a, b in joint:
+        if not {a.instrument_id, b.instrument_id} & said:
+            out.append(_contrast(a, b))
+            said |= {a.instrument_id, b.instrument_id}
+    for k in apart:
+        if k.instrument_id not in said:
+            out.append(_sentence(k, "move"))
+            said.add(k.instrument_id)
     if len(out) > max_sentences:
         dropped.append(f"{len(out) - max_sentences} sentences over the limit of {max_sentences}")
         out = out[:max_sentences]
-    return Rendered(
-        tuple(t for t, _, _ in out),
-        sum(n for _, n, _ in out),
-        sum(c for _, _, c in out),
-        tuple(dropped),
-    )
+    return Rendered(tuple(t for t, _ in out), sum(n for _, n in out), tuple(dropped))
 
 
 def hidden_tiers(config: Config) -> frozenset[int]:
@@ -413,8 +498,8 @@ def prompt(settings: NoteSettings) -> str:
         'first, and for each say what to show: "move", "move_and_level", or '
         '"move_and_sigma" (only for a market whose sigma is given). Optionally pick up to '
         f"{MAX_CONTRASTS} contrasts, only from allowed_contrasts, where two related markets "
-        "moved differently. Prefer the markets that moved more than usual and those named in "
-        "Check before using. Reply with the JSON object the schema asks for and nothing else."
+        "moved differently. Prefer the markets that moved more than usual. Reply with the "
+        "JSON object the schema asks for and nothing else."
     )
 
 
@@ -516,7 +601,8 @@ def write_note(
     table = markets(model, hidden)
     if not table:
         return Note(reason="there is no market in today's brief to describe", model=s.model)
-    pairs = allowed_contrasts(model, config)
+    pairs = allowed_contrasts(model, config, table)
+    related = related_pairs(model, config, table)
     payload = facts(model, config, hidden)
     system, user = prompt(s), "Facts (JSON):\n" + json.dumps(payload, ensure_ascii=False)
     worst = _cost(s, (len(system) + len(user)) // 3 + 200, s.max_output_tokens)
@@ -550,7 +636,7 @@ def write_note(
     except Exception:  # an unreadable usage block: count the worst case
         cost = worst
     try:
-        return _read_reply(response, s, table, pairs, cost)
+        return _read_reply(response, s, table, pairs, related, cost)
     except Exception as exc:
         log.warning("note.unexpected", error=type(exc).__name__)
         reason = f"the note could not be written ({type(exc).__name__})"
@@ -562,6 +648,7 @@ def _read_reply(
     s: NoteSettings,
     table: Mapping[str, Market],
     pairs: Collection[frozenset[str]],
+    related: Collection[frozenset[str]],
     cost: float,
 ) -> Note:
     log = get_logger()
@@ -579,7 +666,7 @@ def _read_reply(
         log.info("note.malformed")
         return Note(reason="the reply was not the structured output asked for", model=s.model,
                     cost_usd=cost)  # fmt: skip
-    result = render(reply, table, pairs, s.max_sentences)
+    result = render(reply, table, pairs, s.max_sentences, related)
     for why in result.dropped:
         log.info("note.pick_dropped", reason=why)
     if not result.sentences:
@@ -587,7 +674,7 @@ def _read_reply(
                     model=s.model, cost_usd=cost)  # fmt: skip
     return Note(
         sentences=result.sentences,
-        n_checked=result.n_checked,
+        n_checked=result.n_numbers,
         n_numbers=result.n_numbers,
         dropped=result.dropped,
         model=s.model,
@@ -674,6 +761,7 @@ __all__ = [
     "note_name",
     "note_of",
     "record_spend",
+    "related_pairs",
     "render",
     "schema",
     "stored_note",

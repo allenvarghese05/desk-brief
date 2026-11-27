@@ -108,7 +108,8 @@ def _write(model: BriefModel, world: World, fake: Fake, **kw: Any) -> Note:
 
 
 def _mk(model: BriefModel, world: World) -> tuple[dict[str, Market], frozenset[frozenset[str]]]:
-    return markets(model, hidden_tiers(world.config)), allowed_contrasts(model, world.config)
+    table = markets(model, hidden_tiers(world.config))
+    return table, allowed_contrasts(model, world.config, table)
 
 
 ES_MOVE = {"items": [{"market_id": "ES_F", "show": "move"}], "contrasts": []}
@@ -159,7 +160,7 @@ def test_a_valid_reply_is_rendered_from_the_briefs_own_strings(
         # the verb says the direction, so the change is shown without its sign
         f"S&P futures fell {es.change_text.lstrip('−')}, a {es.sigma:.1f}σ day.",
         "10-year fell 3bp to 4.37%.",
-        "EUR/USD rose 0.4%.",
+        "EUR/USD rose 0.4% as of Fri.",
     )
     assert (n.n_checked, n.n_numbers) == (5, 5)  # figures rendered
     assert n.model == "claude-sonnet-5-5"
@@ -191,30 +192,107 @@ def test_an_allowed_contrast_is_rendered_and_its_markets_said_once(world: World)
         "contrasts": [{"a": "BRENT", "b": "WTI"}, {"a": "VIX", "b": "WTI"}],
     }
     out = render(reply, table, pairs, 5)
-    assert out.sentences == (
-        "Cboe Volatility Index rose 2.1 pts.",
+    assert out.sentences == (  # the contrast takes Brent's place (round 4, N6)
         "Brent crude oil fell 4.1% while WTI crude oil rose 0.3%.",
+        "Cboe Volatility Index rose 2.1 pts.",
     )
     assert out.n_numbers == 3
     assert "contrast VIX/WTI is not an allowed pair" in out.dropped
-    assert "BRENT: already in a contrast" in out.dropped
 
 
 def test_contrasts_come_from_related_pairs_and_check_before_using(
     model: BriefModel, world: World
 ) -> None:
-    pairs = allowed_contrasts(model, world.config)
-    assert {frozenset(p.pair) for p in world.config.brief.related_pairs} <= pairs
-    # a pair a Check before using item names is allowed too
     from dataclasses import replace
 
     from deskbrief.report.model import Caveat
 
-    flagged = replace(
-        model, caveats=(Caveat("pair", "2Y vs 10Y", "Apart.", ("UST_2Y", "UST_10Y")),)
+    table = markets(model, hidden_tiers(world.config))
+    # Brent and gold are not in this brief: no configured pair can be said (round 4, N7: a pair
+    # whose markets are never in the table together, such as GOLD_F and GLD, is never offered)
+    assert note_mod.related_pairs(model, world.config, table) == frozenset()
+    # a pair whose own gap caveat fired may be said as one, even moving the same way
+    item = Caveat("pair", "2Y vs 10Y", "Apart.", ("UST_2Y", "UST_10Y"))
+    flagged = replace(model, caveats=(item,))
+    assert frozenset({"UST_2Y", "UST_10Y"}) in allowed_contrasts(flagged, world.config, table)
+
+
+def _with_pair(world: World, a: str, b: str) -> Any:
+    from deskbrief.config import RelatedPair
+
+    brief = world.config.brief
+    pairs = (RelatedPair(pair=(a, b), limit=1.0),)
+    return world.config.model_copy(
+        update={"brief": brief.model_copy(update={"related_pairs": pairs})}
     )
-    assert frozenset({"UST_2Y", "UST_10Y"}) in allowed_contrasts(flagged, world.config)
-    assert frozenset({"UST_2Y", "UST_10Y"}) not in pairs
+
+
+def test_a_contrast_needs_opposite_moves_over_one_window(tmp_path: Path) -> None:
+    """Round 4, N1: "A fell … while B rose …" only for opposite moves over matching windows;
+    the same pair moving the same way is said as two plain sentences."""
+    w = World(tmp_path)
+    base = [r for r in monday_rows() if r["instrument_id"] not in ("ES_F", "WTI")]
+    w.observations([*base, *_price("ES_F", -8, 6000.0, "index_pts"), *_price("WTI", 3, 70.0)])
+    m = BriefModel.from_store(w.connect(), w.config, MON, MON_0700)
+    cfg = _with_pair(w, "ES_F", "WTI")
+    table = markets(m, hidden_tiers(cfg))
+    assert frozenset({"ES_F", "WTI"}) in allowed_contrasts(m, cfg, table)
+    n = write_note(m, cfg, KEY, client_factory=Fake(
+        {"items": [], "contrasts": [{"a": "ES_F", "b": "WTI"}]}).factory)  # fmt: skip
+    assert len(n.sentences) == 1
+    assert " while WTI crude rose " in n.sentences[0]
+
+
+def test_the_same_pair_moving_the_same_way_is_said_apart(model: BriefModel, world: World) -> None:
+    cfg = _with_pair(world, "ES_F", "WTI")  # both fell in this world
+    table = markets(model, hidden_tiers(cfg))
+    assert frozenset({"ES_F", "WTI"}) in note_mod.related_pairs(model, cfg, table)
+    assert frozenset({"ES_F", "WTI"}) not in allowed_contrasts(model, cfg, table)
+    n = write_note(model, cfg, KEY, client_factory=Fake(
+        {"items": [], "contrasts": [{"a": "ES_F", "b": "WTI"}]}).factory)  # fmt: skip
+    assert n.sentences == (
+        f"S&P futures fell {_es(model).change_text[1:]}.",
+        "WTI crude fell 0.4%.",
+    )
+    assert not any("while" in x for x in n.sentences)
+
+
+def test_a_pair_over_mismatched_windows_is_said_apart(model: BriefModel, world: World) -> None:
+    from deskbrief.report.model import _windows_match
+
+    rows = {r.instrument_id: r for r in model.rows()}
+    assert not _windows_match(rows["ES_F"].change, rows["EURUSD"].change)  # type: ignore[arg-type]
+    cfg = _with_pair(world, "ES_F", "EURUSD")  # opposite ways, different windows
+    table = markets(model, hidden_tiers(cfg))
+    assert frozenset({"ES_F", "EURUSD"}) not in allowed_contrasts(model, cfg, table)
+
+
+def test_a_dated_move_says_its_period(model: BriefModel, world: World) -> None:
+    """Round 4, N3: an official daily move says "as of" its day."""
+    table, _ = _mk(model, world)
+    assert table["UST_2Y"].when == "as of Fri"
+    assert note_mod._sentence(table["UST_2Y"], "move")[0] == "2-year fell 2bp as of Fri."
+    assert note_mod._sentence(table["UST_2Y"], "move_and_level")[0] == (
+        "2-year fell 2bp to 4.18% as of Fri."
+    )
+    assert table["ES_F"].when == ""  # since the previous close: nothing more to say
+    k = Market("X", "x", "price", "+0.3%", "1", None, when="on the week to 10 Nov")
+    assert note_mod._sentence(k, "move")[0] == "X rose 0.3% on the week to 10 Nov."
+
+
+def test_a_contrast_never_costs_a_listed_market_its_place() -> None:
+    """Round 4, N6: the contrast takes the place of its first listed market, so cutting at
+    max_sentences never drops a market the model listed while keeping a later one."""
+    mk = lambda i, c: Market(i, i.lower(), "price", c, "1", None)  # noqa: E731
+    table = {i: mk(i, c) for i, c in (("A", "+1.0%"), ("B", "−1.0%"), ("C", "+2.0%"),
+                                      ("D", "+3.0%"))}  # fmt: skip
+    pairs = frozenset({frozenset({"A", "B"})})
+    reply = {
+        "items": [{"market_id": i, "show": "move"} for i in ("A", "C", "D")],
+        "contrasts": [{"a": "A", "b": "B"}],
+    }
+    out = render(reply, table, pairs, 2)
+    assert out.sentences == ("A rose 1.0% while b fell 1.0%.", "C rose 2.0%.")
 
 
 # ---------------------------------------------------------------------------
@@ -588,11 +666,12 @@ def test_a_market_marked_check_says_so_in_the_note_and_the_badge(
         ]
     }
     n = _write(flagged, world, Fake(reply))
-    assert n.sentences == ("WTI crude (check) fell 0.4% to $69.50.", "EUR/USD rose 0.4%.")
-    assert (n.n_checked, n.n_numbers) == (1, 3)
-    assert (
-        n.badge == "Every number matches the stored data (3 of 3); 2 are from a market marked check"
+    assert n.sentences == (
+        "WTI crude (check) fell 0.4% to $69.50.",
+        "EUR/USD rose 0.4% as of Fri.",
     )
+    assert (n.n_checked, n.n_numbers) == (1, 1)  # the flagged market's figures are not vouched
+    assert n.badge == "Every number matches the stored data (1 of 1)"
     out = replace(flagged, note=n)
     assert f"{n.badge}." in render_text(out)
     assert f"{n.badge}." in render_html(out)
