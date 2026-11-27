@@ -1,42 +1,38 @@
-"""The morning note, every number checked (P-024, card T66; was stretch card T50).
+"""The morning note, templated (P-024, card T66; was stretch card T50; PR #102 round 4).
 
-Claude receives only the brief's own model (the read, the movers, Check before using and the
-snapshot) and writes four or five plain sentences. The prompt forbids advice, signals, targets
-and predictions. The note is written once, by the morning job's report step, and stored in the
-brief's ``model.json``; the dashboard shows that stored note and never calls the API.
+Claude writes no prose. It receives the brief's own facts (the read, the rules met, Check before
+using and each visible market's display strings) and returns structured output only, held to a
+JSON schema: an ordered list of up to ``MAX_ITEMS`` picks ``{market_id, show}`` (``show`` is
+``move``, ``move_and_level`` or ``move_and_sigma``) and up to ``MAX_CONTRASTS`` contrasts
+``{a, b}``. Code then:
 
-The model never writes a number (round 3 of the PR #102 review). It receives each figure the
-brief shows as a named slot (``{ES_F.chg_1d}``, ``{HY_OAS.level}``, ``{HY_OAS.sigma}``, and
-``{ES_F.name}`` for a market's name), with what the slot shows for context, and writes the slot
-wherever it means a value. :func:`check` replaces each slot with the brief's exact display
-string, and drops a sentence (logging why) when:
+* validates every pick, dropping (and logging, never echoing) an unknown market, a market not in
+  today's snapshot or movers, a market with no change to show, sigma asked of a move that is not
+  ranked, a repeat, and a contrast that is neither in ``brief.related_pairs`` nor a pair named
+  in Check before using;
+* renders each sentence from fixed templates with the brief's exact display strings: the
+  brief's display name, the change without its sign after a verb chosen from the sign and the
+  market's kind (prices, yields and the rest rose/fell; credit spreads widened/narrowed; the
+  2s10s curve steepened/flattened; a zero change "was unchanged"), the level and the sigma.
 
-* it holds an unknown slot;
-* its own words, outside slots, hold a numeric character of any script (digits, "½"), a percent,
-  per-mille, sigma or currency sign, a unit word ("percent", "bp", "points"), or a number,
-  fraction or period word ("two", "dozen", "half", "third", "quarter", "decade");
-* a change slot disagrees with a direction word anywhere in its clause (rise, rally, surge, add,
-  climb, higher, widen, steepen, firm ... for a fall; fall, drop, slip, lower, narrow, tighten,
-  flatten ... for a rise; any direction for a change of zero);
-* a value slot sits in a clause that names another market, or in a sentence that never names
-  its market (by its name slot, the brief's names, or a plain alias such as "Brent");
-* it holds a forbidden word (``brief.note.forbidden_words``, which include hedged forecasts such
-  as "likely", "could", "may"), matched as a stem, with "sell-off", "buyback", "buyers" and
-  "sellers" allowed.
-
-"Every number checked (n of n)" counts the value slots filled in the kept sentences.
+No text of the reply reaches the output: a reply string is only ever looked up as an id, and an
+id is shown as the brief's display name. "Every number matches the stored data (n of n)" counts
+the figures rendered and is hidden when there are none. The note's first line stays the read
+(the regime rules in code).
 
 No note, and the brief says "No note today" with the reason, when: the note is turned off, no
 API key is set (``brief.note.api_key_env``; the key is read from the environment and never
 logged), the month's spend would pass ``brief.note.monthly_cap_usd``, the API errors or times
-out, the reply is empty, declined or cut at the token limit, or no sentence survives the check.
-Each call's cost is written to a spend ledger (``reports/note_spend/month=YYYY-MM/``, by the
-call's ET month) the moment it returns; a timeout counts the worst case. A call is made only
-when the worst case (``max_output_tokens`` at the output price) still fits the cap.
+out, the reply is declined, cut at the token limit or not the structured output asked for, or no
+pick survives validation. Each call's cost is written to a spend ledger
+(``reports/note_spend/month=YYYY-MM/``, by the call's ET month) the moment it returns; a timeout
+counts the worst case. A call is made only when the worst case (``max_output_tokens`` at the
+output price) still fits the cap. ``brief.note.forbidden_words`` stays in config but no longer
+affects the output: the model writes no words.
 
-Hosted mode (the public dashboard shows the stored note): the prompt never holds a value of a
-tier the hosted dashboard hides (tier 1 always, plus ``dashboard.hosted_hidden_tiers``), so the
-note cannot carry one either.
+Hosted mode (the public dashboard shows the stored note): the facts never hold a value of a tier
+the hosted dashboard hides (tier 1 always, plus ``dashboard.hosted_hidden_tiers``), and a market
+of such a tier cannot be picked.
 """
 # ruff: noqa: RUF001, RUF003  (the sigma and minus signs are intentional output)
 
@@ -44,7 +40,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any, Protocol, cast
@@ -52,91 +48,47 @@ from typing import Any, Protocol, cast
 from deskbrief.config import Config, NoteSettings
 from deskbrief.ids import new_id
 from deskbrief.logging import get_logger
-from deskbrief.report.model import NOTE_NO_KEY, NOTE_OFF, SHORT_LABELS, BriefModel, Note
+from deskbrief.report.model import NOTE_NO_KEY, NOTE_OFF, SPREAD_ID, BriefModel, Note
 from deskbrief.store.backend import REPORTS_PREFIX, StorageBackend
 from deskbrief.timeutil import ensure_utc, to_et, utc_now
 
 #: tiers the hosted dashboard never shows, whatever config says (mirrors app/components/data.py)
 ALWAYS_HIDDEN = frozenset({1})
 
-#: a slot the model writes wherever it means a number or a market's name (round 3 of the
-#: PR #102 review: the model never writes a number itself)
-_SLOT = re.compile(r"\{([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\}")  # any slot; unknown ones fail
-#: what may never appear in the model's own words, outside slots: a numeric character (any
-#: script: digits, ½, superscripts), a percent, per-mille or sigma sign, a unit word, or a number,
-#: fraction or period word
-_NUMBER_WORDS = re.compile(
-    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
-    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|"
-    r"seventy|eighty|ninety|hundreds?|thousands?|millions?|billions?|trillions?|dozens?|"
-    r"halfs?|halves|halved|thirds?|quarters?|fifths?|sixths?|sevenths?|eighths?|ninths?|"
-    r"tenths?|decades?|centur(?:y|ies)|twice|thrice|double[ds]?|triple[ds]?|quadruple[ds]?|"
-    r"percent|percentage|basis|bps?|pp|pts?|points?|sigma|single-digit|double-digit|"
-    # spans and dates claim a history the brief does not hold ("for a week", "since March")
-    r"days|weeks?|fortnights?|months?|years?|sessions|since|"
-    r"January|February|March|April|June|July|August|September|October|November|December|"
-    r"II|III|IV|VI|VII|VIII|IX|XI|XII|XIII|XIV|XV|XX)\b",
-    re.IGNORECASE,
-)
-_SIGNS = ("%", "‰", "σ", "Σ", "$", "€", "£", "¥")
-#: a slot with a letter, digit, sign, currency symbol or another slot right against it
-_GLUED = re.compile(
-    r"[\w+\-−–—$€£¥%‰σ}]\{[A-Za-z0-9_]+\.[A-Za-z0-9_]+\}"
-    r"|\{[A-Za-z0-9_]+\.[A-Za-z0-9_]+\}[\w+\-−–—$€£¥%‰σ{]"
-)
-#: direction words, by stem; "widen" and "steepen" mean up, "narrow", "tighten" and "flatten"
-#: mean down (spreads and curves). A change slot must agree with every one in its clause.
-_UP = re.compile(
-    r"\b(?:ris(?:e|es|en|ing)|rose|gain\w*|rall\w*|surg\w*|add(?:s|ed|ing)?|climb\w*|jump\w*|"
-    r"higher|up|upward\w*|advanc\w*|widen\w*|steepen\w*|firm(?:s|ed|ing)?|strengthen\w*|"
-    r"soar\w*|spik\w*|rebound\w*|recover\w*|increas\w*|bounc\w*|climbs?|lift\w*|grew|grow\w*)\b",
-    re.IGNORECASE,
-)
-_DOWN = re.compile(
-    r"\b(?:fell|fall(?:s|en|ing)?|drop\w*|declin\w*|slip\w*|slid(?:e|es|ing)?|narrow\w*|"
-    r"tighten\w*|flatten\w*|lower|down|downward\w*|decreas\w*|los(?:s|t|es|ing)|sank|sink\w*|"
-    r"sunk|tumbl\w*|plung\w*|slump\w*|retreat\w*|eas(?:e|ed|es|ing)|weaken\w*|soften\w*|"
-    r"dip(?:s|ped|ping)?|shed\w*|slipped)\b",
-    re.IGNORECASE,
-)
-_CLAUSE = re.compile(
-    r"[,;:—–]|\s(?:and|but|while|whereas|against|versus|vs\.?|as|though|although)\s",
-    re.IGNORECASE,
-)
-_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z{\"'(])")
+#: the most picks and contrasts a reply may hold; more are dropped
+MAX_ITEMS = 5
+MAX_CONTRASTS = 2
+SHOWS = ("move", "move_and_level", "move_and_sigma")
 _MINUS = "−"
 
 
+# ---------------------------------------------------------------------------
+# what may be picked
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
-class Slot:
-    """One value the note may use: the brief's exact display string and whose it is."""
+class Market:
+    """One market the note may describe, with the brief's own display strings."""
 
-    key: str  # "{ES_F.chg_1d}"
     instrument_id: str
-    kind: str  # name | level | chg_1d | sigma
-    shows: str  # "−2.7%", "79.33", "3.6σ", "S&P futures"
-    sign: str | None = None  # "+" | "-" for a signed change; None otherwise (zero, level, ...)
-    what: str = ""  # context for the model ("change since previous NYSE close (19 Nov)")
+    name: str  # the brief's display name ("E-mini S&P 500 futures")
+    kind: str  # price | spread | curve: decides the verb
+    change: str  # the brief's signed change ("−1.6%", "+27bp"); "" when there is none
+    level: str  # the brief's value ("6,012.25", "4.15%")
+    sigma: str | None  # "3.6σ" for a mover (ranked, at or above the warn level); else None
 
+    @property
+    def sign(self) -> int:
+        """+1, -1, or 0 for a change that displays as zero."""
+        if not any(c.isdigit() and c != "0" for c in self.change):
+            return 0
+        return -1 if self.change.startswith((_MINUS, "-")) else 1
 
-#: plain-word aliases of markets a sentence may name in its own words; the brief's own names
-#: (short label and full name) are added from the model
-_ALIASES: Mapping[str, tuple[str, ...]] = {
-    "ES_F": ("S&P futures", "S&P 500 futures", "S&P", "equity futures", "stock futures"),
-    "HY_OAS": ("high-yield spreads", "high-yield spread", "credit spreads", "credit spread",
-               "high yield", "junk"),
-    "VIX": ("VIX", "volatility"),
-    "BRENT": ("Brent",),
-    "WTI": ("WTI",),
-    "GOLD_F": ("gold",),
-    "GLD": ("GLD",),
-    "EURUSD": ("euro",),
-    "USDJPY": ("yen",),
-    "GBPUSD": ("sterling", "pound"),
-    "N225": ("Nikkei",),
-    "FTSE": ("FTSE",),
-    "DAX": ("DAX",),
-}  # fmt: skip
+    @property
+    def magnitude(self) -> str:
+        """The change without its sign ("1.6%"), as shown after a verb."""
+        return self.change.lstrip("+-" + _MINUS)
 
 
 def _display_name(row_name: str) -> str:
@@ -144,269 +96,240 @@ def _display_name(row_name: str) -> str:
     return re.sub(r"\s*\([^)]*\)", "", row_name).strip()
 
 
-def slots(model: BriefModel, hidden: Collection[int]) -> dict[str, Slot]:
-    """Every value the note may use, keyed by slot: each visible mover's name, level, change and
-    sigma, and each visible snapshot row's name, level and change. Nothing of a tier the hosted
-    dashboard hides (the stored note is shown there)."""
+def market_kind(instrument_id: str, name: str) -> str:
+    """``curve`` (the 2s10s spread: steepened/flattened), ``spread`` (a credit spread:
+    widened/narrowed) or ``price`` (prices, yields, FX, volatility: rose/fell)."""
+    if instrument_id == SPREAD_ID:
+        return "curve"
+    if instrument_id.endswith("_OAS") or "spread" in name.lower():
+        return "spread"
+    return "price"
+
+
+def markets(model: BriefModel, hidden: Collection[int]) -> dict[str, Market]:
+    """Every market the note may pick: each visible mover, then each visible snapshot row, with
+    the display strings the email shows for it. Only a mover carries its sigma (the ranking
+    every surface reads). Nothing of a tier the hosted dashboard hides."""
     rows = {r.instrument_id: r for r in model.rows()}
     visible = {i for i, r in rows.items() if r.tier is not None and r.tier not in hidden}
-    out: dict[str, Slot] = {}
-
-    def add(iid: str, kind: str, shows: str, what: str = "") -> None:
-        if not shows:
-            return
-        sign = None
-        if kind == "chg_1d":
-            sign = "+" if shows.startswith("+") else "-" if shows.startswith(_MINUS) else None
-        key = f"{{{iid}.{kind}}}"
-        out.setdefault(key, Slot(key, iid, kind, shows, sign, what))
-
+    out: dict[str, Market] = {}
     for m in model.movers:
-        if m.instrument_id not in visible:
-            continue
-        add(m.instrument_id, "name", _display_name(m.name))
-        add(m.instrument_id, "level", m.value_text, "latest value")
-        add(m.instrument_id, "chg_1d", m.change_text, f"change since {m.basis}")
-        add(m.instrument_id, "sigma", f"{m.sigma:.1f}σ", "size against its own recent daily moves")
+        if m.instrument_id in visible and m.instrument_id not in out:
+            out[m.instrument_id] = Market(
+                m.instrument_id,
+                _display_name(m.name),
+                market_kind(m.instrument_id, m.name),
+                m.change_text,
+                m.value_text,
+                f"{m.sigma:.1f}σ",
+            )
     for g in model.snapshot:
         for r in g.rows:
-            if r.instrument_id not in visible:
+            if r.instrument_id not in visible or r.instrument_id in out:
                 continue
-            row = rows.get(r.instrument_id)
-            add(r.instrument_id, "name", _display_name(row.name) if row else r.label)
-            add(r.instrument_id, "level", r.value_text, r.meta)
-            add(r.instrument_id, "chg_1d", r.change_text, "change")
+            row = rows[r.instrument_id]
+            out[r.instrument_id] = Market(
+                r.instrument_id,
+                _display_name(row.name),
+                market_kind(r.instrument_id, row.name),
+                r.change_text,
+                r.value_text,
+                None,  # sigma only for a ranked mover: a quiet move's sigma says nothing
+            )
     return out
 
 
-def facts(model: BriefModel, hidden: Collection[int]) -> dict[str, Any]:
-    """The note's only input: the read, the rules met, Check before using (words only) and the
-    slots with what each shows. No value of a hidden tier, no lineage."""
-    tiers = {r.instrument_id: r.tier for r in model.rows()}
-    visible = {i for i, t in tiers.items() if t is not None and t not in hidden}
+def allowed_contrasts(model: BriefModel, config: Config) -> frozenset[frozenset[str]]:
+    """The pairs a contrast may name: ``brief.related_pairs`` and the pairs Check before using
+    names."""
+    pairs = {frozenset(p.pair) for p in config.brief.related_pairs}
+    pairs |= {frozenset(c.instrument_ids) for c in model.caveats if len(c.instrument_ids) == 2}
+    return frozenset(p for p in pairs if len(p) == 2)
+
+
+def facts(model: BriefModel, config: Config, hidden: Collection[int]) -> dict[str, Any]:
+    """The note's only input: the read, the rules met, Check before using (words only), the
+    markets with their display strings, and the contrasts allowed. No hidden tier, no lineage."""
+    table = markets(model, hidden)
     read = model.read
     return {
         "brief": to_et(model.report_time).strftime("%a %d %b %Y, %H:%M ET"),
         "read": read.text if read is not None else "",
         "rules_met": [r.label for r in read.met] if read is not None else [],
         "moved_more_than_usual": [
-            m.instrument_id for m in model.movers if m.instrument_id in visible
+            m.instrument_id for m in model.movers if m.instrument_id in table
         ],
         "check_before_using": [
             {"item": c.title, "text": c.text}
             for c in model.caveats
-            if all(i in visible for i in c.instrument_ids)
+            if all(i in table for i in c.instrument_ids)
         ],
-        "slots": [
-            {"slot": sl.key, "market": sl.instrument_id, "shows": sl.shows, "what": sl.what}
-            for sl in slots(model, hidden).values()
+        "markets": [
+            {
+                "market_id": k.instrument_id,
+                "name": k.name,
+                "change": k.change,
+                "level": k.level,
+                "sigma": k.sigma,
+            }
+            for k in table.values()
         ],
+        "allowed_contrasts": sorted(
+            sorted(p) for p in allowed_contrasts(model, config) if p <= table.keys()
+        ),
     }
 
 
-def market_aliases(model: BriefModel, hidden: Collection[int]) -> dict[str, tuple[str, ...]]:
-    """The words that name each visible market in prose: the brief's short label and name, and
-    the plain aliases above. Used to tie a value slot to the market its clause names."""
-    out: dict[str, tuple[str, ...]] = {}
-    for r in model.rows():
-        if r.tier is None or r.tier in hidden:
-            continue
-        names = {r.label, _display_name(r.name), *_ALIASES.get(r.instrument_id, ())}
-        names.add(SHORT_LABELS.get(r.instrument_id, r.instrument_id))
-        out[r.instrument_id] = tuple(n for n in names if n and not any(c.isnumeric() for c in n))
-    return out
+def schema(ids: Sequence[str]) -> dict[str, Any]:
+    """The JSON schema the reply is held to: ids only, from today's markets."""
+    market = {"type": "string", "enum": list(ids)}
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "market_id": market,
+                        "show": {"type": "string", "enum": list(SHOWS)},
+                    },
+                    "required": ["market_id", "show"],
+                    "additionalProperties": False,
+                },
+            },
+            "contrasts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"a": market, "b": market},
+                    "required": ["a", "b"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["items", "contrasts"],
+        "additionalProperties": False,
+    }
 
 
-#: words that look like a forbidden stem but describe the market, not advice
-_ALLOWED_WORDS = re.compile(r"\b(?:sell-?offs?|buybacks?|sellers|buyers)\b", re.IGNORECASE)
+# ---------------------------------------------------------------------------
+# validation and the templates
+# ---------------------------------------------------------------------------
+
+_VERBS = {
+    "price": ("rose", "fell"),
+    "spread": ("widened", "narrowed"),
+    "curve": ("steepened", "flattened"),
+}
 
 
-def _forbidden(sentence: str, words: Collection[str]) -> str | None:
-    """The first forbidden word or phrase in ``sentence``, matched as a word stem ("sell" finds
-    "selling", "expect" finds "expected"); a phrase may hold one extra word ("will likely
-    rise"). "sell-off", "buyback", "buyers" and "sellers" are allowed."""
-    low = _ALLOWED_WORDS.sub(" ", sentence.lower())
-    for w in words:
-        parts = [re.escape(p) for p in w.split()]
-        pattern = r"\b" + r"\s+(?:[a-z]+\s+)?".join(parts) + r"[a-z]*\b"
-        if re.search(pattern, low):
-            return w
-    return None
+def _moved(k: Market) -> str:
+    """ "fell 1.6%" / "widened 27bp" / "was unchanged" (no sign after a verb)."""
+    if k.sign == 0:
+        return "was unchanged"
+    up, down = _VERBS[k.kind]
+    return f"{up if k.sign > 0 else down} {k.magnitude}"
+
+
+def _sentence(k: Market, show: str) -> tuple[str, int]:
+    """One market's sentence and the figures it shows."""
+    n = 0 if k.sign == 0 else 1
+    if show == "move_and_level":
+        at = "at" if k.sign == 0 else "to"
+        return f"{k.name} {_moved(k)} {at} {k.level}.", n + 1
+    if show == "move_and_sigma":
+        return f"{k.name} {_moved(k)}, a {k.sigma} day.", n + 1
+    return f"{k.name} {_moved(k)}.", n
+
+
+def _contrast(a: Market, b: Market) -> tuple[str, int]:
+    n = (a.sign != 0) + (b.sign != 0)
+    return f"{a.name} {_moved(a)} while {b.name} {_moved(b)}.", n
+
+
+def _pick(table: Mapping[str, Market], obj: object, field: str) -> Market | None:
+    """The market a reply field names, or None: the value is only ever a lookup key."""
+    value = obj.get(field) if isinstance(obj, Mapping) else None
+    return table.get(value) if isinstance(value, str) else None
 
 
 @dataclass(frozen=True)
-class Checked:
-    """What survived the check, and why each dropped sentence went."""
-
-    kept: tuple[str, ...]  # with every slot replaced by the brief's display string
-    n_numbers: int  # value slots filled in the kept sentences
-    dropped: tuple[str, ...]
+class Rendered:
+    sentences: tuple[str, ...]
+    n_numbers: int  # figures rendered
+    dropped: tuple[str, ...]  # why each pick went (never a reply string)
 
 
-def sentences(text: str) -> list[str]:
-    out = []
-    for line in text.replace("\r", "").split("\n"):
-        line = line.strip().lstrip("-•* ").strip()
-        out += [s.strip() for s in _SENTENCE.split(line) if s.strip()]
-    return out
-
-
-def _own_words(sentence: str) -> str:
-    return _SLOT.sub(" ", sentence)
-
-
-def _names_in(text: str, aliases: Mapping[str, tuple[str, ...]]) -> set[str]:
-    """Markets ``text`` names in its own words (whole words, case-insensitive)."""
-    found = set()
-    for iid, names in aliases.items():
-        for n in names:
-            if re.search(rf"(?<![\w&]){re.escape(n)}(?![\w])", text, re.IGNORECASE):
-                found.add(iid)
-                break
-    return found
-
-
-def _why_not(
-    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
-) -> str | None:
-    """Why ``sentence`` fails, or None (fail closed: anything the check cannot vouch for)."""
-    for m in _SLOT.finditer(sentence):
-        if m.group(0) not in table:
-            return f"unknown slot {m.group(0)}"
-    glued = _GLUED.search(sentence)
-    if glued:  # "{ES_F.level}k", "-{UST_2Y.level}", "${X}", "{X}{Y}": text that edits a figure
-        return "text touches a slot, so the figure would not be the brief's own"
-    own = _own_words(sentence)
-    if any(ch.isnumeric() for ch in own):
-        return "it writes a number itself instead of a slot"
-    if any(sign in own for sign in _SIGNS):
-        return "it writes a unit sign itself instead of a slot"
-    word = _NUMBER_WORDS.search(own)
-    if word:
-        return f"number or unit word {word.group(0)!r} outside a slot"
-    problem = _direction_problem(sentence, table, aliases)
-    if problem is not None:
-        return problem
-    clauses = [c for c in _CLAUSE.split(sentence) if c.strip()]
-    sentence_markets = {table[m.group(0)].instrument_id for m in _SLOT.finditer(sentence)
-                        if table[m.group(0)].kind == "name"} | _names_in(own, aliases)  # fmt: skip
-    for clause in clauses:
-        used = [table[m.group(0)] for m in _SLOT.finditer(clause)]
-        named = {s.instrument_id for s in used if s.kind == "name"} | _names_in(
-            _own_words(clause), aliases
-        )
-        for sl in used:
-            if sl.kind == "name":
-                continue
-            if named and sl.instrument_id not in named:
-                return f"{sl.key} belongs to another market than the one its clause names"
-            if not named and sl.instrument_id not in sentence_markets:
-                return f"{sl.key} is used without naming its market"
-    return None
-
-
-def _blank_slots(text: str) -> str:
-    """``text`` with each slot blanked out, keeping every other character's position."""
-    return _SLOT.sub(lambda m: " " * len(m.group(0)), text)
-
-
-def _mentions(
-    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
-) -> list[tuple[int, str]]:
-    """Where each market is mentioned: its slots (any kind) and its plain names."""
-    out = [(m.start(), table[m.group(0)].instrument_id) for m in _SLOT.finditer(sentence)]
-    own = _blank_slots(sentence)
-    for iid, names in aliases.items():
-        for n in names:
-            pattern = rf"(?<![\w&]){re.escape(n)}(?![\w])"
-            out += [(m.start(), iid) for m in re.finditer(pattern, own, re.IGNORECASE)]
-    return sorted(out)
-
-
-def _claims(
-    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
-) -> list[tuple[str | None, str, str]]:
-    """Each direction word as ``(market it speaks of, "+" or "-", the word)``: the market
-    mentioned nearest before it in the sentence ("S&P futures rose sharply, ..."), else the
-    nearest after it ("Higher VIX ..."); None when the sentence names no market."""
-    own = _blank_slots(sentence)
-    words = [(m.start(), "+", m.group(0)) for m in _UP.finditer(own)]
-    words += [(m.start(), "-", m.group(0)) for m in _DOWN.finditer(own)]
-    mentions = _mentions(sentence, table, aliases)
-    out: list[tuple[str | None, str, str]] = []
-    for pos, sign, word in sorted(words):
-        before = [iid for p, iid in mentions if p < pos]
-        after = [iid for p, iid in mentions if p > pos]
-        out.append((before[-1] if before else (after[0] if after else None), sign, word))
-    return out
-
-
-def _direction_problem(
-    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]]
-) -> str | None:
-    """Why a direction word in ``sentence`` disagrees with the brief, or None. Every direction
-    claim must be about a market whose change the brief shows, with that change's sign (PR
-    #102 review round 3): "Brent rose" when Brent fell, or "S&P futures rose" in a clause with
-    no slot, is dropped like a wrong number."""
-    for iid, sign, word in _claims(sentence, table, aliases):
-        if iid is None:
-            return f"{word!r} speaks of no market the brief names"
-        change = table.get(f"{{{iid}.chg_1d}}")
-        if change is None:
-            return f"{word!r} gives {iid} a direction, but the brief shows no change for it"
-        if change.sign is None:
-            return f"{word!r} gives {iid} a direction, but it did not move"
-        if change.sign != sign:
-            said = "rose" if sign == "+" else "fell"
-            return f"{word!r} says {iid} {said}, but the brief shows {change.shows}"
-    return None
-
-
-def _fill(
-    sentence: str, table: Mapping[str, Slot], aliases: Mapping[str, tuple[str, ...]] | None = None
-) -> str:
-    """The sentence with each slot replaced by the brief's display string. A change whose
-    direction the words already state (and the check has confirmed) loses its sign: "fell
-    1.6%", as in the approved mockup, not "fell" followed by a minus sign."""
-    directed = {iid for iid, _, _ in _claims(sentence, table, aliases or {}) if iid is not None}
-
-    def one(m: re.Match[str]) -> str:
-        sl = table[m.group(0)]
-        if sl.kind == "chg_1d" and sl.instrument_id in directed:
-            return sl.shows.lstrip("+" + _MINUS)
-        return sl.shows
-
-    return _SLOT.sub(one, sentence)
-
-
-def check(
-    reply: str,
-    table: Mapping[str, Slot],
-    forbidden: Collection[str],
-    limit: int,
-    aliases: Mapping[str, tuple[str, ...]] | None = None,
-) -> Checked:
-    """Keep the sentences that pass every rule (module docstring), with their slots filled; at
-    most ``limit``. ``table`` is :func:`slots`; ``aliases`` is :func:`market_aliases`."""
-    aliases = aliases or {}
-    kept: list[str] = []
+def render(
+    reply: object,
+    table: Mapping[str, Market],
+    contrasts: Collection[frozenset[str]],
+    max_sentences: int,
+) -> Rendered:
+    """Validate a parsed reply against today's markets and render the kept picks. A reply value
+    is only ever used as a key into ``table`` or ``SHOWS``; nothing of it is copied out."""
     dropped: list[str] = []
-    total = 0
-    for s in sentences(reply):
-        word = _forbidden(_own_words(s), forbidden)
-        if word is not None:
-            dropped.append(f"forbidden word {word!r}")
+    if not isinstance(reply, Mapping):
+        return Rendered((), 0, ("the reply was not an object",))
+    raw_items = reply.get("items")
+    raw_pairs = reply.get("contrasts")
+    items = list(raw_items) if isinstance(raw_items, list) else []
+    pairs = list(raw_pairs) if isinstance(raw_pairs, list) else []
+    if raw_items is not None and not isinstance(raw_items, list):
+        dropped.append("items was not a list")
+    if raw_pairs is not None and not isinstance(raw_pairs, list):
+        dropped.append("contrasts was not a list")
+    if len(items) > MAX_ITEMS:
+        dropped.append(f"{len(items) - MAX_ITEMS} items over the limit of {MAX_ITEMS}")
+    if len(pairs) > MAX_CONTRASTS:
+        dropped.append(f"{len(pairs) - MAX_CONTRASTS} contrasts over the limit of {MAX_CONTRASTS}")
+
+    kept_pairs: list[tuple[Market, Market]] = []
+    for p in pairs[:MAX_CONTRASTS]:
+        a, b = _pick(table, p, "a"), _pick(table, p, "b")
+        if a is None or b is None:
+            dropped.append("a contrast named a market not in today's brief")
             continue
-        why = _why_not(s, table, aliases)
-        if why is not None:
-            dropped.append(why)
-            continue
-        if len(kept) >= limit:
-            dropped.append("over the sentence limit")
-            continue
-        kept.append(_fill(s, table, aliases))
-        total += sum(1 for m in _SLOT.finditer(s) if table[m.group(0)].kind != "name")
-    return Checked(tuple(kept), total, tuple(dropped))
+        ids = frozenset((a.instrument_id, b.instrument_id))
+        name = f"contrast {a.instrument_id}/{b.instrument_id}"
+        if len(ids) < 2 or ids not in contrasts:
+            dropped.append(f"{name} is not an allowed pair")
+        elif not a.change or not b.change:
+            dropped.append(f"{name} has no change to show")
+        elif any(frozenset((x.instrument_id, y.instrument_id)) == ids for x, y in kept_pairs):
+            dropped.append(f"{name} repeated")
+        else:
+            kept_pairs.append((a, b))
+    in_pairs = {k.instrument_id for pair in kept_pairs for k in pair}
+
+    out: list[tuple[str, int]] = []  # each sentence and the figures it shows
+    seen: set[str] = set()
+    for item in items[:MAX_ITEMS]:
+        k = _pick(table, item, "market_id")
+        show = item.get("show") if isinstance(item, Mapping) else None
+        if k is None:
+            dropped.append("an item named a market not in today's brief")
+        elif not isinstance(show, str) or show not in SHOWS:
+            dropped.append(f"{k.instrument_id}: unknown show")
+        elif k.instrument_id in seen:
+            dropped.append(f"{k.instrument_id}: repeated")
+        elif k.instrument_id in in_pairs:
+            dropped.append(f"{k.instrument_id}: already in a contrast")
+        elif not k.change:
+            dropped.append(f"{k.instrument_id}: no change to show")
+        elif show == "move_and_level" and not k.level:
+            dropped.append(f"{k.instrument_id}: no level to show")
+        elif show == "move_and_sigma" and (k.sigma is None or k.sign == 0):
+            dropped.append(f"{k.instrument_id}: sigma asked of a move that is not ranked")
+        else:
+            seen.add(k.instrument_id)
+            out.append(_sentence(k, show))
+    out += [_contrast(a, b) for a, b in kept_pairs]
+    if len(out) > max_sentences:
+        dropped.append(f"{len(out) - max_sentences} sentences over the limit of {max_sentences}")
+        out = out[:max_sentences]
+    return Rendered(tuple(t for t, _ in out), sum(n for _, n in out), tuple(dropped))
 
 
 def hidden_tiers(config: Config) -> frozenset[int]:
@@ -415,25 +338,17 @@ def hidden_tiers(config: Config) -> frozenset[int]:
 
 
 def prompt(settings: NoteSettings) -> str:
-    words = ", ".join(f'"{w}"' for w in settings.forbidden_words)
-    n = settings.max_sentences
+    n = min(settings.max_sentences, MAX_ITEMS)
     return (
-        "You write the morning note for Desk Brief, a markets data brief read by a hedge-fund "
-        f"desk. Write {max(1, n - 1)} or {n} short sentences in plain English about what moved "
-        "overnight and what to check, using only the facts in the user message.\n"
-        "Rules:\n"
-        "- Never write a number, a number word, a percent or sigma sign, or a unit yourself. "
-        "Wherever you mean a value, write its slot exactly as listed (for example "
-        "{ES_F.chg_1d} or {HY_OAS.sigma}); it is replaced by the brief's own figure. Name "
-        "markets with their {X.name} slot or a plain name, and use a market's value slots only "
-        "in a clause about that market.\n"
-        "- A change slot's direction must match your words: say rose, widened or steepened only "
-        "for a change shown with +, and fell, narrowed or flattened only for one shown with "
-        "the minus sign.\n"
-        "- Describe what happened. Give no advice, signals, recommendations, price targets, "
-        "forecasts or predictions, and never say what a market will, may, could or should do.\n"
-        f"- Do not use these words: {words}.\n"
-        "- One sentence per line. No headings, lists, markdown or preamble."
+        "You choose what the morning note of Desk Brief, a markets data brief read by a "
+        "hedge-fund desk, says. You write no prose: code renders every sentence from fixed "
+        "templates with the brief's own figures. Using only the facts in the user message, "
+        f"pick up to {n} markets worth a trader's attention this morning, most important "
+        'first, and for each say what to show: "move", "move_and_level", or '
+        '"move_and_sigma" (only for a market whose sigma is given). Optionally pick up to '
+        f"{MAX_CONTRASTS} contrasts, only from allowed_contrasts, where two related markets "
+        "moved differently. Prefer the markets that moved more than usual and those named in "
+        "Check before using. Reply with the JSON object the schema asks for and nothing else."
     )
 
 
@@ -532,8 +447,11 @@ def write_note(
         log.info("note.skipped", reason=NOTE_NO_KEY)
         return Note(reason=NOTE_NO_KEY, model=s.model)
     hidden = hidden_tiers(config)
-    payload = facts(model, hidden)
-    table = slots(model, hidden)
+    table = markets(model, hidden)
+    if not table:
+        return Note(reason="there is no market in today's brief to describe", model=s.model)
+    pairs = allowed_contrasts(model, config)
+    payload = facts(model, config, hidden)
     system, user = prompt(s), "Facts (JSON):\n" + json.dumps(payload, ensure_ascii=False)
     worst = _cost(s, (len(system) + len(user)) // 3 + 200, s.max_output_tokens)
     if spent_usd + worst > s.monthly_cap_usd:
@@ -548,7 +466,10 @@ def write_note(
             system=system,
             messages=[{"role": "user", "content": user}],
             thinking={"type": "adaptive"},
-            output_config={"effort": s.effort},
+            output_config={
+                "effort": s.effort,
+                "format": {"type": "json_schema", "schema": schema(sorted(table))},
+            },
         )
     except Exception as exc:  # the key is never logged; only the error's type
         kind = type(exc).__name__
@@ -563,7 +484,7 @@ def write_note(
     except Exception:  # an unreadable usage block: count the worst case
         cost = worst
     try:
-        return _read_reply(response, s, table, market_aliases(model, hidden), cost)
+        return _read_reply(response, s, table, pairs, cost)
     except Exception as exc:
         log.warning("note.unexpected", error=type(exc).__name__)
         reason = f"the note could not be written ({type(exc).__name__})"
@@ -573,8 +494,8 @@ def write_note(
 def _read_reply(
     response: Any,
     s: NoteSettings,
-    table: Mapping[str, Slot],
-    aliases: Mapping[str, tuple[str, ...]],
+    table: Mapping[str, Market],
+    pairs: Collection[frozenset[str]],
     cost: float,
 ) -> Note:
     log = get_logger()
@@ -586,18 +507,20 @@ def _read_reply(
     text = _reply_text(response).strip()
     if not text:
         return Note(reason="the reply was empty", model=s.model, cost_usd=cost)
-    result = check(text, table, s.forbidden_words, s.max_sentences, aliases)
+    try:
+        reply = json.loads(text)
+    except ValueError:
+        log.info("note.malformed")
+        return Note(reason="the reply was not the structured output asked for", model=s.model,
+                    cost_usd=cost)  # fmt: skip
+    result = render(reply, table, pairs, s.max_sentences)
     for why in result.dropped:
-        log.info("note.sentence_dropped", reason=why)
-    if not result.kept:
-        return Note(
-            reason="no sentence passed the number check",
-            dropped=result.dropped,
-            model=s.model,
-            cost_usd=cost,
-        )
+        log.info("note.pick_dropped", reason=why)
+    if not result.sentences:
+        return Note(reason="no pick in the reply was valid", dropped=result.dropped,
+                    model=s.model, cost_usd=cost)  # fmt: skip
     return Note(
-        sentences=result.kept,
+        sentences=result.sentences,
         n_checked=result.n_numbers,
         n_numbers=result.n_numbers,
         dropped=result.dropped,
@@ -672,15 +595,19 @@ def note_of(doc: object) -> Note | None:
 
 
 __all__ = [
-    "Checked",
-    "Slot",
-    "check",
+    "MAX_CONTRASTS",
+    "MAX_ITEMS",
+    "Market",
+    "Rendered",
+    "allowed_contrasts",
     "facts",
-    "market_aliases",
+    "market_kind",
+    "markets",
     "month_spend",
     "note_of",
     "record_spend",
-    "slots",
+    "render",
+    "schema",
     "stored_note",
     "with_note",
     "write_note",

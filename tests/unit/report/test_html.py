@@ -283,7 +283,7 @@ def test_note_or_no_note_today(model: BriefModel) -> None:
     kept = replace(model, note=Note(("S&P futures fell 1.6%.",), 1, 1, model="m"))
     html = render_html(kept)
     assert "S&amp;P futures fell 1.6%." in html
-    assert "Every number checked (1 of 1)." in html
+    assert "Every number matches the stored data (1 of 1)." in html
     gone = replace(model, note=Note(reason="the API timed out"))
     assert "No note today: the API timed out." in render_html(gone)
     assert "No note today: the API timed out." in render_text(gone)
@@ -384,17 +384,24 @@ def _golden_model(tmp_path: Path) -> BriefModel:
 
 
 def _golden_with_note(tmp_path: Path) -> BriefModel:
-    """The golden model with a note made by the real slot pipeline (a recorded reply in slots,
-    filled and checked by ``note.check``), not a hand-written sentence (review round 3)."""
-    from deskbrief.report.note import check, hidden_tiers, market_aliases, slots
+    """The golden model with a note made by the real templated pipeline: a recorded reply
+    (picks only) validated and rendered by ``note.render`` from the model's own markets, never
+    a hand-written sentence (PR #102 rounds 3-4)."""
+    from deskbrief.report.note import allowed_contrasts, hidden_tiers, markets, render
 
     m = _golden_model(tmp_path)
     config = fixture_config()
     hidden = hidden_tiers(config)
-    reply = "{ES_F.name} fell {ES_F.chg_1d}, a {ES_F.sigma} move.\nThe euro barely moved."
-    out = check(reply, slots(m, hidden), config.brief.note.forbidden_words, 5,
-                market_aliases(m, hidden))  # fmt: skip
-    note = Note(out.kept, out.n_numbers, out.n_numbers, model="synthetic", written_at=MON_0700)
+    reply = {
+        "items": [
+            {"market_id": "ES_F", "show": "move_and_sigma"},
+            {"market_id": "EURUSD", "show": "move"},
+        ],
+        "contrasts": [],
+    }
+    out = render(reply, markets(m, hidden), allowed_contrasts(m, config), 5)
+    note = Note(out.sentences, out.n_numbers, out.n_numbers, model="synthetic",
+                written_at=MON_0700)  # fmt: skip
     events = (
         Event(MON, "08:30", "Durable goods orders", "FRED", "release", "Oct", "+1.4%"),
         Event(MON, "", "4-Week Bill auction", "Treasury", "auction"),

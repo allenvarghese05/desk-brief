@@ -13,8 +13,8 @@ Friday 20 Nov 2026 at 07:00 ET (the day after that store's last day):
   0009999999;
 * Friday's scheduled releases and a Treasury auction in ``events`` (titles are generic names,
   times invented), with the fetches that wrote them;
-* an archived brief whose stored note was written from the brief's own numbers and passed the
-  note's number check (no API call).
+* an archived brief whose stored note was rendered by the note templates from a synthetic
+  reply (the picks a model would return; no API call).
 
 Command (one line, from the repo root, after ``synth_store.py DIR``)::
 
@@ -41,7 +41,7 @@ from deskbrief.config import load_config
 from deskbrief.models import JobKind, RunContext, Trigger
 from deskbrief.query import overnight_changes, series_by_feed, series_key
 from deskbrief.report.model import BriefModel, Note
-from deskbrief.report.note import check, hidden_tiers, market_aliases, slots
+from deskbrief.report.note import allowed_contrasts, hidden_tiers, markets, render
 from deskbrief.schemas import to_frame
 from deskbrief.store import duck
 from deskbrief.store.backend import report_key
@@ -260,27 +260,23 @@ def _filings(config: Any, store: LocalBackend) -> None:
 
 
 def _note(config: Any, store: LocalBackend) -> None:
-    """Archive a brief whose note was written from its own numbers and passed the check."""
+    """Archive a brief whose note was rendered by the templates from a synthetic reply (the
+    picks a model would return), so no API is called."""
     conn = duck.connect(store, config)
     model = BriefModel.from_store(conn, config, FRI, NOW)
     conn.close()
-    by = {m.instrument_id for m in model.movers}
-    parts = []
-    if "HY_OAS" in by:
-        parts.append(
-            "{HY_OAS.name} widened {HY_OAS.chg_1d} to {HY_OAS.level}, a {HY_OAS.sigma} move."
-        )
-    if "ES_F" in by:
-        parts.append("{ES_F.name} fell {ES_F.chg_1d}, with VIX higher.")
-    if "BRENT" in by:
-        parts.append("{BRENT.name} fell {BRENT.chg_1d}, far more than WTI; check that gap first.")
     hidden = hidden_tiers(config)
+    reply = {
+        "items": [
+            {"market_id": "HY_OAS", "show": "move_and_sigma"},
+            {"market_id": "ES_F", "show": "move_and_level"},
+            {"market_id": "VIX", "show": "move"},
+        ],
+        "contrasts": [{"a": "BRENT", "b": "WTI"}],
+    }
     s = config.brief.note
-    out = check(
-        "\n".join(parts), slots(model, hidden), s.forbidden_words, s.max_sentences,
-        market_aliases(model, hidden),
-    )  # fmt: skip
-    note = Note(out.kept, out.n_numbers, out.n_numbers, model=f"{s.model} (synthetic)")
+    out = render(reply, markets(model, hidden), allowed_contrasts(model, config), s.max_sentences)
+    note = Note(out.sentences, out.n_numbers, out.n_numbers, model=f"{s.model} (synthetic)")
     body = replace(model, note=note).to_json().encode()
     store.put_bytes(report_key(FRI, 1, "model.json"), body)
 

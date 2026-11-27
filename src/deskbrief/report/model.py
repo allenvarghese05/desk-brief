@@ -303,17 +303,17 @@ NOTE_SILENT_REASONS = frozenset({NOTE_NO_KEY, NOTE_OFF})
 class Note:
     """The morning note (P-024, card T66), stored with the brief so no reader calls the API.
 
-    ``sentences`` survived ``report.note.check``: the model wrote every figure as a slot, which
-    was filled with the brief's own display string, and no sentence holds a number of its own, a
-    forbidden word, or a direction or market that disagrees with the brief. With no sentence (no
-    key, an API error, a timeout, the spend cap, or nothing surviving) ``reason`` says why, in
-    words a reader sees after "No note today: "."""
+    ``sentences`` were rendered by ``report.note.render`` from fixed templates and the brief's
+    own display strings; the model only picked markets and what to show (PR #102 round 4), so
+    no text of its reply is in them. With no sentence (no key, an API error, a timeout, the
+    spend cap, or no valid pick) ``reason`` says why, in words a reader sees after "No note
+    today: "."""
 
     sentences: tuple[str, ...] = ()
-    n_checked: int = 0  # value slots filled in the kept sentences
-    n_numbers: int = 0  # the same count (kept for the badge's "n of n"; 0 hides the badge)
+    n_checked: int = 0  # figures rendered, each the brief's own display string
+    n_numbers: int = 0  # the same count (the badge's "n of n"; 0 hides the badge)
     reason: str | None = None
-    dropped: tuple[str, ...] = ()  # why each dropped sentence went (logged, never shown)
+    dropped: tuple[str, ...] = ()  # why each dropped pick went (logged, never shown)
     model: str = ""
     cost_usd: float = 0.0
     written_at: datetime | None = None  # the brief it was written for (the dashboard says so)

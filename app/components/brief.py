@@ -51,9 +51,9 @@ def _read_line(read: Read | None) -> str:
 
 
 def _note(note: Note | None) -> str:
-    """The note one sentence per line, its time and "every number checked (n of n)"; or "No
-    note today" with a reason that is news; or nothing (no note stored, or a configuration
-    state such as no API key, which goes to the log and Data health)."""
+    """The note one sentence per line, its time and "every number matches the stored data (n of
+    n)"; or "No note today" with a reason that is news; or nothing (no note stored, or a
+    configuration state such as no API key, which goes to the log and Data health)."""
     if note is None or not note.shown:
         return ""
     if not note.sentences:
@@ -61,7 +61,7 @@ def _note(note: Note | None) -> str:
     lines = "".join(f'<p class="db-note-s">{escape(s)}</p>' for s in note.sentences)
     at = f"Note at {to_et(note.written_at):%H:%M} ET" if note.written_at else ""
     checked = (
-        f'<span class="db-ok" aria-hidden="true">✓</span> every number checked '
+        f'<span class="db-ok" aria-hidden="true">✓</span> every number matches the stored data '
         f"({note.n_checked} of {note.n_numbers})"
         if note.n_numbers  # a note without figures has nothing to vouch for
         else ""

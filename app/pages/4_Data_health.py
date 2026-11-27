@@ -196,7 +196,10 @@ def _attention(bad: pd.DataFrame) -> str:
 # email and Home leave unsaid (no API key, turned off)
 _note = data._stored_note(ctx.config, os.environ, ctx.today)
 if _note.sentences:
-    _note_line = f"Morning note: written, {len(_note.sentences)} sentences, every number checked."
+    _note_line = (
+        f"Morning note: written, {len(_note.sentences)} sentences, "
+        "every number matches the stored data."
+    )
 else:
     _note_line = f"Morning note: none today ({_note.reason or 'no reason recorded'})."
 st.caption(_note_line)

@@ -29,7 +29,7 @@ def test_the_brief_pane_shows_the_stored_note_with_its_time() -> None:
     pane = brief.pane(None, (), et(MON, "06:15"), None, note)
     assert '<p class="db-note-s">S&amp;P futures fell 1.6%.</p>' in pane
     assert "Note at 06:15 ET" in pane
-    assert "every number checked (1 of 1)" in pane
+    assert "every number matches the stored data (1 of 1)" in pane
     assert '<div class="db-label">The brief<span>Mon 06:15 ET</span></div>' in pane
     timed_out = brief.pane(None, (), MON_0700, None, Note(reason="the API timed out"))
     assert "No note today: the API timed out." in timed_out
@@ -122,4 +122,4 @@ def test_a_note_without_figures_has_no_checked_line() -> None:
     from app.components import brief
 
     pane = brief.pane(None, (), MON_0700, None, Note(("S&P futures fell overnight.",), 0, 0))
-    assert "every number checked" not in pane
+    assert "every number matches" not in pane
